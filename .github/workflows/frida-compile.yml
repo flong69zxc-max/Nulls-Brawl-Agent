@@ -35,7 +35,6 @@ jobs:
           key: npm-frida-compile-17-${{ runner.os }}-v2
           restore-keys: |
             npm-frida-compile-17-
-            npm-frida-compile-
 
       - name: Get npm global root
         id: npmroot
@@ -43,7 +42,6 @@ jobs:
           set -euo pipefail
           ROOT=$(npm root -g)
           echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "npm global root: $ROOT"
 
       - uses: actions/cache@v4
         id: cache-frida-compile
@@ -57,14 +55,6 @@ jobs:
           set -euo pipefail
           npm install -g frida-compile@17
 
-      - name: Verify frida-compile
-        run: |
-          set -euo pipefail
-          which frida-compile
-          ls -la $(which frida-compile)
-          ROOT=$(npm root -g)
-          node -e "console.log('frida-compile version: ' + require('$ROOT/frida-compile/package.json').version)"
-
       - name: Compile scripts
         run: |
           set -euo pipefail
@@ -74,45 +64,21 @@ jobs:
           for f in scripts/frida-scripts/*.js; do
             base=$(basename "$f" .js)
             case "$base" in
-              _*|*.d) echo "skip $f"; continue ;;
+              _*|*.d) continue ;;
             esac
             echo "=== compile $f ==="
             frida-compile "$f" -o "build/${base}.js"
+            rm -f "build/${base}.js.map"
             ls -la "build/${base}.js"
-            echo "--- first 64 bytes ---"
-            xxd -l 64 "build/${base}.js" || true
             count=$((count + 1))
           done
           shopt -u nullglob
           echo "compiled: $count"
           test "$count" -gt 0
 
-      - name: Verify output
-        run: |
-          set -euo pipefail
-          for f in build/*.js; do
-            echo "--- $f ---"
-            file "$f"
-            wc -c "$f"
-            wc -l "$f"
-          done
-
-      - name: Report head
-        if: always()
-        run: |
-          for f in build/*.js; do
-            echo "=== HEAD $f ==="
-            head -c 2000 "$f" || true
-            echo
-            echo "=== TAIL $f ==="
-            tail -c 500 "$f" || true
-            echo
-          done
-
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: frida-compiled
           path: build/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
