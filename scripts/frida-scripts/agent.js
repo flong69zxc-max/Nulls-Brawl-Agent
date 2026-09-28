@@ -1,175 +1,40 @@
 import ObjC from "frida-objc-bridge";
 
-const LOG_NAME = "agent.log";
-const CFG_NAME = "agent_config.json";
+const LOG_NAME = "modmenu.log";
+const CFG_NAME = "modmenu_config.json";
 const UPDATED = "updated";
-const TEST_NAME = ".__agent_write_test";
+const TEST_NAME = ".__modmenu_write_test";
 const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
 
+const POSITIONS = ["bottom_left", "bottom_right", "top_left", "top_right"];
+
 const DEFAULTS = {
-  patch: false,
-  alert: true,
-  alert_delay_ms: 5000,
-  alert_tries: 40,
-  alert_try_ms: 500,
-  alert_auto_dismiss_ms: 0,
-  reapply_ms: [3000, 8000, 15000],
+  enabled: true,
+  position: "bottom_left",
+  text: "MOD MENU",
+  color_rgb: [255, 255, 255],
   log_path: "",
   docs_path: "",
-  scan_strings: false,
-  scan_dev_flags: false,
-  scan_delay_ms: 10000,
-  scan_max_hits: 8,
-  scan_min_length: 4,
-  scan_protections: ["r--", "r-x"],
-  scan_max_region_mb: 64,
-  scan_result_file: "scan_result.json",
-  targets: [
-    { name: "isDev", rva: "0xd93da0", type: "u8", value: 1 }
-  ]
-};
-
-const STRING_ANCHORS = {
-  "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
-  "LogicVersion_isProduction": ["isProduction"],
-  "SCIDConfig_isDevBuild": ["isDevBuild"],
-  "DebugMenu": ["DebugMenu"],
-  "devMenu": ["devMenu"],
-  "Developer": ["Developer"],
-  "cheats": ["cheats"],
-  "CheatsEnabled": ["CheatsEnabled"],
-  "GodMode": ["GodMode"],
-  "SCID": ["SCID"],
-  "LogicBattleModeClient_update": ["LogicBattleModeClient"],
-  "BattleScreen_activateSkill": ["activateSkill"],
-  "Gui_showFloaterTextAtDefaultPos": ["showFloaterText"],
-  "StringCtor": ["String not found:"],
-  "SCIDConfig__getBool": ["DisableIngameFriends"],
-  "LogicCharacterData_getCollisionRadius": ["CollisionRadius"],
-  "LogicProjectileData_getRadius": ["ProjectileRadius"],
-  "ClientInputManager_addInput": ["addInput"],
-  "ResourceManager__isResourceLoaded": ["isResourceLoaded"],
-  "MessageManager__receiveMessage": ["receiveMessage"],
-  "MessageManager__sendMessage": ["sendMessage"],
-  "LogicBattleModeClient_getOwnCharacter": ["getOwnCharacter"],
-  "LogicGameObjectClient_getX": ["getX"],
-  "LogicGameObjectClient_getY": ["getY"],
-  "LogicGameObjectClient_getZ": ["getZ"],
-  "Sprite_Sprite": ["Sprite"],
-  "TextField_setText": ["setText"],
-  "ScrollArea__scrollTo": ["scrollTo"],
-  "DisplayObject__setXY": ["setXY"],
-  "MovieClip__getTextFieldByName": ["getTextFieldByName"],
-  "Sprite__addChild": ["addChild"],
-  "Sprite__removeChild": ["removeChild"],
-  "LogicSkillData__getMsBetweenAttacks": ["MsBetweenAttacks"],
-  "LogicSkillData__getActiveTime": ["ActiveTime"],
-  "LogicSkillData__getCastingRange": ["CastingRange"],
-  "LogicSkillData__getRechargeTime": ["RechargeTime"],
-  "LogicSkillData__getMaxCharge": ["MaxCharge"],
-  "LogicProjectileData_getSpeed": ["ProjectileSpeed"],
-  "LogicProjectileData_getRendering": ["ProjectileRendering"],
-  "LogicProjectileData__isBeam": ["isBeam"],
-  "LogicProjectileData__getNumEarlyTicks": ["NumEarlyTicks"],
-  "LogicTileData__blocksMovement": ["BlocksMovement"],
-  "LogicTileData__blocksProjectiles": ["BlocksProjectiles"],
-  "LogicBattleModeClient__getTileMap": ["getTileMap"],
-  "LogicBattleModeClient__getOwnPlayerIndex": ["getOwnPlayerIndex"],
-  "LogicBattleModeClient__setRandomSeed": ["setRandomSeed"],
-  "LogicBattleModeClient__setPlayerAvatar": ["setPlayerAvatar"],
-  "LogicCharacterClient__getWeaponSkill": ["getWeaponSkill"],
-  "LogicCharacterClient__getSkillAt": ["getSkillAt"],
-  "LogicCharacterClient__getCarryableData": ["getCarryableData"],
-  "LogicCharacterClient__getLinkedCarryable": ["getLinkedCarryable"],
-  "LogicCharacterClient__isImmuneOrUntargetable": ["isImmuneOrUntargetable"],
-  "LogicGameObjectManagerClient__getGameObjects": ["getGameObjects"],
-  "LogicGameObjectManagerClient__findGameObject": ["findGameObject"],
-  "LogicProjectileServer__shootProjectile": ["shootProjectile"],
-  "LogicProjectileServer__runEarlyTicks": ["runEarlyTicks"],
-  "GlobalID__getInstanceID": ["getInstanceID"],
-  "LogicPlayerMap__save": ["save"],
-  "LogicPlayerMapUtil__tileDataToTileCode": ["tileDataToTileCode"],
-  "LogicRandom__setIteratedRandomSeed": ["setIteratedRandomSeed"],
-  "LogicLongToCodeConverterUtil__convert": ["convert"],
-  "LogicLongToCodeConverterUtil__toCode": ["toCode"],
-  "ResourceListener__addFile": ["addFile"],
-  "String__format": ["format"],
-  "FramerateManager__setSegment": ["setSegment"],
-  "FramerateManager__setLimit": ["setLimit"],
-  "Application__copyString": ["copyString"],
-  "BattleScreen__calculateProjectilePath": ["calculateProjectilePath"],
-  "BattleScreen__joystickToWorld": ["joystickToWorld"],
-  "BattleScreen__shouldShowAccessoryButton": ["shouldShowAccessoryButton"],
-  "BattleScreen__updateCameraParameters": ["updateCameraParameters"],
-  "BattleScreen__stopWithStick": ["stopWithStick"],
-  "BattleScreen__handleTouchReleased": ["handleTouchReleased"],
-  "BattleScreen__updateMovement": ["updateMovement"],
-  "BattleScreen__updateAutoshoot": ["updateAutoshoot"],
-  "BattleScreen__tryToActivateSkill": ["tryToActivateSkill"],
-  "BattleScreen_getClosestTargetForAutoshoot": ["getClosestTargetForAutoshoot"],
-  "CombatHUD__toggleEditing": ["toggleEditing"],
-  "CombatHUD__setShootStickState": ["setShootStickState"],
-  "CombatHUD__setMoveStickState": ["setMoveStickState"],
-  "CombatHUD__sendPinCommand": ["sendPinCommand"],
-  "CombatHUD__sendSprayCommand": ["sendSprayCommand"],
-  "Character__updateHealthBar": ["updateHealthBar"],
-  "GUI__getDefaultFloaterPos": ["getDefaultFloaterPos"],
-  "GUI__showFloaterTextAt": ["showFloaterTextAt"],
-  "GUI__showPopup": ["showPopup"],
-  "GameSliderComponent__setValueBounds": ["setValueBounds"],
-  "MapEditorModifierPopup__addModifierItem": ["addModifierItem"],
-  "ScrollArea__updateBounds": ["updateBounds"],
-  "ScrollArea__addContent": ["addContent"],
-  "ScrollArea__removeAllContent": ["removeAllContent"],
-  "CSVRow__getIntegerValueAt": ["getIntegerValueAt"],
-  "CSVRow__getName": ["getName"],
-  "CSVRow__getValueAt": ["getValueAt"],
-  "CSVRow__getBooleanValueAt": ["getBooleanValueAt"],
-  "CSVTable__getColumnIndexByName": ["getColumnIndexByName"],
-  "LogicJSONObject__put": ["put"],
-  "GameStateManager__getInstance": ["getInstance"],
-  "GameStateManager__isState": ["isState"],
-  "HomeMode__getInstance": ["getInstance"],
-  "StringTable__getMovieClip": ["getMovieClip"],
-  "MovieClipHelper__setTextAndScaleIfNecessary": ["setTextAndScaleIfNecessary"],
-  "LogicTile__setData": ["setData"],
-  "LogicTileMap__isPlayerLineOfSightClear": ["isPlayerLineOfSightClear"],
-  "LogicDataTables__getOpenTileData": ["getOpenTileData"],
-  "LogicDataTables__getBaseTileData": ["getBaseTileData"],
-  "LogicDataTables__getSiegeBoltTileData": ["getSiegeBoltTileData"],
-  "LogicCharacterData_getSpeed": ["CharacterSpeed"],
-  "BattleMode_getInstance": ["getInstance"],
-  "BattleMode__enter": ["enter"],
-  "BattleMode__addResourcesToLoad": ["addResourcesToLoad"],
-  "ClientInputMessage_sendMovement": ["sendMovement"],
-  "HashTagCodeGenerator__toId": ["toId"],
-  "HashTagCodeGenerator__isValid": ["isValid"],
-  "Name_setupDecorated": ["setupDecorated"],
-  "Name_applyDecoration": ["applyDecoration"],
-  "AllianceManager__startSpectate": ["startSpectate"],
-  "CustomButton_onButtonPressed": ["onButtonPressed"],
-  "nativeCopyToClipboard": ["copyToClipboard"],
-  "LogicGameModeUtil__isTileOnPoisonArea": ["isTileOnPoisonArea"],
-  "LogicData_getName": ["getName"],
-  "LogicDataTable_findByName": ["findByName"],
-  "AreaEffectData__getRadius": ["getRadius"],
-  "AreaEffectData__getActiveTimeMs": ["getActiveTimeMs"],
-  "MovieClip__getChildClipByName": ["getChildClipByName"],
-  "MovieClip__setChildVisible": ["setChildVisible"],
-  "MovieClip__gotoAndStopFrameIndex": ["gotoAndStopFrameIndex"],
-  "Screen__getDpiClass": ["getDpiClass"],
-  "Screen__getHeight": ["getHeight"],
-  "Screen__getWidth": ["getWidth"]
-};
-
-const DEVELOPER_FLAGS = {
-  "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
-  "LogicVersion_isDev": ["isDev"],
-  "LogicVersion_isProd": ["isProd"],
-  "SCIDConfig_isDevBuild": ["isDevBuild"],
-  "LogicVersion_isProduction": ["isProduction"]
+  reapply_ms: [3000, 8000, 15000],
+  rva: {
+    Stage_instance: null,
+    ResourceManager_getMovieClip: null,
+    GameButton_ctor: null,
+    MovieClip_getTextFieldByName: null,
+    MovieClip_gotoAndStopFrameIndex: null,
+    MovieClip_setChildVisible: null,
+    Sprite_ctor: null,
+    Sprite_addChild: null,
+    DropGUIContainer_ctor: null,
+    DisplayObject_setXY: null,
+    TextField_setText: null,
+    String_ctor: null,
+    HomePage_ctor: null,
+    GUI_closePopup: null,
+    GUI_showFloaterTextAt: null
+  }
 };
 
 let cfg = {};
@@ -177,8 +42,16 @@ let logPath = null;
 let docsPath = null;
 let updatedPath = null;
 let pathReport = [];
-let lcReport = [];
 let started = false;
+
+let modMenuButton = null;
+let homePageHook = null;
+let closePopupHook = null;
+let bindings = {};
+
+// -------------------------------------------------------------------------
+// infra
+// -------------------------------------------------------------------------
 
 function str(v) {
   try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
@@ -189,6 +62,9 @@ function log(line) {
   try { console.log(text); } catch (e) {}
   if (logPath === null) return;
   try {
+    if (fileSize(logPath) > MAX_LOG_BYTES) {
+      try { fileManager().removeItemAtPath_error_(logPath, null); } catch (e) {}
+    }
     const f = new File(logPath, "a");
     f.write(text + "\n");
     f.flush();
@@ -198,9 +74,7 @@ function log(line) {
 
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
-function selector(name) {
-  try { return ObjC.selector(name); } catch (e) { return null; }
-}
+function selector(name) { try { return ObjC.selector(name); } catch (e) { return null; } }
 
 function responds(target, name) {
   const sel = selector(name);
@@ -263,12 +137,9 @@ function writable(path) {
   const test = path + "/" + TEST_NAME;
   const payload = "probe-" + Date.now();
   if (!writeText(test, payload)) return false;
-  if (readText(test) !== payload) {
-    try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
-    return false;
-  }
+  const ok = readText(test) === payload;
   try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
-  return true;
+  return ok;
 }
 
 function containerLike(path) {
@@ -291,48 +162,6 @@ function uuidIn(path) {
   return all.length === 0 ? "-" : all[all.length - 1];
 }
 
-function lcDump() {
-  const out = [];
-  const seen = {};
-  const push = function (key, value) {
-    if (seen[key] === true) return;
-    seen[key] = true;
-    out.push(key + "=" + str(value));
-  };
-  let ud = null;
-  try { ud = ObjC.classes.NSUserDefaults; } catch (e) { ud = null; }
-  if (ud === null || ud === undefined) {
-    lcReport = ["lc api not found"];
-    return out;
-  }
-  const classMethods = ["isLiveProcess", "lcGuestAppId", "lcAppGroupPath", "isSharedApp"];
-  for (let i = 0; i < classMethods.length; i++) {
-    const name = classMethods[i];
-    if (!responds(ud, name)) continue;
-    try { push("lc." + name, ud[name]()); } catch (e) {}
-  }
-  const dicts = ["guestContainerInfo", "guestAppInfo"];
-  for (let d = 0; d < dicts.length; d++) {
-    const name = dicts[d];
-    if (!responds(ud, name)) continue;
-    let info = null;
-    try { info = ud[name](); } catch (e) { continue; }
-    if (info === null) continue;
-    try {
-      const keys = info.allKeys();
-      const n = keys.count();
-      for (let i = 0; i < n; i++) {
-        const key = keys.objectAtIndex_(i);
-        let value = null;
-        try { value = info.objectForKey_(key); } catch (e) {}
-        push("lc." + name + "." + str(key), value);
-      }
-    } catch (e) {}
-  }
-  lcReport = out.slice(0);
-  return out;
-}
-
 function bundlePath() {
   try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
 }
@@ -349,7 +178,6 @@ function bundleCandidates() {
   const folder = parts[parts.length - 2];
   out.push([parent + "/" + folder + "/Documents", "bundle:parent/folder/Documents"]);
   out.push([grand + "/Data/Application/" + folder + "/Documents", "bundle:Data/Application/folder"]);
-  out.push([grand + "/Data/Application/" + folder, "bundle:Data/Application/folder-root"]);
   out.push([parent + "/Documents", "bundle:parent/Documents"]);
   out.push([appDir, "bundle:app-dir"]);
   return out;
@@ -366,22 +194,9 @@ function collectCandidates() {
     list.push({ path: p, source: source });
   };
   if (cfg.docs_path) add(cfg.docs_path, "config.docs_path");
-  const lc = lcDump();
-  for (let i = 0; i < lc.length; i++) {
-    const key = lc[i].substring(0, lc[i].indexOf("="));
-    const value = lc[i].substring(lc[i].indexOf("=") + 1);
-    if (!value || value.charAt(0) !== "/") continue;
-    add(value, "lc:" + key);
-    add(value + "/Documents", "lc:" + key + "/Documents");
-  }
   try {
     const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
     if (urls !== null && urls.count() > 0) add(str(urls.firstObject().path()), "URLsForDirectory");
-  } catch (e) {}
-  try {
-    const fn = new NativeFunction(Module.getGlobalExportByName("NSSearchPathForDirectoriesInDomains"), "pointer", ["uint", "uint", "bool"]);
-    const arr = new ObjC.Object(fn(DOC_DIR, USER_MASK, true));
-    if (arr.count() > 0) add(str(arr.objectAtIndex_(0)), "NSSearchPathForDirectoriesInDomains");
   } catch (e) {}
   try {
     const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
@@ -472,7 +287,8 @@ function loadConfig() {
   try {
     const parsed = JSON.parse(text);
     cfg = Object.assign({}, DEFAULTS, parsed);
-    if (!Array.isArray(cfg.targets) || cfg.targets.length === 0) cfg.targets = DEFAULTS.targets;
+    if (!cfg.rva || typeof cfg.rva !== "object") cfg.rva = DEFAULTS.rva;
+    if (POSITIONS.indexOf(cfg.position) === -1) cfg.position = DEFAULTS.position;
     log("config loaded " + path);
   } catch (e) {
     cfg = JSON.parse(JSON.stringify(DEFAULTS));
@@ -480,341 +296,215 @@ function loadConfig() {
   }
 }
 
-function baseOf(target) {
-  if (target.module) return Process.getModuleByName(target.module).base;
-  return Process.mainModule.base;
+// -------------------------------------------------------------------------
+// game bindings
+// -------------------------------------------------------------------------
+
+function rva(name) {
+  const v = cfg.rva ? cfg.rva[name] : null;
+  if (v === null || v === undefined || v === "") return null;
+  try { return Process.mainModule.base.add(parseInt(String(v), 16)); } catch (e) { return null; }
 }
 
-function addrOf(target) {
-  if (target.addr) return ptr(target.addr);
-  return baseOf(target).add(parseInt(String(target.rva), 16));
+function nf(address, ret, args) {
+  if (address === null || address === undefined) return null;
+  try { return new NativeFunction(address, ret, args); } catch (e) { return null; }
 }
 
-function sizeOf(type) {
-  if (type === "u64") return 8;
-  if (type === "u32") return 4;
-  return 1;
+function bind() {
+  bindings = {};
+  for (const k in cfg.rva) {
+    const addr = rva(k);
+    bindings[k] = addr;
+    log("binding " + k + " = " + str(addr));
+  }
 }
 
-function readAt(addr, type) {
-  if (type === "u64") return addr.readU64().toString(16);
-  if (type === "u32") return addr.readU32() >>> 0;
-  return addr.readU8();
-}
+function strPtr(text) { return Memory.allocUtf8String(text); }
 
-function valueOf(value, type) {
-  if (typeof value === "number") return value;
-  return parseInt(String(value), 16);
-}
-
-function writeAt(p, value, type) {
-  if (type === "u64") p.writeU64(value);
-  else if (type === "u32") p.writeU32(value);
-  else p.writeU8(value);
-}
-
-function applyTarget(target) {
-  const type = target.type || "u8";
-  const name = target.name || "target";
-  const size = sizeOf(type);
-  let addr;
-  try { addr = addrOf(target); } catch (e) {
-    log(name + " address failed: " + e.message);
-    return "addr-error";
-  }
-  const range = Process.findRangeByAddress(addr);
-  if (range === null) {
-    log(name + " @" + addr + " is not mapped, skipped");
-    return "unmapped";
-  }
-  if (range.protection.indexOf("r") === -1) {
-    log(name + " @" + addr + " not readable (" + range.protection + "), skipped");
-    return "unreadable";
-  }
-  let before;
-  try { before = readAt(addr, type); } catch (e) {
-    log(name + " @" + addr + " read failed: " + e.message);
-    return "read-error";
-  }
-  const want = valueOf(target.value, type);
-  if (target.expect !== undefined && target.expect !== null) {
-    const expect = valueOf(target.expect, type);
-    if (expect !== before) {
-      log(name + " @" + addr + " expect " + str(expect) + " but found " + str(before) + ", skipped");
-      return "expect-mismatch";
-    }
-  }
-  if (before === want) {
-    log(name + " @" + addr + " already " + str(before) + " (" + range.protection + ")");
-    return "already";
-  }
-  if (cfg.patch === false || target.patch === false) {
-    log(name + " @" + addr + " probe: before=" + str(before) + " want=" + str(want) + " (" + range.protection + ")");
-    return "probe";
-  }
+function scPtr(text) {
+  const ctor = nf(bindings.String_ctor, "pointer", ["pointer", "pointer"]);
+  if (ctor === null) return strPtr(text);
   try {
-    Memory.patchCode(addr, size, function (code) { writeAt(code, want, type); });
+    const buf = Memory.alloc(64);
+    ctor(buf, strPtr(text));
+    return buf;
   } catch (e) {
-    log(name + " @" + addr + " patchCode failed: " + e.message);
-    return "patch-error";
+    return strPtr(text);
   }
-  let after = null;
-  try { after = readAt(addr, type); } catch (e) {}
-  if (after === want) {
-    log(name + " @" + addr + " " + str(before) + " -> " + str(after) + " (" + range.protection + ")");
-    return "ok";
+}
+
+function setXY(ptr, x, y) {
+  const fn = nf(bindings.DisplayObject_setXY, "void", ["pointer", "float", "float"]);
+  if (fn !== null) {
+    try { fn(ptr, x, y); return; } catch (e) {}
   }
-  log(name + " @" + addr + " write did not stick (" + str(before) + " -> " + str(after) + ")");
-  return "no-stick";
-}
-
-function applyPatches() {
-  const targets = cfg.targets || DEFAULTS.targets;
-  const result = {};
-  for (let i = 0; i < targets.length; i++) {
-    const name = targets[i].name || ("target" + i);
-    try { result[name] = applyTarget(targets[i]); } catch (e) {
-      result[name] = "error";
-      log(name + " apply failed: " + e.message);
-    }
-  }
-  return result;
-}
-
-function hexPattern(text) {
-  if (text === null || text === undefined) return null;
-  const s = String(text);
-  if (s.length < cfg.scan_min_length) return null;
-  const parts = [];
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code > 127) return null;
-    parts.push(("0" + code.toString(16)).slice(-2));
-  }
-  return parts.join(" ");
-}
-
-function regionList(protections) {
-  const out = [];
-  const seen = {};
-  const limit = cfg.scan_max_region_mb * 1048576;
-  for (let i = 0; i < protections.length; i++) {
-    let ranges = [];
-    try { ranges = Process.enumerateRanges(protections[i]); } catch (e) { continue; }
-    for (let r = 0; r < ranges.length; r++) {
-      const range = ranges[r];
-      const key = range.base.toString() + ":" + range.size;
-      if (seen[key] === true) continue;
-      seen[key] = true;
-      if (range.size <= 0) continue;
-      if (range.size > limit) {
-        log("region skipped (size " + range.size + " > " + cfg.scan_max_region_mb + "MB) " + range.base + " " + range.protection);
-        continue;
-      }
-      out.push(range);
-    }
-  }
-  return out;
-}
-
-function pageOf(value) { return value - (value % 4096); }
-
-function numOf(pointer) {
-  const text = pointer.toString();
-  return parseInt(text.substring(0, 2) === "0x" ? text.substring(2) : text, 16);
-}
-
-function tagAnchor(target, tag) {
-  if (target.anchors.indexOf(tag) === -1) target.anchors.push(tag);
-}
-
-function collectStringHits(map, regions) {
-  const hits = [];
-  const byAddress = {};
-  for (const name in map) {
-    const anchors = map[name];
-    for (let a = 0; a < anchors.length; a++) {
-      const pattern = hexPattern(anchors[a]);
-      if (pattern === null) {
-        log("anchor " + name + " skipped (not ascii or shorter than " + cfg.scan_min_length + ")");
-        continue;
-      }
-      for (let r = 0; r < regions.length; r++) {
-        let matches = [];
-        try {
-          matches = Memory.scanSync(regions[r].base, regions[r].size, pattern);
-        } catch (e) {
-          log("anchor " + name + " scan failed: " + e.message);
-          continue;
-        }
-        for (let m = 0; m < matches.length; m++) {
-          const address = numOf(matches[m].address);
-          const key = String(address);
-          if (byAddress[key] === undefined) {
-            byAddress[key] = { address: address, anchors: [], xrefs: [] };
-            hits.push(byAddress[key]);
-          }
-          tagAnchor(byAddress[key], name + ":" + anchors[a]);
-        }
-      }
-    }
-  }
-  return hits;
-}
-
-function symbolOf(address) {
   try {
-    const sym = DebugSymbol.fromAddress(ptr(String(address)));
-    const name = sym === null || sym === undefined ? null : sym.name;
-    return name === null || name === undefined ? null : String(name);
-  } catch (e) { return null; }
-}
-
-function findXrefs(targets, regions) {
-  const wanted = {};
-  for (let i = 0; i < targets.length; i++) wanted[String(targets[i].address)] = targets[i];
-  const chunk = 1048576;
-  for (let r = 0; r < regions.length; r++) {
-    const range = regions[r];
-    const base = numOf(range.base);
-    const size = range.size;
-    let offset = 0;
-    while (offset < size) {
-      const take = Math.min(chunk, size - offset);
-      let buffer = null;
-      try { buffer = range.base.add(offset).readByteArray(take); } catch (e) { break; }
-      if (buffer === null) break;
-      const view = new DataView(buffer);
-      const count = Math.floor(take / 4);
-      const registers = {};
-      for (let i = 0; i < count; i++) {
-        const insn = view.getUint32(i * 4, true);
-        const address = base + offset + i * 4;
-        const family = (insn & 0x9f000000) >>> 0;
-        if (family === 0x90000000 || family === 0x10000000) {
-          let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
-          if (imm & 0x100000) imm -= 0x200000;
-          if (family === 0x90000000) {
-            registers[insn & 0x1f] = pageOf(address) + imm * 4096;
-          } else {
-            const direct = wanted[String(address + imm)];
-            if (direct !== undefined) direct.xrefs.push({ function: address, symbol: symbolOf(address) });
-          }
-          continue;
-        }
-        if (((insn & 0xff800000) >>> 0) === 0x91000000) {
-          const from = registers[(insn >>> 5) & 0x1f];
-          if (from === undefined) continue;
-          const shift = (insn >>> 22) & 3;
-          const imm12 = (insn >>> 10) & 0xfff;
-          const value = from + (shift === 1 ? imm12 * 4096 : imm12);
-          const hit = wanted[String(value)];
-          if (hit !== undefined) hit.xrefs.push({ function: address, symbol: symbolOf(address) });
-        }
-      }
-      offset += take;
-    }
-  }
-}
-
-function scanMap(map, label, resultFile) {
-  log("=== scan " + label + " start ===");
-  const readRegions = regionList(cfg.scan_protections);
-  const execRegions = regionList(["r-x"]);
-  log("regions: readable=" + readRegions.length + " executable=" + execRegions.length);
-  const hits = collectStringHits(map, readRegions);
-  log("string hits: " + hits.length);
-  const base = numOf(Process.mainModule.base);
-  for (let i = 0; i < hits.length; i++) hits[i].rva = hits[i].address - base;
-  findXrefs(hits, execRegions);
-  const report = {
-    generatedAt: new Date().toISOString(),
-    label: label,
-    module: {
-      name: Process.mainModule.name,
-      base: Process.mainModule.base.toString(),
-      size: Process.mainModule.size
-    },
-    hits: [],
-    summary: { hits: hits.length, withXrefs: 0 }
-  };
-  for (let i = 0; i < hits.length; i++) {
-    const hit = hits[i];
-    if (hit.xrefs.length > 0) report.summary.withXrefs++;
-    const entry = {
-      anchor: hit.anchors.join(","),
-      address: "0x" + hit.address.toString(16),
-      rva: "0x" + hit.rva.toString(16),
-      xrefs: []
-    };
-    for (let x = 0; x < hit.xrefs.length; x++) {
-      const xref = hit.xrefs[x];
-      entry.xrefs.push({
-        function: "0x" + xref.function.toString(16),
-        functionRva: "0x" + (xref.function - base).toString(16),
-        symbol: xref.symbol
-      });
-    }
-    report.hits.push(entry);
-    log("anchor " + entry.anchor + " rva=" + entry.rva + " xrefs=" + entry.xrefs.length +
-      (entry.xrefs.length > 0
-        ? " functionRva=" + entry.xrefs[0].functionRva + (entry.xrefs[0].symbol === null ? "" : " symbol=" + entry.xrefs[0].symbol)
-        : ""));
-  }
-  if (updatedPath !== null) {
-    const target = updatedPath + "/" + (resultFile || cfg.scan_result_file);
-    if (writeText(target, JSON.stringify(report, null, 2) + "\n")) log("scan result written to " + target);
-    else log("scan result write failed: " + target);
-  }
-  log("=== scan " + label + " done: hits=" + report.summary.hits + " withXrefs=" + report.summary.withXrefs + " ===");
-  return report;
-}
-
-function scanStrings() { return scanMap(STRING_ANCHORS, "strings", cfg.scan_result_file); }
-function scanDevFlags() { return scanMap(DEVELOPER_FLAGS, "dev flags", "scan_result_devflags.json"); }
-
-function keyWindowRoot() {
-  try {
-    const windows = ObjC.classes.UIApplication.sharedApplication().windows();
-    for (let i = 0; i < windows.count(); i++) {
-      const w = windows.objectAtIndex_(i);
-      if (w.isKeyWindow()) return w.rootViewController();
-    }
+    ptr.add(32).writeFloat(x);
+    ptr.add(36).writeFloat(y);
   } catch (e) {}
-  return null;
 }
 
-function showAlertOnMain(title, message, tries) {
-  const root = keyWindowRoot();
-  if (root === null) {
-    if (tries >= cfg.alert_tries) { log("alert skipped: no key window"); return false; }
-    setTimeout(function () { showAlertOnMain(title, message, tries + 1); }, cfg.alert_try_ms);
-    return false;
-  }
+function screenBounds() {
+  const instance = bindings.Stage_instance;
+  if (instance === null) return { rightX: 800, scale: 0.1 };
   try {
-    const alert = ObjC.classes.UIAlertController.alertControllerWithTitle_message_preferredStyle_(title, message, 1);
-    alert.addAction_(ObjC.classes.UIAlertAction.actionWithTitle_style_handler_("OK", 0, null));
-    let top = root;
-    while (top.presentedViewController() !== null) top = top.presentedViewController();
-    top.presentViewController_animated_completion_(alert, true, null);
-    log("alert shown: " + title + " / " + message);
-    if (cfg.alert_auto_dismiss_ms > 0) {
-      setTimeout(function () { try { alert.dismissViewControllerAnimated_completion_(true, null); } catch (e) {} }, cfg.alert_auto_dismiss_ms);
-    }
-    return true;
+    const stage = instance.readPointer();
+    const f88 = stage.add(88).readFloat();
+    const f84 = stage.add(84).readFloat();
+    let scale = 0.1;
+    if (stage.add(7224).readFloat() !== 0) scale = stage.add(7232).readFloat();
+    const rightX = stage.add(7376).readInt() - (f84 + f88) / scale;
+    return { rightX: rightX, scale: scale };
   } catch (e) {
-    log("alert failed: " + e.message);
-    return false;
+    return { rightX: 800, scale: 0.1 };
   }
 }
 
-function showAlert(title, message) {
-  if (cfg.alert === false) return false;
-  setTimeout(function () {
-    ObjC.schedule(ObjC.mainQueue, function () { showAlertOnMain(title, message, 0); });
-  }, cfg.alert_delay_ms);
+function positionXY(position) {
+  const bounds = screenBounds();
+  switch (position) {
+    case "top_left":     return { x: 40,                y: 40  };
+    case "top_right":    return { x: bounds.rightX - 40, y: 30  };
+    case "bottom_right": return { x: bounds.rightX - 40, y: 540 };
+    case "bottom_left":
+    default:             return { x: 40,                y: 540 };
+  }
+}
+
+function floater(message) {
+  const fn = nf(bindings.GUI_showFloaterTextAt, "void", ["pointer", "pointer", "float", "int"]);
+  if (fn === null) return;
+  try { fn(ptr(0), scPtr(message), 0, -1); } catch (e) {}
+}
+
+// -------------------------------------------------------------------------
+// MOD MENU button
+// -------------------------------------------------------------------------
+
+function createButton() {
+  if (!cfg.enabled) { log("button disabled in config"); return null; }
+  if (modMenuButton !== null) return modMenuButton;
+
+  const clipFn = nf(bindings.ResourceManager_getMovieClip, "pointer", ["pointer", "pointer"]);
+  const spriteCtor = nf(bindings.Sprite_ctor, "void", ["pointer", "int"]);
+  const gameBtnCtor = nf(bindings.GameButton_ctor, "void", ["pointer"]);
+  const dropGuiCtor = bindings.DropGUIContainer_ctor;
+  const tfByName = nf(bindings.MovieClip_getTextFieldByName, "pointer", ["pointer", "pointer"]);
+  const setText = nf(bindings.TextField_setText, "pointer", ["pointer", "pointer", "bool"]);
+
+  if (clipFn === null || gameBtnCtor === null) {
+    log("cannot create button: ResourceManager_getMovieClip or GameButton_ctor missing");
+    return null;
+  }
+
+  try {
+    const ptr = Memory.alloc(544);
+    if (spriteCtor !== null) spriteCtor(ptr, 1);
+
+    const clip = clipFn(strPtr("sc/ui.sc"), strPtr("map_editor_exit_button"));
+    if (clip === null || clip.isNull()) {
+      log("movie clip lookup failed (sc/ui.sc / map_editor_exit_button)");
+      return null;
+    }
+
+    try {
+      if (dropGuiCtor !== null) new NativeFunction(dropGuiCtor, "void", ["pointer", "pointer"])(ptr, clip);
+    } catch (e) {
+      log("DropGUIContainer ctor failed: " + e.message);
+    }
+
+    gameBtnCtor(ptr);
+
+    try {
+      const vtableMethod = ptr.readPointer().add(352).readPointer();
+      new NativeFunction(vtableMethod, "void", ["pointer", "pointer", "bool"])(ptr, clip, 1);
+    } catch (e) {
+      log("vtable attach failed: " + e.message);
+    }
+
+    try {
+      const field = tfByName(clip, strPtr("txt"));
+      if (field !== null && !field.isNull() && setText !== null) {
+        setText(field, scPtr(cfg.text), 1);
+      }
+    } catch (e) {
+      log("setText failed: " + e.message);
+    }
+
+    const pos = positionXY(cfg.position);
+    setXY(ptr, pos.x, pos.y);
+
+    modMenuButton = { ptr: ptr, clip: clip, x: pos.x, y: pos.y };
+    log("MOD MENU button created at " + pos.x + "," + pos.y + " pos=" + cfg.position);
+    return modMenuButton;
+  } catch (e) {
+    log("createButton error: " + e.message);
+    return null;
+  }
+}
+
+function destroyButton() {
+  if (modMenuButton === null) return;
+  try { modMenuButton.ptr.add(8).writeU8(0); } catch (e) {}
+  try { setXY(modMenuButton.ptr, 9999, 9999); } catch (e) {}
+  modMenuButton = null;
+  log("MOD MENU button removed");
+}
+
+function reposition() {
+  if (modMenuButton === null) return false;
+  const pos = positionXY(cfg.position);
+  setXY(modMenuButton.ptr, pos.x, pos.y);
+  modMenuButton.x = pos.x;
+  modMenuButton.y = pos.y;
+  log("MOD MENU button moved to " + pos.x + "," + pos.y + " pos=" + cfg.position);
   return true;
 }
+
+function recreateButton() {
+  destroyButton();
+  return createButton();
+}
+
+// -------------------------------------------------------------------------
+// hooks
+// -------------------------------------------------------------------------
+
+function attachHooks() {
+  if (homePageHook === null && bindings.HomePage_ctor !== null) {
+    homePageHook = Interceptor.attach(bindings.HomePage_ctor, {
+      onEnter(args) { this.self = args[0]; },
+      onLeave() {
+        setTimeout(function () {
+          recreateButton();
+        }, 200);
+      }
+    });
+    log("hooked HomePage.ctor");
+  }
+
+  if (closePopupHook === null && bindings.GUI_closePopup !== null) {
+    closePopupHook = Interceptor.attach(bindings.GUI_closePopup, {
+      onEnter() {
+        setTimeout(function () {
+          if (modMenuButton === null) createButton();
+          else reposition();
+        }, 300);
+      }
+    });
+    log("hooked GUI.closePopup");
+  }
+}
+
+function detachHooks() {
+  if (homePageHook !== null) { try { homePageHook.detach(); } catch (e) {} homePageHook = null; }
+  if (closePopupHook !== null) { try { closePopupHook.detach(); } catch (e) {} closePopupHook = null; }
+}
+
+// -------------------------------------------------------------------------
+// lifecycle
+// -------------------------------------------------------------------------
 
 function environment() {
   try { log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id); } catch (e) {}
@@ -828,67 +518,89 @@ function environment() {
     log("executable=" + Process.mainModule.path);
     log("base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy);
   } catch (e) {}
-  const lc = lcDump();
-  log("livecontainer: " + (lc.length === 0 ? "not detected" : lc.join(" | ")));
   log("documents=" + str(docsPath));
-  log("uuid=" + uuidIn(docsPath) + " uuids=" + uuidsIn(docsPath).join(","));
+  log("uuid=" + uuidIn(docsPath));
   log("updated=" + str(updatedPath));
   log("log=" + str(logPath));
   for (let i = 0; i < pathReport.length; i++) {
     const r = pathReport[i];
     log("candidate " + r.path + " [" + r.source + "] dir=" + r.dir + " container=" + r.container + " writable=" + r.writable);
   }
-  if (updatedPath !== null) log("updated contents: " + listDir(updatedPath).join(" "));
 }
 
 function start(stage, parameters) {
   if (started) return;
   started = true;
   initPaths();
-  log("=== agent start ===");
+  log("=== modmenu start ===");
   log("stage=" + str(stage) + " parameters=" + JSON.stringify(parameters === undefined ? {} : parameters));
   environment();
   loadConfig();
-  log("config patch=" + cfg.patch + " alert=" + cfg.alert + " targets=" + (cfg.targets || []).length);
-  log("patches: " + JSON.stringify(applyPatches()));
+  log("config enabled=" + cfg.enabled + " position=" + cfg.position + " text=" + cfg.text);
+  bind();
+  attachHooks();
   const delays = cfg.reapply_ms || [];
   for (let i = 0; i < delays.length; i++) {
-    setTimeout(function () { log("reapply " + JSON.stringify(applyPatches())); }, delays[i]);
-  }
-  if (cfg.scan_strings || cfg.scan_dev_flags) {
     setTimeout(function () {
-      if (cfg.scan_strings) scanStrings();
-      if (cfg.scan_dev_flags) scanDevFlags();
-    }, cfg.scan_delay_ms);
+      log("reapply tick");
+      attachHooks();
+      if (modMenuButton === null) createButton();
+      else reposition();
+    }, delays[i]);
   }
-  showAlert("Nulls Brawl", "agent loaded");
-  log("=== agent armed ===");
+  log("=== modmenu armed ===");
 }
 
+function dispose() {
+  log("=== modmenu dispose ===");
+  detachHooks();
+  destroyButton();
+  started = false;
+}
+
+// -------------------------------------------------------------------------
+// RPC
+// -------------------------------------------------------------------------
+
 rpc.exports = {
-  init: function (stage, parameters) { start(stage, parameters); },
-  dispose: function () { log("=== agent dispose ==="); started = false; },
-  patch: function () { return applyPatches(); },
-  probe: function () {
-    const targets = cfg.targets || DEFAULTS.targets;
-    const out = {};
-    for (let i = 0; i < targets.length; i++) {
-      const t = targets[i];
-      const name = t.name || ("target" + i);
-      try {
-        const addr = addrOf(t);
-        const range = Process.findRangeByAddress(addr);
-        out[name] = {
-          addr: str(addr),
-          mapped: range !== null,
-          protection: range === null ? null : range.protection,
-          value: range === null ? null : str(readAt(addr, t.type || "u8"))
-        };
-      } catch (e) { out[name] = { error: e.message }; }
-    }
-    return out;
+  init: function (stage, parameters) { start(stage, parameters); return true; },
+  dispose: function () { dispose(); return true; },
+  show: function () { return createButton() !== null; },
+  hide: function () { destroyButton(); return true; },
+  recreate: function () { recreateButton(); return true; },
+  setPosition: function (position) {
+    if (POSITIONS.indexOf(position) === -1) return false;
+    cfg.position = position;
+    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
+    const ok = reposition();
+    floater("Position: " + position);
+    return ok;
   },
-  alert: function (title, message) { showAlert(str(title), str(message)); return true; },
+  setText: function (text) {
+    cfg.text = str(text) || "MOD MENU";
+    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
+    recreateButton();
+    return true;
+  },
+  setColor: function (r, g, b) {
+    cfg.color_rgb = [r | 0, g | 0, b | 0];
+    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
+    log("color set to rgb(" + cfg.color_rgb.join(",") + ")");
+    return cfg.color_rgb;
+  },
+  enable: function (flag) {
+    cfg.enabled = flag !== false;
+    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
+    if (cfg.enabled) createButton();
+    else destroyButton();
+    return cfg.enabled;
+  },
+  reload: function () {
+    loadConfig();
+    bind();
+    recreateButton();
+    return true;
+  },
   info: function () {
     return {
       log: logPath,
@@ -897,11 +609,23 @@ rpc.exports = {
       uuid: uuidIn(docsPath),
       uuids: uuidsIn(docsPath),
       bundle: bundlePath(),
-      livecontainer: lcReport,
       candidates: pathReport,
-      patch: cfg.patch,
-      alert: cfg.alert,
-      targets: cfg.targets
+      enabled: cfg.enabled,
+      position: cfg.position,
+      text: cfg.text,
+      color_rgb: cfg.color_rgb,
+      button: modMenuButton === null ? null : {
+        x: modMenuButton.x,
+        y: modMenuButton.y,
+        ptr: str(modMenuButton.ptr),
+        clip: str(modMenuButton.clip)
+      },
+      bindings: (function () {
+        const out = {};
+        for (const k in bindings) out[k] = str(bindings[k]);
+        return out;
+      })(),
+      rva: cfg.rva
     };
   },
   paths: function () {
@@ -912,13 +636,10 @@ rpc.exports = {
       uuid: uuidIn(docsPath),
       uuids: uuidsIn(docsPath),
       bundle: bundlePath(),
-      livecontainer: lcReport,
       candidates: pathReport
     };
   },
-  reload: function () { loadConfig(); return applyPatches(); },
-  scanStrings: function () { return scanStrings(); },
-  scanDevFlags: function () { return scanDevFlags(); }
+  positions: function () { return POSITIONS.slice(0); }
 };
 
 start("top-level", {});
