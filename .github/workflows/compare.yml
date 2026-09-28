@@ -1,4 +1,4 @@
-name: Compare Dev W.dylib with Frida Stock
+name: Compare Dev W.dylib with Frida 17.2.11
 
 on:
   push:
@@ -19,33 +19,44 @@ jobs:
   compare:
     runs-on: macos-14
     timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Unpack dev dylib
+      - name: Unpack and identify dev dylib
         run: |
           set -euo pipefail
           mkdir -p dev_unpacked
           unzip -o W.dylib.zip -d dev_unpacked
           echo "=== unpacked contents ==="
           find dev_unpacked -type f
+
           DEV=$(find dev_unpacked -type f -name "*.dylib" | head -1)
           if [ -z "$DEV" ]; then
             DEV=$(find dev_unpacked -type f | head -1)
           fi
           echo "using dev file: $DEV"
           cp "$DEV" W.dev.raw.dylib
-          file W.dev.raw.dylib
-          echo "=== lipo ==="
-          lipo -info W.dev.raw.dylib || true
-          echo "=== arch ==="
-          otool -hv W.dev.raw.dylib | head -5
 
-      - name: Prepare dev thin slice
+          echo "=== file type ==="
+          file W.dev.raw.dylib
+          echo "=== first 64 bytes (hex) ==="
+          xxd W.dev.raw.dylib | head -8
+          echo "=== size ==="
+          stat -f%z W.dev.raw.dylib
+
+      - name: Extract dev thin slice (if needed)
         run: |
           set -euo pipefail
+          # Проверяем, является ли файл Mach-O
+          if ! file W.dev.raw.dylib | grep -q "Mach-O"; then
+            echo "::error::W.dev.raw.dylib is not a Mach-O file"
+            echo "file type: $(file W.dev.raw.dylib)"
+            exit 1
+          fi
+
           if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
             cp W.dev.raw.dylib W.dev.dylib
             echo "already thin"
@@ -59,35 +70,25 @@ jobs:
           file W.dev.dylib
           echo "dev size: $(stat -f%z W.dev.dylib) bytes"
 
-      - name: Download stock Frida versions
+      - name: Download Frida 17.2.11 stock
         run: |
           set -euo pipefail
           mkdir -p stock
-          VERSIONS="17.0.0 17.1.0 17.2.0 17.2.9 17.2.17 17.3.0 17.3.1 17.4.0 17.4.2 17.5.0 17.6.0 17.7.0 17.8.0 17.9.0 17.9.7"
-          for v in $VERSIONS; do
-            URL="https://github.com/frida/frida/releases/download/${v}/frida-gadget-${v}-ios-universal.dylib.xz"
-            if curl -fL --retry 2 --connect-timeout 10 -o "stock/${v}.xz" "$URL" 2>/dev/null; then
-              (cd stock && xz -d "${v}.xz" && mv "${v}" "${v}.dylib" 2>/dev/null) || true
-              if [ ! -f "stock/${v}.dylib" ]; then
-                echo "$v: extraction failed"
-                continue
-              fi
-              if lipo -info "stock/${v}.dylib" 2>/dev/null | grep -q "Non-fat"; then
-                cp "stock/${v}.dylib" "stock/${v}.thin.dylib"
-              else
-                if lipo -info "stock/${v}.dylib" | grep -q "arm64e"; then
-                  lipo -thin arm64e -output "stock/${v}.thin.dylib" "stock/${v}.dylib"
-                else
-                  lipo -thin arm64 -output "stock/${v}.thin.dylib" "stock/${v}.dylib"
-                fi
-              fi
-              echo "$v: $(stat -f%z stock/${v}.thin.dylib) bytes"
+          URL="https://github.com/frida/frida/releases/download/17.2.11/frida-gadget-17.2.11-ios-universal.dylib.xz"
+          echo "downloading ${URL}"
+          if curl -fL --retry 3 -o stock/17.2.11.xz "$URL"; then
+            (cd stock && xz -d 17.2.11.xz)
+            mv stock/17.2.11 stock/17.2.11.dylib 2>/dev/null || true
+            if lipo -info stock/17.2.11.dylib 2>/dev/null | grep -q "Non-fat"; then
+              cp stock/17.2.11.dylib stock/17.2.11.thin.dylib
             else
-              echo "$v: download failed"
+              lipo -thin arm64e -output stock/17.2.11.thin.dylib stock/17.2.11.dylib
             fi
-          done
-          echo "=== available stock files ==="
-          ls -la stock/*.thin.dylib 2>/dev/null || echo "none"
+            echo "stock size: $(stat -f%z stock/17.2.11.thin.dylib) bytes"
+          else
+            echo "::error::Failed to download Frida 17.2.11"
+            exit 1
+          fi
 
       - name: Install LIEF
         run: |
@@ -98,87 +99,12 @@ jobs:
           python3 -m pip install lief==0.17.5
           python3 -c "import lief; print('lief', lief.__version__)"
 
-      - name: Find closest stock version
+      - name: Compare dev vs stock 17.2.11
         run: |
           set -euo pipefail
           source venv/bin/activate
           python3 - <<'PYEOF'
-          import lief, os, hashlib, glob, sys, json
-
-          def info(path):
-              try:
-                  m = lief.MachO.parse(path).at(0)
-              except Exception as e:
-                  return None
-              secs = []
-              for seg in m.segments:
-                  for sec in seg.sections:
-                      secs.append((seg.name, sec.name, sec.size))
-              with open(path, 'rb') as f:
-                  head = f.read(65536)
-              return {
-                  'size': os.path.getsize(path),
-                  'hash': hashlib.sha256(head).hexdigest()[:16],
-                  'sections': secs,
-                  'section_count': len(secs),
-              }
-
-          dev = info('W.dev.dylib')
-          print(f"[dev] size={dev['size']} hash64k={dev['hash']} sections={dev['section_count']}")
-
-          results = []
-          for p in sorted(glob.glob('stock/*.thin.dylib')):
-              v = os.path.basename(p).replace('.thin.dylib', '')
-              s = info(p)
-              if s is None:
-                  print(f"[{v}] parse error")
-                  continue
-              results.append((v, s))
-              print(f"[{v}] size={s['size']} hash64k={s['hash']} sections={s['section_count']}")
-
-          if not results:
-              print("::error::no stock files available")
-              sys.exit(1)
-
-          def score(s):
-              size_diff = abs(s['size'] - dev['size'])
-              sec_diff = abs(s['section_count'] - dev['section_count'])
-              return size_diff + sec_diff * 10000
-
-          results.sort(key=lambda x: score(x[1]))
-          best_v, best_s = results[0]
-          print(f"\n[closest] {best_v}")
-          print(f"  dev size={dev['size']} vs stock size={best_s['size']} (diff={dev['size']-best_s['size']})")
-          print(f"  dev sections={dev['section_count']} vs stock sections={best_s['section_count']}")
-
-          with open('closest.txt', 'w') as f:
-              f.write(best_v)
-
-          # section name comparison
-          dev_names = set((s[0], s[1]) for s in dev['sections'])
-          stock_names = set((s[0], s[1]) for s in best_s['sections'])
-          only_dev = dev_names - stock_names
-          only_stock = stock_names - dev_names
-          with open('section-name-diff.txt', 'w') as f:
-              f.write("sections only in DEV:\n")
-              for x in sorted(only_dev): f.write(f"  {x}\n")
-              f.write("\nsections only in STOCK:\n")
-              for x in sorted(only_stock): f.write(f"  {x}\n")
-          print(f"  sections only in dev: {len(only_dev)}")
-          print(f"  sections only in stock: {len(only_stock)}")
-          PYEOF
-          cat closest.txt
-
-      - name: Detailed byte diff per section
-        run: |
-          set -euo pipefail
-          source venv/bin/activate
-          CLOSEST=$(cat closest.txt)
-          export CLOSEST
-          python3 - <<'PYEOF'
-          import lief, os, sys
-
-          CLOSEST = os.environ['CLOSEST']
+          import lief, os
 
           def section_map(path):
               m = lief.MachO.parse(path).at(0)
@@ -186,14 +112,14 @@ jobs:
               for seg in m.segments:
                   for sec in seg.sections:
                       r[(seg.name, sec.name)] = sec
-              return r
+              return r, m
 
-          secs_dev = section_map('W.dev.dylib')
-          secs_stock = section_map(f'stock/{CLOSEST}.thin.dylib')
+          secs_dev, m_dev = section_map('W.dev.dylib')
+          secs_stock, m_stock = section_map('stock/17.2.11.thin.dylib')
 
           with open('W.dev.dylib', 'rb') as f:
               data_dev = f.read()
-          with open(f'stock/{CLOSEST}.thin.dylib', 'rb') as f:
+          with open('stock/17.2.11.thin.dylib', 'rb') as f:
               data_stock = f.read()
 
           report = open('diff-report.txt', 'w')
@@ -201,18 +127,28 @@ jobs:
               print(line)
               report.write(line + '\n')
 
-          w(f'=== diff report ===')
+          w(f'=== dev vs stock 17.2.11 ===')
           w(f'dev size: {len(data_dev)}')
-          w(f'stock size: {len(data_stock)} ({CLOSEST})')
+          w(f'stock size: {len(data_stock)}')
+          w('')
+
+          w(f'=== dev sections: {len(secs_dev)} ===')
+          for k in sorted(secs_dev.keys()):
+              w(f'  {k[0]},{k[1]} size=0x{secs_dev[k].size:x}')
+          w('')
+          w(f'=== stock sections: {len(secs_stock)} ===')
+          for k in sorted(secs_stock.keys()):
+              w(f'  {k[0]},{k[1]} size=0x{secs_stock[k].size:x}')
           w('')
 
           common = sorted(secs_dev.keys() & secs_stock.keys())
-          w(f'=== byte diffs in {len(common)} common sections ===')
+          w(f'=== common sections: {len(common)} ===')
+          total_diffs = 0
           for k in common:
               sd = secs_dev[k]
               ss = secs_stock[k]
               if sd.size != ss.size:
-                  w(f'[{k[0]},{k[1]}] size differs: dev={sd.size} stock={ss.size}')
+                  w(f'[{k[0]},{k[1]}] SIZE DIFFERS: dev=0x{sd.size:x} stock=0x{ss.size:x}')
                   continue
               if sd.offset == 0 or ss.offset == 0:
                   continue
@@ -221,27 +157,33 @@ jobs:
               if dd == ds:
                   continue
               diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]
-              w(f'[{k[0]},{k[1]}] size={sd.size} diff_bytes={len(diffs)}')
-              for i in diffs[:300]:
+              total_diffs += len(diffs)
+              w(f'[{k[0]},{k[1]}] size=0x{sd.size:x} diff_bytes={len(diffs)}')
+              for i in diffs[:500]:
                   w(f'  off 0x{i:x}: stock={ds[i]:02x} dev={dd[i]:02x}')
-              if len(diffs) > 300:
-                  w(f'  ... and {len(diffs)-300} more')
+              if len(diffs) > 500:
+                  w(f'  ... and {len(diffs)-500} more')
+
+          w('')
+          w(f'=== total diff bytes: {total_diffs} ===')
+
+          only_dev = sorted(set(secs_dev.keys()) - set(secs_stock.keys()))
+          only_stock = sorted(set(secs_stock.keys()) - set(secs_dev.keys()))
+          if only_dev:
+              w('=== sections only in DEV ===')
+              for x in only_dev: w(f'  {x}')
+          if only_stock:
+              w('=== sections only in STOCK ===')
+              for x in only_stock: w(f'  {x}')
 
           report.close()
-          print('diff-report.txt written')
           PYEOF
 
       - name: BRK and abort analysis
         run: |
           set -euo pipefail
           source venv/bin/activate
-          CLOSEST=$(cat closest.txt)
-          export CLOSEST
           python3 - <<'PYEOF'
-          import os
-
-          CLOSEST = os.environ['CLOSEST']
-
           patterns = [
               (bytes.fromhex('20A720D4'), 'brk #0x539'),
               (bytes.fromhex('200020D4'), 'brk #1'),
@@ -251,7 +193,7 @@ jobs:
           ]
 
           with open('brk-analysis.txt', 'w') as r:
-              for path in ['W.dev.dylib', f'stock/{CLOSEST}.thin.dylib']:
+              for path in ['W.dev.dylib', 'stock/17.2.11.thin.dylib']:
                   with open(path, 'rb') as f:
                       data = f.read()
                   r.write(f'=== {path} (size={len(data)}) ===\n')
@@ -265,28 +207,26 @@ jobs:
           PYEOF
           cat brk-analysis.txt
 
-      - name: Frida version strings
+      - name: Version strings from dev
         run: |
           set -euo pipefail
           echo "=== version-like strings in dev ===" > version-strings.txt
           strings W.dev.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 >> version-strings.txt || true
           echo "" >> version-strings.txt
-          echo "=== section name diff ===" >> version-strings.txt
-          cat section-name-diff.txt >> version-strings.txt
+          echo "=== interesting strings (frida, brk, abort) ===" >> version-strings.txt
+          strings W.dev.dylib | grep -iE 'frida|abort|brk|gadget|gum|detect' | head -40 >> version-strings.txt || true
           cat version-strings.txt
 
       - name: Summary
         run: |
           set -euo pipefail
-          CLOSEST=$(cat closest.txt)
           {
-            echo "### dev vs stock comparison"
+            echo "### dev vs stock 17.2.11 comparison"
             echo ""
             echo "| field | value |"
             echo "|---|---|"
             echo "| dev size | $(stat -f%z W.dev.dylib) B |"
-            echo "| closest stock | ${CLOSEST} |"
-            echo "| stock size | $(stat -f%z stock/${CLOSEST}.thin.dylib) B |"
+            echo "| stock size | $(stat -f%z stock/17.2.11.thin.dylib) B |"
             echo ""
             echo '```'
             cat brk-analysis.txt
@@ -298,10 +238,8 @@ jobs:
         with:
           name: comparison
           path: |
-            closest.txt
             diff-report.txt
             brk-analysis.txt
             version-strings.txt
-            section-name-diff.txt
           retention-days: 30
           if-no-files-found: warn
