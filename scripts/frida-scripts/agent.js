@@ -777,25 +777,40 @@ function findXrefs(targets, regions) {
         const insn = view.getUint32(i * 4, true);
         const address = base + offset + i * 4;
         const family = (insn & 0x9f000000) >>> 0;
+
         if (family === 0x90000000 || family === 0x10000000) {
           let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
           if (imm & 0x100000) imm -= 0x200000;
           if (family === 0x90000000) {
-            registers[insn & 0x1f] = pageOf(address) + imm * 4096;
+            registers[insn & 0x1f] = { page: pageOf(address) + imm * 4096, kind: "adrp" };
           } else {
             const direct = wanted[String(address + imm)];
-            if (direct !== undefined) direct.xrefs.push({ function: address, symbol: symbolOf(address) });
+            if (direct !== undefined) direct.xrefs.push({ function: address, symbol: symbolOf(address), via: "adr" });
           }
           continue;
         }
+
         if (((insn & 0xff800000) >>> 0) === 0x91000000) {
           const from = registers[(insn >>> 5) & 0x1f];
-          if (from === undefined) continue;
+          if (from === undefined || from.kind !== "adrp") continue;
           const shift = (insn >>> 22) & 3;
           const imm12 = (insn >>> 10) & 0xfff;
-          const value = from + (shift === 1 ? imm12 * 4096 : imm12);
+          const value = from.page + (shift === 1 ? imm12 * 4096 : imm12);
           const hit = wanted[String(value)];
-          if (hit !== undefined) hit.xrefs.push({ function: address, symbol: symbolOf(address) });
+          if (hit !== undefined) hit.xrefs.push({ function: address, symbol: symbolOf(address), via: "add" });
+          continue;
+        }
+
+        const ldFamily = (insn & 0xffc00000) >>> 0;
+        if (ldFamily === 0xf9400000) {
+          const from = registers[(insn >>> 5) & 0x1f];
+          if (from === undefined || from.kind !== "adrp") continue;
+          const imm12 = ((insn >>> 10) & 0xfff) * 8;
+          const poolAddr = from.page + imm12;
+          let poolValue = null;
+          try { poolValue = numOf(ptr(poolAddr).readPointer()); } catch (e) { continue; }
+          const hit = wanted[String(poolValue)];
+          if (hit !== undefined) hit.xrefs.push({ function: address, symbol: symbolOf(address), via: "ldr" });
         }
       }
       offset += take;
@@ -850,6 +865,7 @@ function scanMap(map, label, resultFile) {
       entry.xrefs.push({
         function: "0x" + xref.function.toString(16),
         functionRva: "0x" + (xref.function - base).toString(16),
+        via: xref.via || null,
         symbol: xref.symbol
       });
     }
@@ -857,7 +873,7 @@ function scanMap(map, label, resultFile) {
     if (entry.xrefs.length > 0) {
       log("HIT " + entry.anchor + " strRva=" + entry.rva + " xrefs=" + entry.xrefs.length);
       for (let x = 0; x < entry.xrefs.length && x < 5; x++) {
-        log("    xref funcRva=" + entry.xrefs[x].functionRva + (entry.xrefs[x].symbol ? " symbol=" + entry.xrefs[x].symbol : ""));
+        log("    xref funcRva=" + entry.xrefs[x].functionRva + (entry.xrefs[x].via ? " via=" + entry.xrefs[x].via : "") + (entry.xrefs[x].symbol ? " symbol=" + entry.xrefs[x].symbol : ""));
       }
     } else {
       log("HIT " + entry.anchor + " strRva=" + entry.rva + " xrefs=0");
