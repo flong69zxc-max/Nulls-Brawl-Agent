@@ -152,7 +152,23 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
+          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
+          find "$FRAMEWORK_NAME" -name "._*" -delete
+          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
+
+          rm -f "$FRAMEWORK_NAME.zip"
+          zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME" \
+            -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
+
+          echo "=== zip contents ==="
+          unzip -l "$FRAMEWORK_NAME.zip"
+
+          if unzip -l "$FRAMEWORK_NAME.zip" | grep -qE "__MACOSX|\._"; then
+            echo "::error::__MACOSX or ._ files present in archive"
+            exit 1
+          fi
+          echo "OK: clean zip"
+
           shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
 
       - name: Summary
