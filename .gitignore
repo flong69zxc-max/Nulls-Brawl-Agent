@@ -1,0 +1,18 @@
+# Generated artifacts
+FridaGadget.framework/
+offsets_report.txt
+offsets_resolved.js
+scripts/agent.js
+
+# Build outputs
+dist/
+.meta/
+
+# Node
+node_modules/
+package-lock.json
+
+# macOS
+.DS_Store
+__MACOSX/
+._*
