@@ -45,11 +45,23 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Show toolchain
+        run: |
+          set -euo pipefail
+          python3 --version
+          which python3
+
       - name: Download patcher
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
           cd "$PATCHER_DIR"
+
+          # Патчер фиксирует lief==0.14.1, для которой нет wheel под Python 3.14.
+          # Заменяем на lief==1.0.0 (совместим с Python 3.14, API сохранён).
+          sed -i '' 's/^lief==.*/lief==1.0.0/' requirements.txt
+          cat requirements.txt
+
           python3 -m venv venv
           source venv/bin/activate
           python3 -m pip install --upgrade pip
@@ -189,6 +201,7 @@ jobs:
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
             echo "| patcher | electrondefuser/frida-bin-patcher |"
+            echo "| lief | 1.0.0 |"
             echo "| arch | arm64 |"
             echo "| размер dylib | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
