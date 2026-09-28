@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: frida-gum
-          key: frida-gum-${{ env.FRIDA_VERSION }}-compare-v1
+          key: frida-gum-${{ env.FRIDA_VERSION }}-compare-v2
           restore-keys: |
             frida-gum-${{ env.FRIDA_VERSION }}-
 
@@ -94,7 +94,6 @@ jobs:
           xcrun strip -Sx W.thin.dylib -o W.thin-stripped.dylib
           mv W.thin-stripped.dylib W.thin.dylib
           cp W.thin.dylib W.ours.dylib
-          echo "stock: $(stat -f%z W.thin.dylib) bytes"
 
       - name: Graft our binary
         run: |
@@ -102,7 +101,6 @@ jobs:
           "$GUM_GRAFT" --ingest-function-starts W.ours.dylib
           xcrun strip -Sx W.ours.dylib -o W.ours-stripped.dylib
           mv W.ours-stripped.dylib W.ours.dylib
-          echo "grafted: $(stat -f%z W.ours.dylib) bytes"
 
       - name: Unpack dev
         run: |
@@ -116,51 +114,28 @@ jobs:
           else
             lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
           fi
-          echo "dev: $(stat -f%z W.dev.dylib) bytes"
 
-      - name: Dump section headers
+      - name: Generate diagnostics
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
-            echo "=== $f sections ==="
-            otool -l "$f" | awk '/sectname/{s=$2} /segname/{g=$2} /size /{if(s)print g,s,$2; s=""}' | sort -u
-            echo ""
-          done
+          mkdir -p diagnostics
 
-      - name: Dump __FRIDA segments of ours
-        run: |
-          set -euo pipefail
-          echo "=== __FRIDA_TEXT0 __trampolines (first 64 bytes) ==="
-          otool -l W.ours.dylib | grep -A5 '__FRIDA_TEXT0' | head -10
-          echo ""
-          echo "=== hexdump of trampoline section ==="
-          python3 - << 'PYEOF'
-          import subprocess
-          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
-          lines = out.splitlines()
-          sect = None
-          off = None
-          size = None
-          for i,l in enumerate(lines):
-              if 'sectname __trampolines' in l and 'segname __FRIDA_TEXT0' in lines[i-1]:
-                  for j in range(i,i+12):
-                      s=lines[j].strip()
-                      if s.startswith('offset '): off=int(s.split()[1])
-                      if s.startswith('size '): size=int(s.split()[1],16)
-          if off is not None and size:
-              with open("W.ours.dylib","rb") as f:
-                  f.seek(off)
-                  data=f.read(min(size,256))
-              for i in range(0,len(data),16):
-                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in data[i:i+16]))
-          else:
-              print("not found")
-          PYEOF
+          # 1. Sections list
+          {
+            for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
+              echo "=== $f ==="
+              otool -l "$f" 2>/dev/null | awk '
+                /sectname/ { s = $2 }
+                /segname/  { g = $2 }
+                /^  size /  { if (s != "") print g " " s " " $2; s = "" }
+              ' | sort -u
+              echo ""
+            done
+          } > diagnostics/sections.txt 2>&1 || true
 
-      - name: Compare counts and sizes
-        run: |
-          set -euo pipefail
-          python3 - << 'PYEOF'
+          # 2. Counts
+          python3 - << 'PYEOF' > diagnostics/counts.txt 2>&1
+          import os
           def counts(path):
               with open(path,"rb") as f: d=f.read()
               return {
@@ -169,24 +144,43 @@ jobs:
                   "nop": d.count(bytes.fromhex("1F2003D5")),
                   "ret": d.count(bytes.fromhex("C0035FD6")),
               }
-          import os
-          dev = counts("W.dev.dylib")
-          ours = counts("W.ours.dylib")
-          print("=== counts ===")
-          for k in dev:
-              print(f"{k}: dev={dev[k]} ours={ours[k]}")
-          print("")
-          print("=== sizes ===")
-          print(f"dev:  {os.path.getsize('W.dev.dylib')}")
-          print(f"ours: {os.path.getsize('W.ours.dylib')}")
-          print(f"stock:{os.path.getsize('W.thin.dylib')}")
+          for path in ["W.dev.dylib","W.ours.dylib","W.thin.dylib"]:
+              c = counts(path)
+              print(f"=== {path} (size={os.path.getsize(path)}) ===")
+              for k,v in c.items():
+                  print(f"  {k}: {v}")
+              print("")
           PYEOF
 
-      - name: Disassemble dev __text head
-        run: |
-          set -euo pipefail
-          echo "=== dev __text first 128 bytes ==="
-          python3 - << 'PYEOF'
+          # 3. __FRIDA trampolines of ours
+          python3 - << 'PYEOF' > diagnostics/trampolines.txt 2>&1
+          import subprocess
+          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
+          lines = out.splitlines()
+          # find all __trampolines sections
+          for i,l in enumerate(lines):
+              if 'sectname __trampolines' in l:
+                  segname = "?"
+                  for k in range(max(0,i-2), i+1):
+                      if 'segname' in lines[k]:
+                          segname = lines[k].split()[1]
+                  off = size = None
+                  for j in range(i,i+12):
+                      s=lines[j].strip()
+                      if s.startswith('offset '): off=int(s.split()[1])
+                      if s.startswith('size '): size=int(s.split()[1],16)
+                  if off is not None and size:
+                      with open("W.ours.dylib","rb") as f:
+                          f.seek(off)
+                          data=f.read(min(size,128))
+                      print(f"=== {segname} __trampolines off={off} size={size} ===")
+                      for k in range(0,len(data),16):
+                          print(f"  {off+k:08x}: " + " ".join(f"{b:02x}" for b in data[k:k+16]))
+                      print("")
+          PYEOF
+
+          # 4. dev __text head
+          python3 - << 'PYEOF' > diagnostics/dev_text.txt 2>&1
           import subprocess
           out = subprocess.run(["otool","-l","W.dev.dylib"],capture_output=True,text=True).stdout
           lines=out.splitlines()
@@ -199,18 +193,15 @@ jobs:
                   break
           if off is not None:
               with open("W.dev.dylib","rb") as f:
-                  f.seek(off); d=f.read(128)
+                  f.seek(off); d=f.read(256)
               for i in range(0,len(d),16):
-                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
+                  print(f"{off+i:08x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
           else:
               print("offset not found")
           PYEOF
 
-      - name: Disassemble ours __text head
-        run: |
-          set -euo pipefail
-          echo "=== ours __text first 128 bytes ==="
-          python3 - << 'PYEOF'
+          # 5. ours __text head
+          python3 - << 'PYEOF' > diagnostics/ours_text.txt 2>&1
           import subprocess
           out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
           lines=out.splitlines()
@@ -223,39 +214,74 @@ jobs:
                   break
           if off is not None:
               with open("W.ours.dylib","rb") as f:
-                  f.seek(off); d=f.read(128)
+                  f.seek(off); d=f.read(256)
               for i in range(0,len(d),16):
-                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
+                  print(f"{off+i:08x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
           else:
               print("offset not found")
           PYEOF
 
-      - name: Analyze LC_FUNCTION_STARTS
-        run: |
-          set -euo pipefail
-          echo "=== LC_FUNCTION_STARTS ==="
-          for f in W.dev.dylib W.ours.dylib; do
-            echo "--- $f ---"
-            otool -l "$f" | grep -A2 LC_FUNCTION_STARTS || echo "no LC_FUNCTION_STARTS"
-          done
-          echo ""
-          echo "=== LC_DYLD_CHAINED_FIXUPS ==="
-          for f in W.dev.dylib W.ours.dylib; do
-            echo "--- $f ---"
-            otool -l "$f" | grep -A3 LC_DYLD_CHAINED_FIXUPS || echo "no chained fixups"
-          done
+          # 6. LC commands presence
+          {
+            for f in W.dev.dylib W.ours.dylib; do
+              echo "=== $f ==="
+              otool -l "$f" | grep -E 'LC_FUNCTION_STARTS|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_EXPORTS_TRIE|LC_DYLD_INFO|LC_CODE_SIGNATURE|LC_SEGMENT_64' | sort | uniq -c
+              echo ""
+            done
+          } > diagnostics/lc_commands.txt 2>&1 || true
 
-      - name: Compare symbol tables
+          # 7. Segment names
+          {
+            for f in W.dev.dylib W.ours.dylib; do
+              echo "=== $f ==="
+              otool -l "$f" | grep 'segname' | awk '{print $2}' | sort -u
+              echo ""
+            done
+          } > diagnostics/segments.txt 2>&1 || true
+
+          # 8. Symbols
+          {
+            for f in W.dev.dylib W.ours.dylib; do
+              echo "=== $f: total globals ==="
+              nm -gU "$f" 2>/dev/null | wc -l
+              echo ""
+            done
+            echo "=== diff of symbol names (dev vs ours, first 50) ==="
+            diff <(nm -gU W.dev.dylib 2>/dev/null | awk '{print $3}' | sort) \
+                 <(nm -gU W.ours.dylib 2>/dev/null | awk '{print $3}' | sort) 2>&1 | head -50 || true
+          } > diagnostics/symbols.txt 2>&1 || true
+
+          # 9. File sizes
+          {
+            for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
+              echo "$f: $(stat -f%z $f) bytes"
+            done
+          } > diagnostics/sizes.txt 2>&1 || true
+
+          # 10. Segment-level size dump from vmRegionInfo perspective
+          {
+            for f in W.dev.dylib W.ours.dylib; do
+              echo "=== $f vm sizes ==="
+              otool -l "$f" | awk '
+                /segname/ { g = $2 }
+                /vmsize/  { print g, $2 }
+              ' | sort -u
+              echo ""
+            done
+          } > diagnostics/vmsizes.txt 2>&1 || true
+
+          echo "=== diagnostics generated ==="
+          ls -la diagnostics/
+          wc -l diagnostics/*.txt
+
+      - name: Show diagnostics in log
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          echo "=== dev symbols count ==="
-          nm -gU W.dev.dylib 2>/dev/null | wc -l
-          echo "=== ours symbols count ==="
-          nm -gU W.ours.dylib 2>/dev/null | wc -l
-          echo ""
-          echo "=== diff of symbols (first 40) ==="
-          diff <(nm -gU W.dev.dylib 2>/dev/null | awk '{print $3}') \
-               <(nm -gU W.ours.dylib 2>/dev/null | awk '{print $3}') | head -40 || true
+          for f in diagnostics/*.txt; do
+            echo "########## $f ##########"
+            cat "$f"
+            echo ""
+          done
 
       - name: Assemble final framework (ours)
         run: |
@@ -311,5 +337,6 @@ jobs:
           path: |
             Frida.framework.zip
             Frida.framework.zip.sha256
+            diagnostics/
           retention-days: 30
           if-no-files-found: warn
