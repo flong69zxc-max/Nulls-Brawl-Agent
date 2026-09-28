@@ -18,7 +18,7 @@ jobs:
         id: cache-gum-graft
         with:
           path: gum-graft-bin
-          key: gum-graft-17.18.0-macos-arm64-v2
+          key: gum-graft-17.18.0-macos-arm64-v3
 
       - name: Checkout frida-gum
         if: steps.cache-gum-graft.outputs.cache-hit != 'true'
@@ -80,13 +80,13 @@ jobs:
           mv /tmp/frida-gadget.dylib gadget-cache/FridaGadget.dylib
           file gadget-cache/FridaGadget.dylib
 
-      - name: Apply gum-graft
+      - name: Apply gum-graft (ingest function starts)
         run: |
           set -euo pipefail
           mkdir -p work
           cp gadget-cache/FridaGadget.dylib work/FridaGadget.dylib
           chmod +x gum-graft-bin/gum-graft
-          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft -i work/FridaGadget.dylib -a 0xb24998
+          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft --ingest-function-starts work/FridaGadget.dylib
           file work/FridaGadget.dylib
 
       - name: Create Framework structure
