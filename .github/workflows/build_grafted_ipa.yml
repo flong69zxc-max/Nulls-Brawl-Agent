@@ -15,10 +15,11 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
+      LDID_VERSION: 'v2.1.5-procursus7'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
@@ -34,23 +35,36 @@ jobs:
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           echo "thin before sign: $(stat -f%z W.thin.dylib)"
 
-      - name: Build ldid-procursus from source
+      - name: Install ldid-procursus
         run: |
           set -euo pipefail
           sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid 2>/dev/null || true
           brew uninstall ldid 2>/dev/null || true
-          brew install cmake pkg-config libplist openssl@3
-          rm -rf ldid-src
-          git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
-          OPENSSL_PREFIX=$(brew --prefix openssl@3)
-          LIBPLIST_PREFIX=$(brew --prefix libplist)
-          cd ldid-src
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DCMAKE_PREFIX_PATH="$OPENSSL_PREFIX;$LIBPLIST_PREFIX"
-          cmake --build build -j$(sysctl -n hw.ncpu)
-          sudo cp build/ldid /usr/local/bin/ldid
-          sudo chmod +x /usr/local/bin/ldid
+
+          PREBUILT_URL="https://github.com/ProcursusTeam/ldid/releases/download/${LDID_VERSION}/ldid_macos_arm64"
+          if curl -fL --retry 3 -o /tmp/ldid "$PREBUILT_URL" 2>/dev/null; then
+            echo "using prebuilt binary"
+            chmod +x /tmp/ldid
+            sudo mv /tmp/ldid /usr/local/bin/ldid
+          else
+            echo "prebuilt not available, building from source"
+            brew install pkg-config libplist openssl@3
+            OPENSSL_PREFIX=$(brew --prefix openssl@3)
+            LIBPLIST_PREFIX=$(brew --prefix libplist)
+            export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+            export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
+            export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
+            rm -rf ldid-src
+            git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src
+            cd ldid-src
+            make CXXFLAGS="-O2 -pipe"
+            sudo cp ldid /usr/local/bin/ldid
+            sudo chmod +x /usr/local/bin/ldid
+          fi
+
           hash -r
           which ldid
+          ldid -v 2>&1 | head -3 || true
 
       - name: Resign with ldid-procursus
         run: |
@@ -62,9 +76,10 @@ jobs:
             exit 1
           fi
 
-      - name: Write zero-sig script
+      - name: Zero signature blob
         run: |
-          cat > /tmp/zero_sig.py << 'PYEOF'
+          set -euo pipefail
+          python3 - << 'PYEOF'
           import struct
           path = "W.thin.dylib"
           with open(path, "rb") as f:
@@ -82,14 +97,8 @@ jobs:
               o += s
           with open(path, "wb") as f:
               f.write(d)
-          print("final size: " + str(len(d)))
+          print("final thin: " + str(len(d)))
           PYEOF
-          echo "script written"
-
-      - name: Run zero-sig
-        run: |
-          set -euo pipefail
-          python3 /tmp/zero_sig.py
 
       - name: Wrap into fat binary
         run: |
@@ -100,28 +109,6 @@ jobs:
             echo "::error::fat size is $(stat -f%z W.dylib), expected 19022976"
             exit 1
           fi
-
-      - name: Write compare script
-        run: |
-          cat > /tmp/compare.py << 'PYEOF'
-          with open("W.dev.dylib", "rb") as f:
-              dev = f.read()
-          with open("W.dylib", "rb") as f:
-              ours = f.read()
-          if len(dev) != len(ours):
-              print("length mismatch: dev=" + str(len(dev)) + " ours=" + str(len(ours)))
-          n = min(len(dev), len(ours))
-          diffs = []
-          for i in range(n):
-              if dev[i] != ours[i]:
-                  diffs.append(i)
-          print("diffs: " + str(len(diffs)))
-          for i in diffs[:32]:
-              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
-          if not diffs:
-              print("PERFECT: byte-identical to dev")
-          PYEOF
-          echo "script written"
 
       - name: Compare with dev reference
         run: |
@@ -141,7 +128,21 @@ jobs:
           cp "$DEV" W.dev.dylib
           echo "dev:  $(stat -f%z W.dev.dylib)"
           echo "ours: $(stat -f%z W.dylib)"
-          python3 /tmp/compare.py
+          python3 - << 'PYEOF'
+          with open("W.dev.dylib", "rb") as f:
+              dev = f.read()
+          with open("W.dylib", "rb") as f:
+              ours = f.read()
+          if len(dev) != len(ours):
+              print("length mismatch: dev=" + str(len(dev)) + " ours=" + str(len(ours)))
+          n = min(len(dev), len(ours))
+          diffs = [i for i in range(n) if dev[i] != ours[i]]
+          print("diffs: " + str(len(diffs)))
+          for i in diffs[:32]:
+              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
+          if not diffs:
+              print("PERFECT: byte-identical to dev")
+          PYEOF
 
       - name: Assemble Frida.framework
         run: |
