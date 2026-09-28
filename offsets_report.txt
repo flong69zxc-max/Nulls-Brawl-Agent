@@ -1,6 +1,6 @@
-elapsed 0.2s
+elapsed 58.5s
 input: 282
-resolved: 76 (verified=1 rematched=0)
+resolved: 76 (verified=1 rematched=0 string=0)
 failed: 206
   FAIL AllianceManager__startSpectate @ 0x846cfc (no-func)
   FAIL LogicSkillData__getMsBetweenAttacks @ 0xb0e698 (no-func)
