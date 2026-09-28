@@ -20,14 +20,37 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          VERSION=$(curl -sL -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/frida/frida/releases/latest" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          META=$(curl -sL -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/frida/frida/releases/latest")
+          VERSION=$(echo "$META" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          URL=$(echo "$META" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          for a in d.get('assets',[]):
+              n=a['name']
+              if 'gadget' in n and 'ios' in n and n.endswith('.dylib.xz'):
+                  print(a['browser_download_url']); break
+          ")
+          if [ -z "$URL" ]; then
+            URL=$(echo "$META" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          for a in d.get('assets',[]):
+              n=a['name']
+              if 'gadget' in n and 'ios' in n and n.endswith('.xz'):
+                  print(a['browser_download_url']); break
+          ")
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::No iOS gadget asset found for $VERSION"
+            echo "$META" | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin).get('assets',[])]"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          curl -fL -o /tmp/frida.tar.xz \
-            "https://github.com/frida/frida/releases/download/${VERSION}/frida-gadget-${VERSION}-ios-universal.dylib.xz"
-          xz -d /tmp/frida.tar.xz
-          mv /tmp/frida.tar.xz /tmp/FridaGadget.dylib 2>/dev/null || mv /tmp/frida.tar /tmp/FridaGadget.dylib
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          curl -fL -o /tmp/frida.xz "$URL"
+          xz -d /tmp/frida.xz
+          mv /tmp/frida /tmp/FridaGadget.dylib
           cp /tmp/FridaGadget.dylib build/FridaGadget.dylib
           file build/FridaGadget.dylib
 
@@ -48,13 +71,13 @@ jobs:
           mkdir -p extract
           unzip -q bs.ipa -d extract
           if [ ! -d "extract/Payload" ]; then
-            echo "::error::Payload directory not found in IPA"
+            echo "::error::Payload directory not found"
             ls -la extract/
             exit 1
           fi
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           if [ -z "$APP_DIR" ]; then
-            echo "::error::No .app bundle found in Payload"
+            echo "::error::No .app bundle in Payload"
             ls -la extract/Payload/
             exit 1
           fi
@@ -63,7 +86,7 @@ jobs:
             BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
           fi
           if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
-            echo "::error::No executable found in .app"
+            echo "::error::No executable in .app"
             ls -la "$APP_DIR"
             exit 1
           fi
@@ -93,17 +116,16 @@ jobs:
 
       - name: Install tools
         run: |
-          brew install ldid dpkg
+          brew install ldid
           git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
           cd /tmp/insert_dylib
           xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO 2>&1 | tail -5
-          cp build/Release/insert_dylib /usr/local/bin/ 2>/dev/null || cp build/Release/insert_dylib /opt/homebrew/bin/
-          chmod +x /usr/local/bin/insert_dylib 2>/dev/null || chmod +x /opt/homebrew/bin/insert_dylib
+          sudo cp build/Release/insert_dylib /usr/local/bin/
+          sudo chmod +x /usr/local/bin/insert_dylib
 
       - name: Inject dylib
         run: |
           set -euo pipefail
-          APP_DIR="${{ steps.extract.outputs.app_dir }}"
           BIN="${{ steps.extract.outputs.bin }}"
           insert_dylib --weak --all-yes "@executable_path/Frameworks/FridaGadget.dylib" "$BIN" "$BIN.patched"
           mv "$BIN.patched" "$BIN"
@@ -124,6 +146,16 @@ jobs:
           set -euo pipefail
           cd build/extract
           zip -qry ../bs_patched.ipa Payload
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="brawl-$(date +%Y%m%d)-run${{ github.run_number }}"
+          gh release create "$TAG" build/bs_patched.ipa \
+            --title "Brawl $TAG" \
+            --notes "Auto-built from run ${{ github.run_number }} (Frida ${{ steps.frida.outputs.version }})"
 
       - uses: actions/upload-artifact@v4
         with:
