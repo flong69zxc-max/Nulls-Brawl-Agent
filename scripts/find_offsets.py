@@ -25,172 +25,38 @@ START = time.time()
 log = lambda m: (sys.stdout.write(m + "\n"), sys.stdout.flush())
 w = lambda s: L.append(s)
 
-# --- Known string anchors for Nulls Brawl / Brawl Stars functions ---
-# Based on SCRE tutorials and common function patterns.
+# --- Строковые якоря для функций (на основе SCRE и DeepWiki) ---
 STRING_ANCHORS = {
-    "BattleScreen__update": ["BattleScreen::update"],
-    "GameMain__update": ["GameMain::update"],
-    "LogicBattleModeClient_update": ["LogicBattleModeClient::update"],
-    "BattleScreen__tryToActivateSkill": ["tryToActivateSkill"],
-    "BattleScreen__updateMovement": ["updateMovement"],
-    "BattleScreen__updateAutoshoot": ["updateAutoshoot"],
+    "HomePage_startGame": ["TID_MATCHMAKE_FAILED_15"],
+    "LogicBattleModeClient_update": ["LogicBattleModeClient"],
     "BattleScreen_activateSkill": ["activateSkill"],
-    "Gui_showFloaterTextAtDefaultPos": ["showFloaterTextAtDefaultPos"],
-    "LogicCharacterClient__getWeaponSkill": ["getWeaponSkill"],
-    "LogicProjectileData_getRadius": ["getRadius"],
-    "LogicProjectileData_getSpeed": ["getSpeed"],
-    "LogicCharacterData_getCollisionRadius": ["getCollisionRadius"],
+    "Gui_showFloaterTextAtDefaultPos": ["showFloaterText"],
+    "StringCtor": ["String not found:"],
+    "SCIDConfig__getBool": ["DisableIngameFriends"],
+    "LogicCharacterData_getCollisionRadius": ["CollisionRadius"],
+    "LogicProjectileData_getRadius": ["ProjectileRadius"],
+    "ClientInputManager_addInput": ["addInput"],
+    "ResourceManager__isResourceLoaded": ["isResourceLoaded"],
     "MessageManager__receiveMessage": ["receiveMessage"],
     "MessageManager__sendMessage": ["sendMessage"],
-    "ResourceManager__isResourceLoaded": ["isResourceLoaded"],
+    "LogicBattleModeClient_getOwnCharacter": ["getOwnCharacter"],
     "LogicGameObjectClient_getX": ["getX"],
     "LogicGameObjectClient_getY": ["getY"],
     "LogicGameObjectClient_getZ": ["getZ"],
-    "Sprite_Sprite": ["Sprite::Sprite"],
+    "Sprite_Sprite": ["Sprite"],
     "TextField_setText": ["setText"],
     "ScrollArea__scrollTo": ["scrollTo"],
     "DisplayObject__setXY": ["setXY"],
     "MovieClip__getTextFieldByName": ["getTextFieldByName"],
     "Sprite__addChild": ["addChild"],
     "Sprite__removeChild": ["removeChild"],
-    "ClientInputManager_addInput": ["addInput"],
-    "LogicBattleModeClient_getOwnCharacter": ["getOwnCharacter"],
-    "LogicBattleModeClient_getOwnPlayerTeam": ["getOwnPlayerTeam"],
-    "LogicBattleModeClient_getOwnPlayerIndex": ["getOwnPlayerIndex"],
-    "LogicBattleModeClient_getTileMap": ["getTileMap"],
-    "LogicBattleModeClient_setRandomSeed": ["setRandomSeed"],
-    "LogicBattleModeClient_setPlayerAvatar": ["setPlayerAvatar"],
-    "LogicBattleModeClient_setClientPredictionMoveTo": ["setClientPredictionMoveTo"],
-    "LogicCharacterClient__getCurrentActiveOrCastingSkill": ["getCurrentActiveOrCastingSkill"],
-    "LogicCharacterClient__getSkillAt": ["getSkillAt"],
-    "LogicCharacterClient__canMoveAndUseThisSkillSimultaneously": ["canMoveAndUseThisSkillSimultaneously"],
-    "LogicCharacterClient__getCarryableData": ["getCarryableData"],
-    "LogicCharacterClient__getLinkedCarryable": ["getLinkedCarryable"],
-    "LogicSkillData__getActiveTime": ["getActiveTime"],
-    "LogicSkillData__getRechargeTime": ["getRechargeTime"],
-    "LogicSkillData__getMaxCharge": ["getMaxCharge"],
-    "LogicSkillData__getMsBetweenAttacks": ["getMsBetweenAttacks"],
-    "LogicSkillData__getCastingRange": ["getCastingRange"],
-    "LogicSkillData__getProjectileData": ["getProjectileData"],
-    "LogicSkillClient__canActivate": ["canActivate"],
-    "LogicProjectileData__isBeam": ["isBeam"],
-    "LogicProjectileData__getNumEarlyTicks": ["getNumEarlyTicks"],
-    "LogicProjectileData__getSpawnAreaEffect": ["getSpawnAreaEffect"],
-    "LogicTileData__blocksMovement": ["blocksMovement"],
-    "LogicTileData__blocksProjectiles": ["blocksProjectiles"],
-    "GameStateManager__getInstance": ["getInstance"],
-    "GameStateManager__isState": ["isState"],
-    "HomeMode__getInstance": ["getInstance"],
-    "StringTable__getMovieClip": ["getMovieClip"],
-    "MovieClipHelper__setTextAndScaleIfNecessary": ["setTextAndScaleIfNecessary"],
-    "LogicTile__setData": ["setData"],
-    "LogicTileMap__isPlayerLineOfSightClear": ["isPlayerLineOfSightClear"],
-    "LogicTileMap__isPlayerLineOfSightClear1": ["isPlayerLineOfSightClear"],
-    "LogicDataTables__getOpenTileData": ["getOpenTileData"],
-    "LogicDataTables__getBaseTileData": ["getBaseTileData"],
-    "LogicDataTables__getSiegeBoltTileData": ["getSiegeBoltTileData"],
-    "LogicCharacterData_getSpeed": ["getSpeed"],
-    "LogicCharacterClient__isImmuneOrUntargetable": ["isImmuneOrUntargetable"],
-    "LogicGameObjectManagerClient__getGameObjects": ["getGameObjects"],
-    "LogicGameObjectManagerClient__findGameObject": ["findGameObject"],
-    "LogicProjectileServer__shootProjectile": ["shootProjectile"],
-    "LogicProjectileServer__runEarlyTicks": ["runEarlyTicks"],
-    "GlobalID__getInstanceID": ["getInstanceID"],
-    "LogicPlayerMap__save": ["save"],
-    "LogicPlayerMapUtil__tileDataToTileCode": ["tileDataToTileCode"],
-    "AnalyticEvent__AnalyticEvent": ["AnalyticEvent"],
-    "AnalyticEvent__setString": ["setString"],
-    "LogicRandom__setIteratedRandomSeed": ["setIteratedRandomSeed"],
-    "LogicCompressedString__LogicCompressedString": ["LogicCompressedString"],
-    "LogicLongToCodeConverterUtil__convert": ["convert"],
-    "LogicLongToCodeConverterUtil__toCode": ["toCode"],
-    "ResourceListener__addFile": ["addFile"],
-    "String__format": ["format"],
-    "FramerateManager__setSegment": ["setSegment"],
-    "FramerateManager__setLimit": ["setLimit"],
-    "Application__copyString": ["copyString"],
-    "BattleScreen__calculateProjectilePath": ["calculateProjectilePath"],
-    "BattleScreen__joystickToWorld": ["joystickToWorld"],
-    "BattleScreen__shouldShowAccessoryButton": ["shouldShowAccessoryButton"],
-    "BattleScreen__updateCameraParameters": ["updateCameraParameters"],
-    "BattleScreen__stopWithStick": ["stopWithStick"],
-    "BattleScreen__handleTouchReleased": ["handleTouchReleased"],
-    "BattleScreen__BattleScreen": ["BattleScreen"],
-    "BattleScreen_getClosestTargetForAutoshoot": ["getClosestTargetForAutoshoot"],
-    "BattleScreen_fireWrapperFn": ["fireWrapper"],
-    "CombatHUD__toggleEditing": ["toggleEditing"],
-    "CombatHUD__setShootStickState": ["setShootStickState"],
-    "CombatHUD__setMoveStickState": ["setMoveStickState"],
-    "CombatHUD__sendPinCommand": ["sendPinCommand"],
-    "CombatHUD__sendSprayCommand": ["sendSprayCommand"],
-    "CombatHUD__update": ["CombatHUD::update"],
-    "Character__updateHealthBar": ["updateHealthBar"],
-    "GUI__getDefaultFloaterPos": ["getDefaultFloaterPos"],
-    "GUI__showFloaterTextAt": ["showFloaterTextAt"],
-    "GUI__showPopup": ["showPopup"],
-    "GameButtonCtor": ["GameButton"],
-    "DropGUIContainer__ctorFromExport": ["ctorFromExport"],
-    "GameSliderComponent__GameSliderComponent": ["GameSliderComponent"],
-    "GameSliderComponent__setValueBounds": ["setValueBounds"],
-    "MapEditorModifierItem__MapEditorModifierItem": ["MapEditorModifierItem"],
-    "MapEditorModifierPopup__MapEditorModifierPopup": ["MapEditorModifierPopup"],
-    "MapEditorModifierPopup__addModifierItem": ["addModifierItem"],
-    "PopupBase__PopupBase": ["PopupBase"],
-    "ScrollArea__updateBounds": ["updateBounds"],
-    "ScrollArea__addContent": ["addContent"],
-    "ScrollArea__removeAllContent": ["removeAllContent"],
-    "CSVRow__getIntegerValueAt": ["getIntegerValueAt"],
-    "CSVRow__getName": ["getName"],
-    "CSVRow__getValueAt": ["getValueAt"],
-    "CSVRow__getBooleanValueAt": ["getBooleanValueAt"],
-    "CSVTable__getColumnIndexByName": ["getColumnIndexByName"],
-    "LogicJSONObject__put": ["put"],
-    "ScString_destruct": ["~ScString"],
-    "GameObjectManager__GameObjectManager": ["GameObjectManager"],
-    "Projectile_ctor": ["Projectile"],
-    "Projectile__update": ["Projectile::update"],
-    "RenderSystem__RenderSystem": ["RenderSystem"],
-    "DecalManager__DecalManager": ["DecalManager"],
-    "LogicTileMap__LogicTileMap": ["LogicTileMap"],
-    "LogicGameObjectManagerClient__LogicGameObjectManagerClient": ["LogicGameObjectManagerClient"],
-    "LogicBattleModeClient__LogicBattleModeClient": ["LogicBattleModeClient"],
-    "ClientInput_constructor_int": ["ClientInput"],
-    "ClientInputMessage_sendMovement": ["sendMovement"],
-    "TeamChatMessage__ctor": ["TeamChatMessage"],
-    "TeamSetMemberReadyMessage__ctor": ["TeamSetMemberReadyMessage"],
-    "StartSpectateMessage__ctor": ["StartSpectateMessage"],
-    "HashTagCodeGenerator__ctor": ["HashTagCodeGenerator"],
-    "HashTagCodeGenerator__toId": ["toId"],
-    "HashTagCodeGenerator__dtor": ["~HashTagCodeGenerator"],
-    "HashTagCodeGenerator__isValid": ["isValid"],
-    "Name_setupDecorated": ["setupDecorated"],
-    "Name_applyDecoration": ["applyDecoration"],
-    "PiranhaMessage_ctor": ["PiranhaMessage"],
-    "AllianceManager__startSpectate": ["startSpectate"],
-    "CustomButton_onButtonPressed": ["onButtonPressed"],
-    "nativeCopyToClipboard": ["copyToClipboard"],
-    "operator_new": ["operator new"],
-    "LogicGameModeUtil__isTileOnPoisonArea": ["isTileOnPoisonArea"],
-    "LogicData_getName": ["getName"],
-    "LogicDataTable_findByName": ["findByName"],
-    "LogicProjectileClient_ctor": ["LogicProjectileClient"],
-    "LogicProjectileClient_destruct": ["~LogicProjectileClient"],
-    "LogicProjectileClient_getData": ["getData"],
-    "LogicProjectileClient_getTargetX": ["getTargetX"],
-    "LogicProjectileClient_getTargetY": ["getTargetY"],
-    "AreaEffectData__getRadius": ["getRadius"],
-    "AreaEffectData__getActiveTimeMs": ["getActiveTimeMs"],
-    "MapEditorScreen__updateCameraParameters": ["updateCameraParameters"],
-    "MovieClip__getChildClipByName": ["getChildClipByName"],
-    "MovieClip__setChildVisible": ["setChildVisible"],
-    "MovieClip__gotoAndStopFrameIndex": ["gotoAndStopFrameIndex"],
-    "MovieClip_gotoAndStop": ["gotoAndStop"],
-    "Screen__getDpiClass": ["getDpiClass"],
-    "Screen__getHeight": ["getHeight"],
-    "Screen__getWidth": ["getWidth"],
-    "BattleMode_getInstance": ["getInstance"],
-    "BattleMode__enter": ["enter"],
-    "BattleMode__addResourcesToLoad": ["addResourcesToLoad"],
+}
+
+# --- Флаги разработчика (SCRE: v53, v44, DeepWiki) ---
+DEVELOPER_FLAGS = {
+    "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
+    "LogicVersion_isDev": ["isDev"],
+    "LogicVersion_isProd": ["isProd"],
 }
 
 def addr(rva_val):
@@ -343,8 +209,49 @@ def find_by_strings(name):
             continue
     return None
 
+def find_developer_flags():
+    """Поиск флагов разработчика по строкам и символам (метод SCRE)."""
+    log("[*] searching developer flags...")
+    found_flags = {}
+    st = currentProgram.getSymbolTable()
+    rm = currentProgram.getReferenceManager()
+    
+    for flag_name, anchors in DEVELOPER_FLAGS.items():
+        for anchor in anchors:
+            try:
+                it = st.getSymbolIterator(anchor, True)
+                if it is None:
+                    continue
+                while it.hasNext():
+                    sym = it.next()
+                    sa = sym.getAddress()
+                    if sa is None:
+                        continue
+                    # Ищем ссылки на символ
+                    refs = rm.getReferencesTo(sa)
+                    rit = refs.iterator()
+                    while rit.hasNext():
+                        r = rit.next()
+                        fa = r.getFromAddress()
+                        f = getFunctionContaining(fa)
+                        if f is None:
+                            continue
+                        fr = rva(f.getEntryPoint())
+                        if fr < MIN_FUNC_RVA:
+                            continue
+                        found_flags[flag_name] = fr
+                        log("[+] found %s @ 0x%x" % (flag_name, fr))
+                        break
+                    if flag_name in found_flags:
+                        break
+                if flag_name in found_flags:
+                    break
+            except:
+                continue
+    return found_flags
+
 def main():
-    log("=== find_offsets ===")
+    log("=== find_offsets (SCRE-style) ===")
     offs = read_offsets()
     log("[*] parsed %d entries from offsets.js" % len(offs))
 
@@ -378,7 +285,7 @@ def main():
             failures.append((name, old_rva, "budget"))
             continue
 
-        # 1. Try exact old RVA
+        # 1. Точное совпадение по старому RVA
         f = find_exact(old_rva)
         if f is not None:
             resolved[name] = old_rva
@@ -391,7 +298,7 @@ def main():
                 pass
             continue
 
-        # 2. Try signature from sigdb
+        # 2. Поиск по сигнатуре (если есть в базе)
         s = sigdb.get(name)
         if s:
             if sig_index is None:
@@ -403,7 +310,7 @@ def main():
                 new_sigs[name] = s
                 continue
 
-        # 3. Try string anchors
+        # 3. Поиск по строковым якорям (SCRE-метод)
         f = find_by_strings(name)
         if f is not None:
             nr = rva(f.getEntryPoint())
@@ -419,6 +326,11 @@ def main():
 
         failures.append((name, old_rva, "no-func"))
 
+    # Поиск флагов разработчика
+    dev_flags = find_developer_flags()
+    for flag_name, flag_rva in dev_flags.items():
+        resolved[flag_name] = flag_rva
+
     fh = open(OFF_OUT, "w")
     fh.write("export const offsets = Object.freeze(\n{\n")
     for n in sorted(offs.keys()):
@@ -426,6 +338,8 @@ def main():
             fh.write("    %s: 0x%x,\n" % (n, resolved[n]))
         else:
             fh.write("    %s: 0x%x,\n" % (n, offs[n]))
+    for n in sorted(dev_flags.keys()):
+        fh.write("    %s: 0x%x,\n" % (n, dev_flags[n]))
     fh.write("});\n")
     fh.close()
 
@@ -435,6 +349,9 @@ def main():
     w("input: %d" % len(offs))
     w("resolved: %d (verified=%d rematched=%d string=%d)" % (
         len(resolved), verified, rematched, string_hits))
+    w("developer flags found: %d" % len(dev_flags))
+    for n, r in dev_flags.items():
+        w("  DEV %s @ 0x%x" % (n, r))
     w("failed: %d" % len(failures))
     for n, r, msg in failures:
         w("  FAIL %s @ 0x%x (%s)" % (n, r, msg))
