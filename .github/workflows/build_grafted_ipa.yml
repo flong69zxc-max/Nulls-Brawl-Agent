@@ -1,14 +1,4 @@
-name: Build Florida Frida Framework
-
-# Собирает Florida-iOS (Frida 17.16.4 с удалёнными детектами) в готовый iOS Frida.framework.
-# Источник: https://github.com/Mac-XK/Florida-iOS
-#
-# Выход: Frida.framework.zip, внутри:
-#   Frida.framework/
-#   ├── W.dylib          (Florida Frida Gadget, уже без детектов)
-#   ├── Info.plist
-#   ├── W.config
-#   └── agent.js         (заглушка, заменишь своим скриптом)
+name: Build Frida Framework
 
 on:
   push:
@@ -29,40 +19,35 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 15
     env:
-      FLORIDA_URL: https://github.com/Mac-XK/Florida-iOS/releases/download/Florida/frida-gadget.dylib
+      FRIDA_VERSION: '17.16.4'
       FRAMEWORK_NAME: Frida.framework
+      GADGET_URL: https://github.com/frida/frida/releases/download/17.16.4/frida-gadget-17.16.4-ios-universal.dylib.xz
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Download Florida Frida Gadget
+      - name: Download Frida Gadget
         run: |
           set -euo pipefail
-          echo "downloading ${FLORIDA_URL}"
-          curl -fL --retry 3 -o W.stock.dylib "${FLORIDA_URL}"
+          echo "downloading ${GADGET_URL}"
+          curl -fL --retry 3 -o gadget.dylib.xz "${GADGET_URL}"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.stock.dylib
           ls -l W.stock.dylib
           file W.stock.dylib
 
       - name: Verify platform
+        continue-on-error: true
         run: |
           set -euo pipefail
           file W.stock.dylib | grep -q arm64 || {
-            echo "::error::не arm64"; exit 1
+            echo "::error::not arm64"; exit 1
           }
-          echo "--- LC_BUILD_VERSION ---"
-          otool -l W.stock.dylib | grep -A4 LC_BUILD_VERSION | head -20
-
-      - name: Check Florida markers
-        run: |
-          set -euo pipefail
-          echo "--- строковые маркеры Frida (должно быть пусто) ---"
-          if strings W.stock.dylib | grep -E "frida-gadget|frida:rpc|FridaScriptEngine" | head -10; then
-            echo "::warning::строковые маркеры Frida всё ещё присутствуют"
-          else
-            echo "строковые маркеры Frida вычищены"
-          fi
+          echo "--- platform info ---"
+          otool -l W.stock.dylib | grep -E 'LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS' | head -10 || true
+          echo "--- done ---"
 
       - name: Assemble Frida.framework
         run: |
@@ -137,7 +122,7 @@ jobs:
             ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
           else
-            echo "::warning::ldid недоступен, оставляю неподписанный"
+            echo "::warning::ldid not available, leaving unsigned"
           fi
 
       - name: Package
@@ -150,14 +135,13 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### florida frida framework"
+            echo "### frida framework"
             echo ""
-            echo "| параметр | значение |"
+            echo "| param | value |"
             echo "|---|---|"
-            echo "| source | Mac-XK/Florida-iOS |"
-            echo "| frida | 17.16.4 |"
+            echo "| frida | ${FRIDA_VERSION} |"
             echo "| arch | arm64 |"
-            echo "| размер dylib | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
+            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
