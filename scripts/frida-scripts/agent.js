@@ -1,18 +1,16 @@
 import ObjC from "frida-objc-bridge";
 
 const LOG_NAME = "offsets_finder.log";
-const CFG_NAME = "modmenu_config.json";
 const RESULT_NAME = "offsets.json";
+const FLAT_NAME = "offsets_flat.json";
 const UPDATED = "updated";
 const TEST_NAME = ".__finder_write_test";
 const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
-const MAX_SCAN_REGION = 128 * 1024 * 1024;
 const CHUNK_SIZE = 1024 * 1024;
-const MAX_XREF_HITS = 24;
+const MAX_XREF_HITS = 16;
 
-// Строковые якоря — из этих строк ищем XREF'ы на функции
 const ANCHORS = {
   Stage_instance:                     ["Stage"],
   ResourceManager_getMovieClip:       ["getMovieClip"],
@@ -30,6 +28,12 @@ const ANCHORS = {
   GUI_closePopup:                     ["closePopup"],
   GUI_showFloaterTextAt:              ["showFloaterTextAt"]
 };
+
+let logPath = null;
+let docsPath = null;
+let updatedPath = null;
+let gameModule = null;
+let started = false;
 
 // -------------------------------------------------------------------------
 // infra
@@ -97,11 +101,6 @@ function containerLike(path) {
   if (path.indexOf("/Data/Application/") !== -1) return true;
   if (path.indexOf("/Containers/Data/") !== -1) return true;
   return false;
-}
-
-function uuidIn(path) {
-  const m = (path === null ? "" : path).match(/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/g);
-  return m === null ? "-" : m[m.length - 1];
 }
 
 function bundlePath() {
@@ -204,15 +203,9 @@ function initPaths() {
   log("log opened at " + logPath);
 }
 
-let logPath = null;
-let docsPath = null;
-let updatedPath = null;
-
 // -------------------------------------------------------------------------
 // game module
 // -------------------------------------------------------------------------
-
-let gameModule = null;
 
 function skipModule(m) {
   const path = m.path || "";
@@ -228,7 +221,6 @@ function skipModule(m) {
 function findGameModule() {
   const modules = Process.enumerateModules();
   let best = null;
-
   const bundleId = (() => {
     try { return String(ObjC.classes.NSBundle.mainBundle().bundleIdentifier()).toLowerCase(); } catch (e) { return ""; }
   })();
@@ -244,19 +236,10 @@ function findGameModule() {
       return m;
     }
   }
-
   for (let i = 0; i < modules.length; i++) {
     const m = modules[i];
     if (skipModule(m)) continue;
-    if (m.path.indexOf(".app") === -1 && m.path.indexOf("Application") === -1) continue;
     if (best === null || m.size > best.size) best = m;
-  }
-  if (best === null) {
-    for (let i = 0; i < modules.length; i++) {
-      const m = modules[i];
-      if (skipModule(m)) continue;
-      if (best === null || m.size > best.size) best = m;
-    }
   }
   if (best === null) best = Process.mainModule;
   gameModule = best;
@@ -267,6 +250,36 @@ function findGameModule() {
 function gameBase() {
   if (gameModule === null) findGameModule();
   return gameModule.base;
+}
+
+function gameRegions() {
+  // только регионы, пересекающиеся с [base, base+size) game-модуля
+  const mod = gameModule || findGameModule();
+  const low = mod.base;
+  const high = mod.base.add(mod.size);
+  const lowNum = parseInt(low.toString(), 16);
+  const highNum = parseInt(high.toString(), 16);
+
+  const out = [];
+  const seen = {};
+  const modes = ["r--", "rw-", "r-x"];
+  for (let i = 0; i < modes.length; i++) {
+    let list = [];
+    try { list = Process.enumerateRanges(modes[i]); } catch (e) { continue; }
+    for (let r = 0; r < list.length; r++) {
+      const range = list[r];
+      const key = range.base.toString();
+      if (seen[key] === true) continue;
+      seen[key] = true;
+
+      const startNum = parseInt(range.base.toString(), 16);
+      const endNum = startNum + range.size;
+      if (endNum <= lowNum || startNum >= highNum) continue;
+      out.push(range);
+    }
+  }
+  log("game regions for scan: " + out.length + " (of " + mod.size + " bytes module)");
+  return out;
 }
 
 // -------------------------------------------------------------------------
@@ -284,26 +297,6 @@ function hexPattern(text) {
   return parts.join(" ");
 }
 
-function collectReadableRanges() {
-  const ranges = [];
-  const seen = {};
-  const modes = ["r--", "rw-", "r-x"];
-  for (let i = 0; i < modes.length; i++) {
-    let list = [];
-    try { list = Process.enumerateRanges(modes[i]); } catch (e) { continue; }
-    for (let r = 0; r < list.length; r++) {
-      const range = list[r];
-      const key = range.base.toString();
-      if (seen[key] === true) continue;
-      seen[key] = true;
-      if (range.size <= 0) continue;
-      if (range.size > MAX_SCAN_REGION) continue;
-      ranges.push(range);
-    }
-  }
-  return ranges;
-}
-
 function findStrings(needles, ranges) {
   const hits = [];
   const byAddr = {};
@@ -311,12 +304,16 @@ function findStrings(needles, ranges) {
   for (let n = 0; n < needles.length; n++) {
     const pattern = hexPattern(needles[n]);
     if (pattern === null) {
-      log("anchor skipped (non-ascii): " + needles[n]);
+      log("  anchor skipped (non-ascii): " + needles[n]);
       continue;
     }
     for (let r = 0; r < ranges.length; r++) {
       let matches = [];
-      try { matches = Memory.scanSync(ranges[r].base, ranges[r].size, pattern); } catch (e) { continue; }
+      try {
+        matches = Memory.scanSync(ranges[r].base, ranges[r].size, pattern);
+      } catch (e) {
+        continue;
+      }
       for (let m = 0; m < matches.length; m++) {
         const a = matches[m].address;
         const key = a.toString();
@@ -332,28 +329,22 @@ function findStrings(needles, ranges) {
 }
 
 // -------------------------------------------------------------------------
-// xref scan (ADRP + ADD imm)
+// xref scan (ADRP + ADD imm) — только по game-регионам с r-x
 // -------------------------------------------------------------------------
 
 function pageOf(addr) {
   return addr.and(ptr("0xFFFFFFFFFFFFF000"));
 }
 
-function findXrefs(targets) {
-  // targets: [{ address: NativePointer }]
+function findXrefs(targets, execRanges) {
   const map = {};
   for (let i = 0; i < targets.length; i++) {
     map[targets[i].address.toString()] = targets[i];
     targets[i].xrefs = [];
   }
 
-  const execRanges = (() => {
-    try { return Process.enumerateRanges("r-x"); } catch (e) { return []; }
-  })();
-
   for (let r = 0; r < execRanges.length; r++) {
     const range = execRanges[r];
-    if (range.size > MAX_SCAN_REGION) continue;
     let off = 0;
     while (off < range.size) {
       const take = Math.min(CHUNK_SIZE, range.size - off);
@@ -369,14 +360,12 @@ function findXrefs(targets) {
         const insnAddr = range.base.add(off + i * 4);
         const family = (insn & 0x9f000000) >>> 0;
 
-        // ADRP
         if (family === 0x90000000) {
           let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
           if (imm & 0x100000) imm -= 0x200000;
           regs[insn & 0x1f] = pageOf(insnAddr).add(imm * 4096);
           continue;
         }
-        // ADR
         if (family === 0x10000000) {
           let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
           if (imm & 0x100000) imm -= 0x200000;
@@ -385,7 +374,6 @@ function findXrefs(targets) {
           if (hit && hit.xrefs.length < MAX_XREF_HITS) hit.xrefs.push(insnAddr);
           continue;
         }
-        // ADD (imm12)
         if (((insn & 0xff800000) >>> 0) === 0x91000000) {
           const from = regs[(insn >>> 5) & 0x1f];
           if (from === undefined) continue;
@@ -402,160 +390,90 @@ function findXrefs(targets) {
 }
 
 // -------------------------------------------------------------------------
-// backend scanner (все экспорты/символы во всех модулях)
+// backend scan (экспорты/символы) — только в game-модуле
 // -------------------------------------------------------------------------
 
 function backendScan() {
   const names = Object.keys(ANCHORS);
   const result = {};
-  const modules = Process.enumerateModules();
+  const mod = gameModule || findGameModule();
 
-  for (let i = 0; i < modules.length; i++) {
-    const m = modules[i];
-    if (skipModule(m)) continue;
+  let exports = [];
+  try { exports = Module.enumerateExports(mod.name); } catch (e) { exports = []; }
+  log("exports in game module: " + exports.length);
 
-    let exports = [];
-    try { exports = Module.enumerateExports(m.name); } catch (e) { continue; }
-    for (let e = 0; e < exports.length; e++) {
-      const exp = exports[e];
-      const n = exp.name || "";
-      for (let k = 0; k < names.length; k++) {
-        const key = names[k];
-        const needles = ANCHORS[key];
-        for (let j = 0; j < needles.length; j++) {
-          if (n.indexOf(needles[j]) === -1) continue;
-          if (result[key] === undefined) result[key] = [];
-          const rva = exp.address.sub(m.base);
-          result[key].push({
-            module: m.name,
-            source: "export",
-            name: n,
-            rva: "0x" + rva.toString(16),
-            abs: exp.address.toString()
-          });
-          break;
-        }
-      }
-    }
-
-    if (m.size > 4 * 1024 * 1024) {
-      let syms = [];
-      try { syms = Module.enumerateSymbols(m.name); } catch (e) { syms = []; }
-      for (let s = 0; s < syms.length; s++) {
-        const sym = syms[s];
-        const n = sym.name || "";
-        for (let k = 0; k < names.length; k++) {
-          const key = names[k];
-          const needles = ANCHORS[key];
-          for (let j = 0; j < needles.length; j++) {
-            if (n.indexOf(needles[j]) === -1) continue;
-            if (result[key] === undefined) result[key] = [];
-            const rva = sym.address.sub(m.base);
-            result[key].push({
-              module: m.name,
-              source: "symbol",
-              name: n,
-              rva: "0x" + rva.toString(16),
-              abs: sym.address.toString()
-            });
-            break;
-          }
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-// -------------------------------------------------------------------------
-// string scan backend
-// -------------------------------------------------------------------------
-
-function stringScan() {
-  log("enumerating readable ranges");
-  const ranges = collectReadableRanges();
-  log("readable ranges: " + ranges.length);
-
-  const result = {};
-  const names = Object.keys(ANCHORS);
-
-  for (let i = 0; i < names.length; i++) {
-    const key = names[i];
-    log("scan strings for " + key);
-    const hits = findStrings(ANCHORS[key], ranges);
-    if (hits.length > 0) log("  string hits: " + hits.length);
-    result[key] = { strings: hits, functions: [] };
-  }
-
-  // собираем все найденные строки в один список для xref
-  const allStrings = [];
-  for (let i = 0; i < names.length; i++) {
-    const key = names[i];
-    const strings = result[key].strings;
-    for (let j = 0; j < strings.length; j++) allStrings.push(strings[j]);
-  }
-  log("total string hits: " + allStrings.length);
-
-  log("scanning xrefs (ADRP+ADD)...");
-  findXrefs(allStrings);
-  log("xrefs done");
-
-  const base = gameBase();
-  for (let i = 0; i < names.length; i++) {
-    const key = names[i];
-    const strings = result[key].strings;
-    const funcs = [];
-    const seenRva = {};
-    for (let j = 0; j < strings.length; j++) {
-      const xrefs = strings[j].xrefs || [];
-      for (let x = 0; x < xrefs.length; x++) {
-        const rva = xrefs[x].sub(base);
-        const rvaStr = "0x" + rva.toString(16);
-        if (seenRva[rvaStr] === true) continue;
-        seenRva[rvaStr] = true;
-        funcs.push({
-          string: strings[j].address.toString(),
-          needle: strings[j].needles[0],
-          xref: xrefs[x].toString(),
-          rva: rvaStr
+  for (let e = 0; e < exports.length; e++) {
+    const exp = exports[e];
+    const n = exp.name || "";
+    for (let k = 0; k < names.length; k++) {
+      const key = names[k];
+      const needles = ANCHORS[key];
+      for (let j = 0; j < needles.length; j++) {
+        if (n.indexOf(needles[j]) === -1) continue;
+        if (result[key] === undefined) result[key] = [];
+        const rva = exp.address.sub(mod.base);
+        result[key].push({
+          source: "export",
+          name: n,
+          rva: "0x" + rva.toString(16),
+          abs: exp.address.toString()
         });
+        break;
       }
     }
-    result[key].functions = funcs;
   }
 
+  let syms = [];
+  try { syms = Module.enumerateSymbols(mod.name); } catch (e) { syms = []; }
+  log("symbols in game module: " + syms.length);
+
+  for (let s = 0; s < syms.length; s++) {
+    const sym = syms[s];
+    const n = sym.name || "";
+    for (let k = 0; k < names.length; k++) {
+      const;
+ key = names[k];
+      const needles}
+
+ = ANCHORS[key];
+      for (functionlet j = 0; j < needles.length; j++) run {
+        if() (n.indexOf(need {
+les[j]) === -1 ) continue;
+        if (result[key] === undefined) result[key] = [];
+        const rva = sym.address.sub(mod.base);
+        result[key].push({
+          source: "symbol",
+          name: n,
+          rva: "0x" + rva.toString(16),
+          abs: sym.address.toString()
+        });
+        break;
+      }
+    }
+  }
   return result;
 }
 
 // -------------------------------------------------------------------------
-// main flow
+// main
 // -------------------------------------------------------------------------
 
 function saveOffsets(result) {
-  if (updatedPath === null) return;
+  if (updatedPath === null) return null;
   const path = updatedPath + "/" + RESULT_NAME;
   if (writeText(path, JSON.stringify(result, null, 2) + "\n")) log("offsets written: " + path);
 
-  // плоский список — первый найденный RVA
   const flat = {};
   const keys = Object.keys(result);
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
-    const entry = result[key];
-    if (entry.functions && entry.functions.length > 0) {
-      flat[key] = entry.functions[0].rva;
-    } else if (entry.candidates && entry.candidates.length > 0) {
-      flat[key] = entry.candidates[0].rva;
-    }
+    const e = result[key];
+    if (e.candidates && e.candidates.length > 0) flat[key] = e.candidates[0].rva;
+    else if (e.functions && e.functions.length > 0) flat[key] = e.functions[0].rva;
   }
-  const flatPath = updatedPath + "/offsets_flat.json";
+  const flatPath = updatedPath + "/" + FLAT_NAME;
   if (writeText(flatPath, JSON.stringify(flat, null, 2) + "\n")) log("flat offsets written: " + flatPath);
-  return flat;
-}
-
-function run() {
-  log("=== offsets finder start ===");
+  return flat log("=== offsets finder start ===");
   initPaths();
 
   try {
@@ -569,51 +487,92 @@ function run() {
 
   const mod = findGameModule();
   log("game module: " + mod.name + " base=" + mod.base + " size=" + mod.size);
-  const base = mod.base;
 
-  // 1) экспорты/символы
   log("--- backend scan (exports/symbols) ---");
-  const backendHits = backendScan();
+  let backendHits = {};
+  try { backendHits = backendScan(); } catch (e) { log("backend scan error: " + e.message); }
   const backendKeys = Object.keys(backendHits);
   for (let i = 0; i < backendKeys.length; i++) {
     const k = backendKeys[i];
     log("backend " + k + ": " + backendHits[k].length + " hits");
     for (let j = 0; j < Math.min(3, backendHits[k].length); j++) {
       const h = backendHits[k][j];
-      log("  " + h.source + " " + h.module + " " + h.name + " rva=" + h.rva);
+      log("  " + h.source + " " + h.name + " rva=" + h.rva);
     }
   }
 
-  // 2) строки + xref
   log("--- string scan (needles + xref) ---");
-  const stringHits = stringScan();
+  const ranges = gameRegions();
+  if (ranges.length === 0) {
+    log("no game regions found, abort string scan");
+  } else {
+    const names = Object.keys(ANCHORS);
+    const stringsByKey = {};
+    const allStrings = [];
 
-  // 3) собираем результат
-  const result = {};
-  const allKeys = Object.keys(ANCHORS);
-  for (let i = 0; i < allKeys.length; i++) {
-    const key = allKeys[i];
-    const candidates = (backendHits[key] || []).slice(0);
-    const funcs = (stringHits[key] && stringHits[key].functions) ? stringHits[key].functions : [];
-    result[key] = {
-      candidates: candidates,
-      functions: funcs,
-      strings: (stringHits[key] && stringHits[key].strings) ? stringHits[key].strings.map(function (s) {
-        return { address: s.address.toString(), needles: s.needles };
-      }) : []
-    };
+    for (let i = 0; i < names.length; i++) {
+      const key = names[i];
+      log("scan " + key);
+      let hits = [];
+      try { hits = findStrings(ANCHORS[key], ranges); } catch (e) { log("  error: " + e.message); }
+      log("  hits: " + hits.length);
+      stringsByKey[key] = hits;
+      for (let j = 0; j < hits.length; j++) allStrings.push(hits[j]);
+    }
+    log("total string hits: " + allStrings.length);
+
+    if (allStrings.length > 0) {
+      log("scanning xrefs...");
+      const execRanges = ranges.filter(function (r) { return r.protection.indexOf("x") !== -1; });
+      log("exec ranges: " + execRanges.length);
+      try { findXrefs(allStrings, execRanges); } catch (e) { log("xref error: " + e.message); }
+      log("xref done");
+    }
+
+    // собираем результат
+    const result = {};
+    for (let i = 0; i < names.length; i++) {
+      const key = names[i];
+      const strings = stringsByKey[key] || [];
+      const funcs = [];
+      const seenRva = {};
+      const base = gameBase();
+      for (let j = 0; j < strings.length; j++) {
+        const xrefs = strings[j].xrefs || [];
+        for (let x = 0; x < xrefs.length; x++) {
+          const rva = xrefs[x].sub(base);
+          const rvaStr = "0x" + rva.toString(16);
+          if (seenRva[rvaStr] === true) continue;
+          seenRva[rvaStr] = true;
+          funcs.push({
+            needle: strings[j].needles[0],
+            string: strings[j].address.toString(),
+            xref: xrefs[x].toString(),
+            rva: rvaStr
+          });
+        }
+      }
+      result[key] = {
+        candidates: backendHits[key] || [],
+        functions: funcs,
+        strings: strings.map(function (s) {
+          return { address: s.address.toString(), needles: s.needles };
+        })
+      };
+    }
+
+    log("--- summary ---");
+    for (let i = 0; i < names.length; i++) {
+      const key = names[i];
+      const e = result[key];
+      log(key + ": candidates=" + e.candidates.length + " xrefs=" + e.functions.length + " strings=" + e.strings.length);
+      if (e.candidates.length > 0) log("  best(candidate) rva=" + e.candidates[0].rva + " (" + e.candidates[0].name + ")");
+      if (e.functions.length > 0) log("  best(xref)     rva=" + e.functions[0].rva + " needle=" + e.functions[0].needle);
+    }
+
+    saveOffsets(result);
   }
 
-  log("--- summary ---");
-  for (let i = 0; i < allKeys.length; i++) {
-    const key = allKeys[i];
-    const e = result[key];
-    log(key + ": exports/symbols=" + e.candidates.length + " xrefs=" + e.functions.length + " strings=" + e.strings.length);
-    if (e.candidates.length > 0) log("  best(candidate) rva=" + e.candidates[0].rva + " (" + e.candidates[0].name + ")");
-    if (e.functions.length > 0) log("  best(xref)     rva=" + e.functions[0].rva + " needle=" + e.functions[0].needle);
-  }
-
-  saveOffsets(result);
   log("=== offsets finder done ===");
 }
 
@@ -621,24 +580,11 @@ function run() {
 // RPC
 // -------------------------------------------------------------------------
 
-let started = false;
-
 rpc.exports = {
-  init: function () {
-    if (started) return true;
-    started = true;
-    setTimeout(run, 0);
-    return true;
-  },
+  init: function () { if (started) return true; started = true; setTimeout(run, 0); return true; },
   run: function () { run(); return true; },
   paths: function () {
-    return {
-      docs: docsPath,
-      updated: updatedPath,
-      log: logPath,
-      bundle: bundlePath(),
-      uuid: uuidIn(docsPath)
-    };
+    return { docs: docsPath, updated: updatedPath, log: logPath, bundle: bundlePath() };
   },
   module: function () {
     if (gameModule === null) findGameModule();
@@ -669,11 +615,7 @@ rpc.exports = {
       let addr = null;
       try { addr = Module.findExportByName(m.name, name); } catch (e) {}
       if (addr === null) continue;
-      hits.push({
-        module: m.name,
-        abs: addr.toString(),
-        rva: "0x" + addr.sub(m.base).toString(16)
-      });
+      hits.push({ module: m.name, abs: addr.toString(), rva: "0x" + addr.sub(m.base).toString(16) });
     }
     return hits;
   },
