@@ -18,6 +18,7 @@ TEXT_BASE = 0x100000000
 MIN_FUNC_RVA = 0x10000
 BUDGET_SEC = 3600
 MIN_EXPECTED_ENTRIES = 200
+GENERIC_ANCHOR_LIMIT = 50
 
 L = []
 START = time.time()
@@ -27,61 +28,41 @@ log = lambda m: (sys.stdout.write(m + "\n"), sys.stdout.flush())
 w = lambda s: L.append(s)
 
 STRING_ANCHORS = {
-    "HomePage_startGame": ["TID_MATCHMAKE_FAILED_15"],
-    "LogicBattleModeClient_update": ["LogicBattleModeClient"],
-    "BattleScreen_activateSkill": ["activateSkill"],
-    "Gui_showFloaterTextAtDefaultPos": ["showFloaterText"],
-    "StringCtor": ["String not found:"],
-    "SCIDConfig__getBool": ["DisableIngameFriends"],
-    "LogicCharacterData_getCollisionRadius": ["CollisionRadius"],
-    "LogicProjectileData_getRadius": ["ProjectileRadius"],
-    "ClientInputManager_addInput": ["addInput"],
-    "ResourceManager__isResourceLoaded": ["isResourceLoaded"],
-    "MessageManager__receiveMessage": ["receiveMessage"],
-    "MessageManager__sendMessage": ["sendMessage"],
-    "LogicBattleModeClient_getOwnCharacter": ["getOwnCharacter"],
-    "LogicGameObjectClient_getX": ["getX"],
-    "LogicGameObjectClient_getY": ["getY"],
-    "LogicGameObjectClient_getZ": ["getZ"],
-    "Sprite_Sprite": ["Sprite"],
-    "TextField_setText": ["setText"],
-    "ScrollArea__scrollTo": ["scrollTo"],
-    "DisplayObject__setXY": ["setXY"],
-    "MovieClip__getTextFieldByName": ["getTextFieldByName"],
-    "Sprite__addChild": ["addChild"],
-    "Sprite__removeChild": ["removeChild"],
     "LogicSkillData__getMsBetweenAttacks": ["MsBetweenAttacks"],
     "LogicSkillData__getActiveTime": ["ActiveTime"],
     "LogicSkillData__getCastingRange": ["CastingRange"],
     "LogicSkillData__getRechargeTime": ["RechargeTime"],
     "LogicSkillData__getMaxCharge": ["MaxCharge"],
     "LogicProjectileData_getSpeed": ["ProjectileSpeed"],
+    "LogicProjectileData_getRadius": ["ProjectileRadius"],
     "LogicProjectileData_getRendering": ["ProjectileRendering"],
     "LogicProjectileData__isBeam": ["isBeam"],
     "LogicProjectileData__getNumEarlyTicks": ["NumEarlyTicks"],
     "LogicTileData__blocksMovement": ["BlocksMovement"],
     "LogicTileData__blocksProjectiles": ["BlocksProjectiles"],
+    "LogicCharacterData_getCollisionRadius": ["CollisionRadius"],
+    "LogicCharacterData_getSpeed": ["CharacterSpeed"],
     "LogicBattleModeClient__getTileMap": ["getTileMap"],
     "LogicBattleModeClient__getOwnPlayerIndex": ["getOwnPlayerIndex"],
     "LogicBattleModeClient__setRandomSeed": ["setRandomSeed"],
     "LogicBattleModeClient__setPlayerAvatar": ["setPlayerAvatar"],
+    "LogicBattleModeClient_getOwnCharacter": ["getOwnCharacter"],
+    "LogicBattleModeClient_getOwnPlayerTeam": ["getOwnPlayerTeam"],
     "LogicCharacterClient__getWeaponSkill": ["getWeaponSkill"],
     "LogicCharacterClient__getSkillAt": ["getSkillAt"],
     "LogicCharacterClient__getCarryableData": ["getCarryableData"],
     "LogicCharacterClient__getLinkedCarryable": ["getLinkedCarryable"],
+    "LogicCharacterClient__getCurrentActiveOrCastingSkill": ["getCurrentActiveOrCastingSkill"],
     "LogicCharacterClient__isImmuneOrUntargetable": ["isImmuneOrUntargetable"],
     "LogicGameObjectManagerClient__getGameObjects": ["getGameObjects"],
     "LogicGameObjectManagerClient__findGameObject": ["findGameObject"],
     "LogicProjectileServer__shootProjectile": ["shootProjectile"],
     "LogicProjectileServer__runEarlyTicks": ["runEarlyTicks"],
     "GlobalID__getInstanceID": ["getInstanceID"],
-    "LogicPlayerMap__save": ["save"],
     "LogicPlayerMapUtil__tileDataToTileCode": ["tileDataToTileCode"],
     "LogicRandom__setIteratedRandomSeed": ["setIteratedRandomSeed"],
-    "LogicLongToCodeConverterUtil__convert": ["convert"],
     "LogicLongToCodeConverterUtil__toCode": ["toCode"],
     "ResourceListener__addFile": ["addFile"],
-    "String__format": ["format"],
     "FramerateManager__setSegment": ["setSegment"],
     "FramerateManager__setLimit": ["setLimit"],
     "Application__copyString": ["copyString"],
@@ -115,9 +96,6 @@ STRING_ANCHORS = {
     "CSVRow__getBooleanValueAt": ["getBooleanValueAt"],
     "CSVTable__getColumnIndexByName": ["getColumnIndexByName"],
     "LogicJSONObject__put": ["put"],
-    "GameStateManager__getInstance": ["getInstance"],
-    "GameStateManager__isState": ["isState"],
-    "HomeMode__getInstance": ["getInstance"],
     "StringTable__getMovieClip": ["getMovieClip"],
     "MovieClipHelper__setTextAndScaleIfNecessary": ["setTextAndScaleIfNecessary"],
     "LogicTile__setData": ["setData"],
@@ -125,10 +103,6 @@ STRING_ANCHORS = {
     "LogicDataTables__getOpenTileData": ["getOpenTileData"],
     "LogicDataTables__getBaseTileData": ["getBaseTileData"],
     "LogicDataTables__getSiegeBoltTileData": ["getSiegeBoltTileData"],
-    "LogicCharacterData_getSpeed": ["CharacterSpeed"],
-    "BattleMode_getInstance": ["getInstance"],
-    "BattleMode__enter": ["enter"],
-    "BattleMode__addResourcesToLoad": ["addResourcesToLoad"],
     "ClientInputMessage_sendMovement": ["sendMovement"],
     "HashTagCodeGenerator__toId": ["toId"],
     "HashTagCodeGenerator__isValid": ["isValid"],
@@ -138,7 +112,6 @@ STRING_ANCHORS = {
     "CustomButton_onButtonPressed": ["onButtonPressed"],
     "nativeCopyToClipboard": ["copyToClipboard"],
     "LogicGameModeUtil__isTileOnPoisonArea": ["isTileOnPoisonArea"],
-    "LogicData_getName": ["getName"],
     "LogicDataTable_findByName": ["findByName"],
     "AreaEffectData__getRadius": ["getRadius"],
     "AreaEffectData__getActiveTimeMs": ["getActiveTimeMs"],
@@ -148,6 +121,71 @@ STRING_ANCHORS = {
     "Screen__getDpiClass": ["getDpiClass"],
     "Screen__getHeight": ["getHeight"],
     "Screen__getWidth": ["getWidth"],
+    "StringCtor": ["String not found:"],
+    "MessageManager__receiveMessage": ["receiveMessage"],
+    "MessageManager__sendMessage": ["sendMessage"],
+    "TextField_setText": ["setText"],
+    "BattleMode__enter": ["enter"],
+    "LogicBattleModeClient_update": ["LogicBattleModeClient"],
+    "LogicPlayerMap__save": ["save"],
+    "String__format": ["format"],
+    "LogicLongToCodeConverterUtil__convert": ["convert"],
+    "Sprite_Sprite": ["Sprite"],
+    "ClientInputManager_addInput": ["addInput"],
+    "LogicSkillData__getProjectileData": ["getProjectileData"],
+    "LogicSkillData__getBehaviour": ["getBehaviour"],
+    "LogicSkillData__getLinkedSkill": ["getLinkedSkill"],
+    "LogicSkillClient__canActivate": ["canActivate"],
+    "LogicSkillClient__getData": ["getData"],
+    "LogicGameObjectServer__getData": ["getData"],
+    "LogicProjectileClient_getData": ["getData"],
+    "LogicProjectileClient_getTargetX": ["getTargetX"],
+    "LogicProjectileClient_getTargetY": ["getTargetY"],
+    "LogicProjectileClient_destruct": ["~LogicProjectileClient"],
+    "LogicProjectileClient_ctor": ["LogicProjectileClient"],
+    "LogicCharacterClient__canMoveAndUseThisSkillSimultaneously": ["canMoveAndUseThisSkillSimultaneously"],
+    "LogicCharacterClientOwn__clientPredictionPauseMovementForSkillCasting": ["clientPredictionPauseMovementForSkillCasting"],
+    "LogicCharacterClientOwn__clientPredictionUpdateAttackDirection": ["clientPredictionUpdateAttackDirection"],
+    "LogicBattleModeClient__LogicBattleModeClient": ["LogicBattleModeClient"],
+    "LogicBattleModeClient_setClientPredictionMoveTo": ["setClientPredictionMoveTo"],
+    "LogicGameObjectManagerClient__LogicGameObjectManagerClient": ["LogicGameObjectManagerClient"],
+    "LogicTileMap__LogicTileMap": ["LogicTileMap"],
+    "LogicTileMap__isPlayerLineOfSightClear1": ["isPlayerLineOfSightClear"],
+    "LogicTileMap_getTile": ["getTile"],
+    "GameObjectManager__GameObjectManager": ["GameObjectManager"],
+    "RenderSystem__RenderSystem": ["RenderSystem"],
+    "DecalManager__DecalManager": ["DecalManager"],
+    "Projectile_ctor": ["Projectile"],
+    "Projectile__update": ["Projectile"],
+    "GameMain__update": ["GameMain"],
+    "GameScreen__getLogicBattle": ["getLogicBattle"],
+    "GameSettings__isFixedJoystickEnabled": ["isFixedJoystickEnabled"],
+    "Gui_getInstance": ["Gui"],
+    "Gui_showFloaterTextAtDefaultPos": ["showFloaterTextAtDefaultPos"],
+    "handleJoystick": ["handleJoystick"],
+    "ResourceManager__isResourceLoaded": ["isResourceLoaded"],
+    "ResourceManager__getCSV": ["getCSV"],
+    "HashTagCodeGenerator__ctor": ["HashTagCodeGenerator"],
+    "HashTagCodeGenerator__dtor": ["~HashTagCodeGenerator"],
+    "AnalyticEvent__AnalyticEvent": ["AnalyticEvent"],
+    "AnalyticEvent__setString": ["setString"],
+    "PiranhaMessage_ctor": ["PiranhaMessage"],
+    "TeamChatMessage__ctor": ["TeamChatMessage"],
+    "TeamSetMemberReadyMessage__ctor": ["TeamSetMemberReadyMessage"],
+    "StartSpectateMessage__ctor": ["StartSpectateMessage"],
+    "LogicCompressedString__LogicCompressedString": ["LogicCompressedString"],
+    "LogicLongToCodeConverterUtil__LogicLongToCodeConverterUtil": ["LogicLongToCodeConverterUtil"],
+    "LogicData_getName": ["getName"],
+    "LogicGameObjectClient_getX": ["getX"],
+    "LogicGameObjectClient_getY": ["getY"],
+    "LogicGameObjectClient_getZ": ["getZ"],
+    "LogicGameObjectClient_getData": ["getData"],
+    "LogicGameObjectClient_getGlobalID": ["getGlobalID"],
+    "LogicBattleModeClient__getOwnPlayerIndex_alias": ["getOwnPlayerIndex"],
+    "GameStateManager__getInstance": ["GameStateManager"],
+    "GameStateManager__isState": ["isState"],
+    "HomeMode__getInstance": ["HomeMode"],
+    "BattleMode_getInstance": ["BattleMode"],
 }
 
 DEVELOPER_FLAGS = {
@@ -170,18 +208,37 @@ def rva(a):
 def read_offsets():
     out = {}
     if not os.path.exists(OFF_IN):
-        log("[!] offsets.js not found")
         return out
     try:
         fh = open(OFF_IN, "r")
         content = fh.read()
         fh.close()
-    except Exception as e:
-        log("[!] read fail: %s" % e)
+    except:
         return out
     for m in re.finditer(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*0x([0-9a-fA-F]+)", content):
         out[m.group(1)] = int(m.group(2), 16)
     return out
+
+def load_sigdb():
+    if not os.path.exists(SIGDB):
+        return {}
+    try:
+        fh = open(SIGDB, "r")
+        d = json.load(fh)
+        fh.close()
+        if isinstance(d, dict):
+            return d
+    except:
+        pass
+    return {}
+
+def save_sigdb(d):
+    try:
+        fh = open(SIGDB, "w")
+        json.dump(d, fh, indent=2, sort_keys=True)
+        fh.close()
+    except:
+        pass
 
 def is_branch(insn):
     try:
@@ -231,8 +288,29 @@ def find_exact(rva_val):
             return None
     return None
 
+def build_sig_index(min_len=8):
+    idx = {}
+    fm = currentProgram.getFunctionManager()
+    it = fm.getFunctions(True)
+    count = 0
+    while it.hasNext():
+        if time.time() - START > BUDGET_SEC - 300:
+            break
+        try:
+            f = it.next()
+        except:
+            break
+        count += 1
+        try:
+            s = sig(f, 6)
+            if len(s) >= min_len:
+                idx.setdefault(s, []).append(f.getEntryPoint())
+        except:
+            continue
+    log("[*] sig index: %d funcs, %d sigs" % (count, len(idx)))
+    return idx
+
 def index_strings():
-    """Iterate all defined data ONCE, index strings by content."""
     log("[*] indexing strings via getDefinedData...")
     listing = currentProgram.getListing()
     try:
@@ -240,26 +318,20 @@ def index_strings():
     except Exception as e:
         log("[!] getDefinedData failed: %s" % e)
         return {}, 0, 0
-
     idx = {}
     total_data = 0
     total_str = 0
     sample = []
     while it.hasNext():
         if time.time() - START > BUDGET_SEC - 600:
-            log("[!] string index budget exceeded")
             break
         try:
             d = it.next()
         except:
             break
         total_data += 1
-        if total_data % 100000 == 0:
-            log("[*] scan: %d data, %d strings" % (total_data, total_str))
         try:
-            if d is None:
-                continue
-            if not d.hasStringValue():
+            if d is None or not d.hasStringValue():
                 continue
             sval = str(d.getValue())
             if not sval:
@@ -271,12 +343,11 @@ def index_strings():
             idx.setdefault(key, []).append(d.getAddress())
         except:
             continue
-
     log("[*] total data items: %d" % total_data)
     log("[*] total strings: %d" % total_str)
     log("[*] unique strings: %d" % len(idx))
     log("[*] sample strings:")
-    for s in sample:
+    for s in sample[:20]:
         log("    %r" % s)
     return idx, total_data, total_str
 
@@ -287,59 +358,55 @@ def find_anchor_addrs(string_idx, anchor):
             out.extend(addrs)
     return out
 
-def find_func_from_addrs(addrs, name):
-    rm = currentProgram.getReferenceManager()
-    for sa in addrs:
-        try:
-            refs = rm.getReferencesTo(sa)
-            rit = refs.iterator()
-            while rit.hasNext():
-                r = rit.next()
-                fa = r.getFromAddress()
-                f = getFunctionContaining(fa)
-                if f is None:
-                    continue
-                fr = rva(f.getEntryPoint())
-                if fr < MIN_FUNC_RVA:
-                    continue
-                log("[+] %s -> func @ 0x%x (from %s)" % (name, fr, sa))
-                return f
-        except:
+def score_functions_for_name(anchors, anchor_hits, used_addrs, rm):
+    scores = {}
+    addr_to_func = {}
+    for anchor in anchors:
+        addrs = anchor_hits.get(anchor, [])
+        if not addrs:
             continue
-    return None
+        weight = 1
+        if len(addrs) > GENERIC_ANCHOR_LIMIT:
+            weight = 0
+        for sa in addrs:
+            sa_key = str(sa)
+            if sa_key in used_addrs:
+                continue
+            try:
+                refs = rm.getReferencesTo(sa)
+                rit = refs.iterator()
+                while rit.hasNext():
+                    r = rit.next()
+                    fa = r.getFromAddress()
+                    f = getFunctionContaining(fa)
+                    if f is None:
+                        continue
+                    fr = rva(f.getEntryPoint())
+                    if fr < MIN_FUNC_RVA:
+                        continue
+                    scores[fr] = scores.get(fr, 0) + weight
+                    addr_to_func.setdefault(fr, []).append(sa_key)
+            except:
+                continue
+    return scores, addr_to_func
 
 def main():
-    log("=== find_offsets v3 (string-index) ===")
+    log("=== find_offsets v4 (scored anchors) ===")
     offs = read_offsets()
     log("[*] parsed %d entries from offsets.js" % len(offs))
 
     if len(offs) < MIN_EXPECTED_ENTRIES:
-        msg = "ABORT: offsets.js has only %d entries, expected >= %d" % (len(offs), MIN_EXPECTED_ENTRIES)
-        log("[!] " + msg)
+        log("[!] ABORT: offsets.js has only %d entries, expected >= %d" % (len(offs), MIN_EXPECTED_ENTRIES))
         sys.exit(1)
 
-    sigdb = {}
-    if os.path.exists(SIGDB):
-        try:
-            fh = open(SIGDB, "r")
-            sigdb = json.load(fh)
-            fh.close()
-            if not isinstance(sigdb, dict):
-                sigdb = {}
-        except:
-            sigdb = {}
+    sigdb = load_sigdb()
     log("[*] sigdb: %d entries" % len(sigdb))
 
     string_idx, total_data, total_str = index_strings()
-
     if total_str == 0:
-        log("[!] NO STRINGS FOUND IN BINARY")
-        log("[!] Possible causes:")
-        log("[!]   1. COLD analysis did not run (check cold.log)")
-        log("[!]   2. Strings are compressed/encoded in this build")
-        log("[!]   3. Ghidra did not run the string analysis step")
+        log("[!] NO STRINGS FOUND — cannot use SCRE method")
+        sys.exit(1)
 
-    # Pre-compute anchor hits
     all_anchors = set()
     for anchors in STRING_ANCHORS.values():
         for a in anchors:
@@ -350,23 +417,31 @@ def main():
 
     log("[*] unique anchors to search: %d" % len(all_anchors))
     anchor_hits = {}
+    generic_anchors = set()
     for a in all_anchors:
         hits = find_anchor_addrs(string_idx, a)
         if hits:
             anchor_hits[a] = hits
-            log("[*] anchor %r: %d addr(s)" % (a, len(hits)))
-
+            if len(hits) > GENERIC_ANCHOR_LIMIT:
+                generic_anchors.add(a)
     log("[*] anchors with hits: %d / %d" % (len(anchor_hits), len(all_anchors)))
+    log("[*] generic anchors (>%d hits): %d" % (GENERIC_ANCHOR_LIMIT, len(generic_anchors)))
 
+    rm = currentProgram.getReferenceManager()
     resolved = {}
     verified = 0
     rematched = 0
-    string_hits = 0
+    anchor_hits_count = 0
+    ambiguous = 0
     failures = []
     new_sigs = {}
     sig_index = None
+    used_addrs = set()
+    addr_owner = {}
 
-    for name, old_rva in offs.items():
+    names_sorted = sorted(offs.keys())
+    for name in names_sorted:
+        old_rva = offs[name]
         if old_rva < MIN_FUNC_RVA:
             resolved[name] = old_rva
             continue
@@ -389,7 +464,7 @@ def main():
         s = sigdb.get(name)
         if s:
             if sig_index is None:
-                sig_index = {}
+                sig_index = build_sig_index()
             cands = sig_index.get(s, [])
             if len(cands) == 1:
                 resolved[name] = rva(cands[0])
@@ -398,38 +473,50 @@ def main():
                 continue
 
         anchors = STRING_ANCHORS.get(name)
-        if anchors:
-            for a in anchors:
-                addrs = anchor_hits.get(a, [])
-                if not addrs:
-                    continue
-                f = find_func_from_addrs(addrs, name)
-                if f is not None:
-                    nr = rva(f.getEntryPoint())
-                    resolved[name] = nr
-                    string_hits += 1
-                    try:
-                        s = sig(f)
-                        if s:
-                            new_sigs[name] = s
-                    except:
-                        pass
-                    break
-            if name in resolved:
-                continue
+        if not anchors:
+            failures.append((name, old_rva, "no-anchor"))
+            continue
 
-        failures.append((name, old_rva, "no-func"))
+        scores, addr_to_func = score_functions_for_name(anchors, anchor_hits, used_addrs, rm)
+        if not scores:
+            failures.append((name, old_rva, "anchor-miss"))
+            continue
+
+        best_score = max(scores.values())
+        top = [fr for fr, sc in scores.items() if sc == best_score and sc > 0]
+        if len(top) != 1:
+            failures.append((name, old_rva, "ambiguous:%d" % len(top)))
+            ambiguous += 1
+            continue
+
+        best_rva = top[0]
+        for sa_key in addr_to_func.get(best_rva, []):
+            used_addrs.add(sa_key)
+            addr_owner[sa_key] = name
+        resolved[name] = best_rva
+        anchor_hits_count += 1
+        try:
+            f = getFunctionAt(addr(best_rva))
+            if f is not None:
+                s = sig(f)
+                if s:
+                    new_sigs[name] = s
+        except:
+            pass
 
     dev_flags = {}
     for flag_name, anchors in DEVELOPER_FLAGS.items():
-        for a in anchors:
-            addrs = anchor_hits.get(a, [])
-            if not addrs:
-                continue
-            f = find_func_from_addrs(addrs, flag_name)
-            if f is not None:
-                dev_flags[flag_name] = rva(f.getEntryPoint())
-                break
+        scores, addr_to_func = score_functions_for_name(anchors, anchor_hits, used_addrs, rm)
+        if not scores:
+            continue
+        best_score = max(scores.values())
+        top = [fr for fr, sc in scores.items() if sc == best_score and sc > 0]
+        if len(top) == 1:
+            best_rva = top[0]
+            dev_flags[flag_name] = best_rva
+            for sa_key in addr_to_func.get(best_rva, []):
+                used_addrs.add(sa_key)
+                addr_owner[sa_key] = flag_name
 
     fh = open(OFF_OUT, "w")
     fh.write("export const offsets = Object.freeze(\n{\n")
@@ -443,27 +530,23 @@ def main():
     fh.write("});\n")
     fh.close()
 
-    try:
-        fh = open(SIGDB, "w")
-        json.dump(new_sigs, fh, indent=2, sort_keys=True)
-        fh.close()
-    except:
-        pass
+    save_sigdb(new_sigs)
 
     w("elapsed %.1fs" % (time.time() - START))
     w("input: %d" % len(offs))
     w("strings indexed: %d (unique: %d)" % (total_str, len(string_idx)))
     w("anchors with hits: %d / %d" % (len(anchor_hits), len(all_anchors)))
-    w("resolved: %d (verified=%d rematched=%d string=%d)" % (
-        len(resolved), verified, rematched, string_hits))
+    w("generic anchors: %d" % len(generic_anchors))
+    w("resolved: %d (verified=%d rematched=%d anchor=%d ambiguous=%d)" % (
+        len(resolved), verified, rematched, anchor_hits_count, ambiguous))
     w("developer flags found: %d" % len(dev_flags))
     for n, r in dev_flags.items():
         w("  DEV %s @ 0x%x" % (n, r))
     w("failed: %d" % len(failures))
-    for n, r, msg in failures[:80]:
+    for n, r, msg in failures[:100]:
         w("  FAIL %s @ 0x%x (%s)" % (n, r, msg))
-    if len(failures) > 80:
-        w("  ... and %d more" % (len(failures) - 80))
+    if len(failures) > 100:
+        w("  ... and %d more" % (len(failures) - 100))
 
     fh = open(REPORT, "w")
     for line in L:
