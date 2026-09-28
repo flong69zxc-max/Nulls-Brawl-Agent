@@ -41,11 +41,13 @@ jobs:
       - name: Analyze original binary
         run: |
           set -euo pipefail
-          echo "=== BRK #0x539 count ==="
-          xxd W.stock.dylib | grep -c "20a720d4" || true
-          echo "=== BRK #1 count ==="
-          xxd W.stock.dylib | grep -c "200020d4" || true
-          echo "=== abort symbol ==="
+          count_pattern() {
+            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
+          }
+          echo "BRK #0x539 in stock: $(count_pattern W.stock.dylib 20a720d4)"
+          echo "BRK #1 in stock: $(count_pattern W.stock.dylib 200020d4)"
+          echo "NOP in stock: $(count_pattern W.stock.dylib 1f2003d5)"
+          echo "abort symbol:"
           nm -gU W.stock.dylib | grep -i abort || true
 
       - name: Patch BRK and abort
@@ -59,7 +61,6 @@ jobs:
 
           nop = bytes.fromhex("1F 20 03 D5")
 
-          # --- BRK #0x539 ---
           brk539 = bytes.fromhex("20 A7 20 D4")
           count_brk = 0
           idx = 0
@@ -72,7 +73,6 @@ jobs:
               idx += 4
           print(f"BRK #0x539 patched: {count_brk}")
 
-          # --- BRK #1 ---
           brk1 = bytes.fromhex("20 00 20 D4")
           count_brk1 = 0
           idx = 0
@@ -85,7 +85,6 @@ jobs:
               idx += 4
           print(f"BRK #1 patched: {count_brk1}")
 
-          # --- BL abort ---
           out = subprocess.run(["nm", "-gU", "W.stock.dylib"], capture_output=True, text=True)
           abort_addr = None
           for line in out.stdout.splitlines():
@@ -119,34 +118,42 @@ jobs:
       - name: Verify patches
         run: |
           set -euo pipefail
-          echo "=== verify BRK #0x539 removed ==="
-          if xxd W.full-patched.dylib | grep -q "20a720d4"; then
-            echo "::error::BRK #0x539 still present"
+          count_pattern() {
+            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
+          }
+
+          STOCK_BRK539=$(count_pattern W.stock.dylib 20a720d4)
+          PATCHED_BRK539=$(count_pattern W.full-patched.dylib 20a720d4)
+          STOCK_BRK1=$(count_pattern W.stock.dylib 200020d4)
+          PATCHED_BRK1=$(count_pattern W.full-patched.dylib 200020d4)
+          STOCK_NOP=$(count_pattern W.stock.dylib 1f2003d5)
+          PATCHED_NOP=$(count_pattern W.full-patched.dylib 1f2003d5)
+
+          echo "BRK #0x539: stock=$STOCK_BRK539 patched=$PATCHED_BRK539"
+          echo "BRK #1:     stock=$STOCK_BRK1 patched=$PATCHED_BRK1"
+          echo "NOP:        stock=$STOCK_NOP patched=$PATCHED_NOP"
+
+          if [ "$PATCHED_BRK539" -ne 0 ]; then
+            echo "::error::BRK #0x539 still present ($PATCHED_BRK539)"
             exit 1
           fi
-          echo "OK: BRK #0x539 removed"
-
-          echo "=== verify BRK #1 removed ==="
-          if xxd W.full-patched.dylib | grep -q "200020d4"; then
-            echo "::error::BRK #1 still present"
+          if [ "$PATCHED_BRK1" -ne 0 ]; then
+            echo "::error::BRK #1 still present ($PATCHED_BRK1)"
             exit 1
           fi
-          echo "OK: BRK #1 removed"
 
-          echo "=== verify NOP count increased ==="
-          STOCK_NOP=$(xxd W.stock.dylib | grep -c "1f2003d5" || true)
-          PATCHED_NOP=$(xxd W.full-patched.dylib | grep -c "1f2003d5" || true)
-          echo "stock NOP patterns: $STOCK_NOP"
-          echo "patched NOP patterns: $PATCHED_NOP"
-          if [ "$PATCHED_NOP" -le "$STOCK_NOP" ]; then
-            echo "::error::no new NOPs inserted, patch did not apply"
+          EXPECTED_MIN=$((STOCK_NOP + STOCK_BRK539 + STOCK_BRK1))
+          if [ "$PATCHED_NOP" -lt "$EXPECTED_MIN" ]; then
+            echo "::error::NOP count $PATCHED_NOP < expected $EXPECTED_MIN (patch did not apply)"
             exit 1
           fi
-          echo "OK: patches applied"
 
-          echo "=== verify arm64 arch ==="
+          if [ "$STOCK_BRK539" -eq 0 ] && [ "$STOCK_BRK1" -eq 0 ]; then
+            echo "::warning::no BRKs found in stock — verification limited to NOP growth"
+          fi
+
           file W.full-patched.dylib | grep -q arm64 || { echo "::error::not arm64"; exit 1; }
-          echo "OK: arm64"
+          echo "OK: all patches verified"
 
       - name: Assemble Frida.framework
         run: |
@@ -225,13 +232,14 @@ jobs:
       - name: Final verification
         run: |
           set -euo pipefail
-          echo "=== final binary checks ==="
+          count_pattern() {
+            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
+          }
+          echo "=== final framework checks ==="
           file "$FRAMEWORK_NAME/W.dylib"
-          otool -l "$FRAMEWORK_NAME/W.dylib" | grep -A4 LC_BUILD_VERSION | head -10 || true
-          echo "=== BRK #0x539 in final ==="
-          xxd "$FRAMEWORK_NAME/W.dylib" | grep -c "20a720d4" || echo "0 (good)"
-          echo "=== BRK #1 in final ==="
-          xxd "$FRAMEWORK_NAME/W.dylib" | grep -c "200020d4" || echo "0 (good)"
+          echo "BRK #0x539: $(count_pattern $FRAMEWORK_NAME/W.dylib 20a720d4)"
+          echo "BRK #1:     $(count_pattern $FRAMEWORK_NAME/W.dylib 200020d4)"
+          echo "NOP:        $(count_pattern $FRAMEWORK_NAME/W.dylib 1f2003d5)"
           echo "=== framework structure ==="
           find "$FRAMEWORK_NAME" -type f | sort
 
@@ -244,6 +252,9 @@ jobs:
       - name: Summary
         run: |
           set -euo pipefail
+          count_pattern() {
+            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
+          }
           {
             echo "### patched frida framework"
             echo ""
@@ -251,6 +262,9 @@ jobs:
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
             echo "| patches | BRK #0x539, BRK #1, BL abort |"
+            echo "| BRK #0x539 remaining | $(count_pattern $FRAMEWORK_NAME/W.dylib 20a720d4) |"
+            echo "| BRK #1 remaining | $(count_pattern $FRAMEWORK_NAME/W.dylib 200020d4) |"
+            echo "| NOP count | $(count_pattern $FRAMEWORK_NAME/W.dylib 1f2003d5) |"
             echo "| arch | arm64 |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
