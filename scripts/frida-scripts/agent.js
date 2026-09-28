@@ -1,4 +1,4 @@
-'use strict';
+import ObjC from "frida-objc-bridge";
 
 var BUNDLE = null;
 try {
@@ -20,19 +20,6 @@ function log(msg) {
 
 log('=== agent start ===');
 log('bundle=' + BUNDLE);
-
-function tryScriptLoad(path) {
-    try {
-        if (typeof Script === 'undefined') return false;
-        if (typeof Script.load !== 'function') return false;
-        Script.load(path);
-        log('Script.load OK: ' + path);
-        return true;
-    } catch (e) {
-        log('Script.load FAIL: ' + e.message);
-        return false;
-    }
-}
 
 function tryEvalAsJS(path) {
     var f = null;
@@ -70,7 +57,6 @@ function loadOriginal() {
         try { var t = new File(p, 'r'); t.close(); exists = true; } catch (e) {}
         if (!exists) continue;
         log('found: ' + p);
-        if (tryScriptLoad(p)) return true;
         if (tryEvalAsJS(p)) return true;
         log('all methods failed for ' + p);
     }
