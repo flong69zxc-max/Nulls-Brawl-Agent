@@ -56,6 +56,7 @@ jobs:
           stock_nop    = bytes(data).count(NOP)
           print(f"[stock] BRK #0x539={stock_brk539} BRK #1={stock_brk1} NOP={stock_nop}")
 
+          # --- BRK patches ---
           patched_brk539 = 0
           idx = 0
           while True:
@@ -76,51 +77,53 @@ jobs:
               patched_brk1 += 1
               idx += 4
 
+          # --- parse otool -l for __stubs section ---
           out_l = subprocess.run(["otool", "-l", "W.stock.dylib"],
                                  capture_output=True, text=True).stdout
           lines = out_l.splitlines()
 
-          stubs_vmaddr = None
-          stubs_fileoff = None
+          def parse_hex_or_dec(s):
+              s = s.strip()
+              if s.startswith("0x") or s.startswith("0X"):
+                  return int(s, 16)
+              return int(s, 10)
+
+          stubs_offset = None
           stubs_size = None
           stubs_reserved2 = None
 
           for i, line in enumerate(lines):
-              if "sectname __stubs" in line:
-                  for j in range(i, min(i + 12, len(lines))):
+              if re.search(r'sectname\s+__stubs', line):
+                  print(f"[stubs] found section at line {i}")
+                  for j in range(i, min(i + 15, len(lines))):
                       l = lines[j].strip()
-                      m_addr = re.match(r'addr\s+(0x[0-9a-fA-F]+)', l)
-                      m_off  = re.match(r'offset\s+(\d+)', l)
-                      m_size = re.match(r'size\s+(0x[0-9a-fA-F]+)', l)
-                      m_res2 = re.match(r'reserved2\s+(\d+)', l)
-                      if m_addr and stubs_vmaddr is None:
-                          stubs_vmaddr = int(m_addr.group(1), 16)
-                      if m_off and stubs_fileoff is None:
-                          stubs_fileoff = int(m_off.group(1))
-                      if m_size and stubs_size is None:
-                          stubs_size = int(m_size.group(1), 16)
-                      if m_res2 and stubs_reserved2 is None:
-                          stubs_reserved2 = int(m_res2.group(1))
+                      if l.startswith("offset "):
+                          stubs_offset = parse_hex_or_dec(l.split()[1])
+                          print(f"[stubs] offset = {stubs_offset}")
+                      elif l.startswith("size "):
+                          stubs_size = parse_hex_or_dec(l.split()[1])
+                          print(f"[stubs] size = {stubs_size}")
+                      elif l.startswith("reserved2 "):
+                          # reserved2 12 (size of stubs)  OR  reserved2 0xC
+                          parts = l.split()
+                          stubs_reserved2 = parse_hex_or_dec(parts[1])
+                          print(f"[stubs] reserved2 (stub size) = {stubs_reserved2}")
                   break
 
-          print(f"[stubs] vmaddr={hex(stubs_vmaddr) if stubs_vmaddr else None} "
-                f"fileoff={stubs_fileoff} size={hex(stubs_size) if stubs_size else None} "
-                f"stub_size={stubs_reserved2}")
-
           patched_abort = 0
-          if stubs_fileoff is not None and stubs_size is not None and stubs_reserved2:
+          if stubs_offset is not None and stubs_size is not None and stubs_reserved2:
               stub_count = stubs_size // stubs_reserved2
               print(f"[stubs] stub_count={stub_count} stub_size={stubs_reserved2}")
               for i in range(stub_count):
-                  off = stubs_fileoff + i * stubs_reserved2
+                  off = stubs_offset + i * stubs_reserved2
                   if off + 4 > len(data):
                       break
-                  first_instr = data[off:off+4]
-                  if first_instr != RET:
+                  if data[off:off+4] != RET:
                       data[off:off+4] = RET
                       patched_abort += 1
           else:
-              print("[patch] __stubs section not found or incomplete, skipping abort patch")
+              print("[patch] __stubs not found or incomplete")
+              print(f"  offset={stubs_offset} size={stubs_size} reserved2={stubs_reserved2}")
 
           print(f"[patched] BRK #0x539={patched_brk539} BRK #1={patched_brk1} stubs_to_ret={patched_abort}")
 
@@ -246,13 +249,13 @@ jobs:
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
-            codesign -dvv "$FRAMEWORK_NAME/W.dylib" $ 2>&1 | head -5FR || true
+            codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
           fi
 
       - name: Final verification
         run: |
-         AM set -euo pipefail
-          python3EW - <<'ORKPYEOF'
+          set -euo pipefail
+          python3 - <<'PYEOF'
           with open("Frida.framework/W.dylib", "rb") as f:
               data = f.read()
           brk539 = data.count(bytes.fromhex("20A720D4"))
@@ -278,10 +281,10 @@ jobs:
             echo ""
             echo "| param | value |"
             echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION_NAME} |"
-            echo "| patches | BRK #0x539, BRK #1, all __stubs -> RET |"
+            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| patches | BRK #0x539, BRK #1, __stubs -> RET |"
             echo "| arch | arm64 |"
-            echo "| dylib size | $(stat -f%z/W.dylib) B |"
+            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
             echo ""
             echo '```'
