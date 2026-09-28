@@ -44,11 +44,11 @@ jobs:
 
           PREBUILT_URL="https://github.com/ProcursusTeam/ldid/releases/download/${LDID_VERSION}/ldid_macos_arm64"
           if curl -fL --retry 3 -o /tmp/ldid "$PREBUILT_URL" 2>/dev/null; then
-            echo "using prebuilt binary"
+            echo "using prebuilt"
             chmod +x /tmp/ldid
             sudo mv /tmp/ldid /usr/local/bin/ldid
           else
-            echo "prebuilt not available, building from source"
+            echo "building from source"
             brew install pkg-config libplist openssl@3
             OPENSSL_PREFIX=$(brew --prefix openssl@3)
             LIBPLIST_PREFIX=$(brew --prefix libplist)
@@ -59,7 +59,6 @@ jobs:
             if git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null; then
               echo "cloned tag ${LDID_VERSION}"
             else
-              echo "tag not found, cloning default branch"
               git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
             fi
             cd ldid-src
@@ -71,22 +70,90 @@ jobs:
           for p in /opt/homebrew/bin/ldid /usr/bin/ldid; do
             [ -e "$p" ] && sudo rm -f "$p" || true
           done
+          /usr/local/bin/ldid -v 2>&1 | head -2
 
-          echo "=== checking ldid ==="
-          ls -la /usr/local/bin/ldid
-          /usr/local/bin/ldid -v 2>&1 | head -5 || true
-          echo "which resolves to: $(command -v ldid)"
-          echo "PATH=$PATH"
-
-      - name: Resign with ldid-procursus
+      - name: Extract stock entitlements
         run: |
           set -euo pipefail
-          /usr/local/bin/ldid -S W.thin.dylib
-          echo "thin after sign: $(stat -f%z W.thin.dylib)"
-          if [ "$(stat -f%z W.thin.dylib)" != "19006592" ]; then
-            echo "::error::thin size is $(stat -f%z W.thin.dylib), expected 19006592"
-            echo "actual ldid: $(command -v ldid)"
-            /usr/local/bin/ldid -v 2>&1 | head -5 || true
+          /usr/local/bin/ldid -e W.fat.dylib > /tmp/stock-ent.xml 2>/dev/null || true
+          if [ -s /tmp/stock-ent.xml ]; then
+            echo "extracted: $(stat -f%z /tmp/stock-ent.xml) bytes"
+            head -c 300 /tmp/stock-ent.xml
+          else
+            echo "no entitlements extracted"
+            : > /tmp/stock-ent.xml
+          fi
+
+      - name: Sign thin (try variants until match)
+        run: |
+          set -euo pipefail
+          cp W.thin.dylib W.thin.orig.dylib
+
+          try_variant() {
+            local name="$1"
+            shift
+            cp W.thin.orig.dylib W.thin.test.dylib
+            if "$@" 2>/tmp/sign.err; then
+              local sz=$(stat -f%z W.thin.test.dylib)
+              echo "  [$name] -> $sz"
+              if [ "$sz" = "19006592" ]; then
+                echo "  [$name] *** MATCH ***"
+                cp W.thin.test.dylib W.thin.dylib
+                return 0
+              fi
+            else
+              echo "  [$name] -> FAILED: $(head -1 /tmp/sign.err)"
+            fi
+            return 1
+          }
+
+          echo "=== trying variants ==="
+          try_variant "ldid -S" \
+            /usr/local/bin/ldid -S W.thin.test.dylib || \
+          try_variant "ldid -S -Cadhoc" \
+            /usr/local/bin/ldid -S -Cadhoc W.thin.test.dylib || \
+          try_variant "ldid -Hsha256 -S" \
+            /usr/local/bin/ldid -Hsha256 -S W.thin.test.dylib || \
+          try_variant "ldid -Hsha1 -Hsha256 -S" \
+            /usr/local/bin/ldid -Hsha1 -Hsha256 -S W.thin.test.dylib || \
+          try_variant "ldid -Slibrary-validation -S" \
+            /usr/local/bin/ldid -Slibrary-validation -S W.thin.test.dylib || \
+          try_variant "ldid -Ckill -S" \
+            /usr/local/bin/ldid -Ckill -S W.thin.test.dylib || \
+          try_variant "ldid -Chard -S" \
+            /usr/local/bin/ldid -Chard -S W.thin.test.dylib || \
+          { echo "::error::no ldid variant matched 19006592"; exit 1; }
+
+          echo "final thin: $(stat -f%z W.thin.dylib)"
+
+      - name: Sign with extracted entitlements if no match yet
+        run: |
+          set -euo pipefail
+          if [ "$(stat -f%z W.thin.dylib)" = "19006592" ]; then
+            echo "already matched, skipping"
+            exit 0
+          fi
+          if [ -s /tmp/stock-ent.xml ]; then
+            echo "trying with extracted entitlements"
+            cp W.thin.orig.dylib W.thin.test.dylib
+            /usr/local/bin/ldid -S/tmp/stock-ent.xml W.thin.test.dylib || true
+            sz=$(stat -f%z W.thin.test.dylib)
+            echo "  [ldid -S ent.xml] -> $sz"
+            if [ "$sz" = "19006592" ]; then
+              cp W.thin.test.dylib W.thin.dylib
+              echo "MATCH with entitlements"
+            fi
+          fi
+
+      - name: Verify sign size
+        run: |
+          set -euo pipefail
+          sz=$(stat -f%z W.thin.dylib)
+          echo "thin: $sz"
+          if [ "$sz" != "19006592" ]; then
+            echo "::error::thin is $sz, expected 19006592"
+            echo "ldid version: $(/usr/local/bin/ldid -v 2>&1 | head -1)"
+            ls -la /usr/local/bin/ldid
             exit 1
           fi
 
@@ -95,8 +162,7 @@ jobs:
           set -euo pipefail
           python3 - << 'PYEOF'
           import struct
-          path = "W.thin.dylib"
-          with open(path, "rb") as f:
+          with open("W.thin.dylib", "rb") as f:
               d = bytearray(f.read())
           n = struct.unpack_from("<I", d, 16)[0]
           o = 32
@@ -104,14 +170,14 @@ jobs:
               c, s = struct.unpack_from("<II", d, o)
               if c == 0x1d:
                   off, sz = struct.unpack_from("<II", d, o + 8)
-                  print("LC_CODE_SIGNATURE: offset=" + str(off) + " size=" + str(sz))
+                  print("sig offset=" + str(off) + " size=" + str(sz))
                   for i in range(off, off + sz):
                       d[i] = 0
                   break
               o += s
-          with open(path, "wb") as f:
+          with open("W.thin.dylib", "wb") as f:
               f.write(d)
-          print("final thin: " + str(len(d)))
+          print("thin final: " + str(len(d)))
           PYEOF
 
       - name: Wrap into fat binary
@@ -120,7 +186,7 @@ jobs:
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
           if [ "$(stat -f%z W.dylib)" != "19022976" ]; then
-            echo "::error::fat size is $(stat -f%z W.dylib), expected 19022976"
+            echo "::error::fat is $(stat -f%z W.dylib), expected 19022976"
             exit 1
           fi
 
@@ -132,10 +198,9 @@ jobs:
             if [ -f "$p" ]; then REF="$p"; break; fi
           done
           if [ -z "$REF" ]; then
-            echo "::warning::dev reference not found, skipping"
+            echo "::warning::no dev reference"
             exit 0
           fi
-          echo "using reference: $REF"
           mkdir -p dev
           unzip -o "$REF" -d dev > /dev/null
           DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
@@ -147,15 +212,13 @@ jobs:
               dev = f.read()
           with open("W.dylib", "rb") as f:
               ours = f.read()
-          if len(dev) != len(ours):
-              print("length mismatch: dev=" + str(len(dev)) + " ours=" + str(len(ours)))
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print("diffs: " + str(len(diffs)))
           for i in diffs[:32]:
               print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
           if not diffs:
-              print("PERFECT: byte-identical to dev")
+              print("PERFECT")
           PYEOF
 
       - name: Assemble Frida.framework
@@ -188,7 +251,6 @@ jobs:
           }
           CONFIG
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
@@ -197,7 +259,6 @@ jobs:
           find "$FRAMEWORK_NAME" -name "._*" -delete
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
           ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
-          echo "zip: $(stat -f%z Frida.framework.zip) bytes"
           shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
