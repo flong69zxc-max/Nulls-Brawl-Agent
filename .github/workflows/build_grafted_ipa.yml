@@ -1,204 +1,64 @@
-name: Build Frida.framework (byte-identical to dev)
+name: Diagnostic
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 10
-    env:
-      FRIDA_VERSION: '17.2.11'
-      FRAMEWORK_NAME: Frida.framework
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download stock gadget
+      - name: Download stock
         run: |
           set -euo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
-          xz -d gadget.dylib.xz
-          mv gadget.dylib W.fat.stock.dylib
-          file W.fat.stock.dylib
+          URL="https://github.com/frida/frida/releases/download/17.2.11/frida-gadget-17.2.11-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.xz "$URL"
+          xz -d gadget.xz
+          mv gadget W.fat.dylib
+          echo "=== fat info ==="
+          file W.fat.dylib
+          lipo -info W.fat.dylib
+          ls -la W.fat.dylib
 
-      - name: Extract arm64 slice
+      - name: Extract thin arm64
         run: |
           set -euo pipefail
-          lipo -thin arm64 -output W.thin.dylib W.fat.stock.dylib
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           file W.thin.dylib
-          echo "thin size: $(stat -f%z W.thin.dylib) bytes"
+          ls -la W.thin.dylib
 
-      - name: Strip debug symbols
+      - name: Parse code signature
         run: |
           set -euo pipefail
-          xcrun strip -Sx W.thin.dylib -o W.stripped.dylib
-          mv W.stripped.dylib W.thin.dylib
-          echo "stripped: $(stat -f%z W.thin.dylib) bytes"
-
-      - name: Remove code signature
-        run: |
-          set -euo pipefail
-          codesign --remove-signature W.thin.dylib 2>&1 || true
-          if codesign -dvv W.thin.dylib 2>&1 | grep -q "code signature"; then
-            brew install ldid || true
-            ldid -M W.thin.dylib 2>&1 || true
-          fi
-
           python3 - << 'PYEOF'
-          import struct, sys
+          import struct
+
           with open("W.thin.dylib", "rb") as f:
-              data = bytearray(f.read())
+              data = f.read()
+
+          print(f"thin size: {len(data)}")
+          print(f"head: {data[:32].hex()}")
+          print(f"tail: {data[-32:].hex()}")
+
           magic = struct.unpack_from("<I", data, 0)[0]
-          if magic != 0xFEEDFACF:
-              print(f"unexpected magic: 0x{magic:x}")
-              sys.exit(0)
-          cpu, subtype, ftype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from("<IIIIIII", data, 4)
+          ncmds = struct.unpack_from("<I", data, 16)[0]
           cmd_off = 32
-          code_sig_off = None
-          code_sig_size = None
-          uuid_off = None
           for _ in range(ncmds):
               cmd, cmdsize = struct.unpack_from("<II", data, cmd_off)
               if cmd == 0x1d:
-                  dataoff, datasize = struct.unpack_from("<II", data, cmd_off + 8)
-                  code_sig_off, code_sig_size = dataoff, datasize
-                  print(f"LC_CODE_SIGNATURE: offset={dataoff} size={datasize}")
+                  off, size = struct.unpack_from("<II", data, cmd_off + 8)
+                  print(f"LC_CODE_SIGNATURE: offset={off} size={size}")
+                  print(f"last 32 bytes of blob: {data[off+size-32:off+size].hex()}")
               elif cmd == 0x1b:
-                  uuid_off = cmd_off + 8
-                  print(f"LC_UUID: offset={uuid_off}")
+                  uuid = data[cmd_off+8:cmd_off+24]
+                  print(f"LC_UUID: {uuid.hex()}")
               cmd_off += cmdsize
-          if code_sig_off is not None and code_sig_size:
-              end = min(code_sig_off + code_sig_size, len(data))
-              for i in range(code_sig_off, end):
-                  data[i] = 0
-              print(f"zeroed {end - code_sig_off} bytes")
-          if uuid_off is not None:
-              for i in range(uuid_off, uuid_off + 16):
-                  data[i] = 0
-              print(f"zeroed UUID")
-          with open("W.thin.dylib", "wb") as f:
-              f.write(data)
-          print(f"new size: {len(data)}")
-          PYEOF
-          tail -c 32 W.thin.dylib | od -An -tx1
-
-      - name: Wrap into fat
-        run: |
-          set -euo pipefail
-          lipo -create -arch arm64 W.thin.dylib -output W.dylib
-          file W.dylib
-          echo "fat size: $(stat -f%z W.dylib) bytes"
-
-      - name: Compare
-        run: |
-          set -euo pipefail
-          if [ ! -f W.dylib.zip ]; then
-            echo "W.dylib.zip not found, skipping comparison"
-            exit 0
-          fi
-          mkdir -p dev
-          unzip -o W.dylib.zip -d dev > /dev/null
-          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          cp "$DEV" W.dev.raw.dylib
-          if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.dev.raw.dylib W.dev.thin.dylib
-          else
-            lipo -thin arm64 -output W.dev.thin.dylib W.dev.raw.dylib
-          fi
-          echo "=== sizes ==="
-          echo "dev thin:  $(stat -f%z W.dev.thin.dylib)"
-          echo "ours thin: $(stat -f%z W.thin.dylib)"
-          echo "dev fat:   $(stat -f%z W.dev.raw.dylib)"
-          echo "ours fat:  $(stat -f%z W.dylib)"
-          echo ""
-          python3 - << 'PYEOF'
-          with open("W.dev.thin.dylib","rb") as f: dev = f.read()
-          with open("W.thin.dylib","rb") as f: ours = f.read()
-          n = min(len(dev), len(ours))
-          diffs = [i for i in range(n) if dev[i] != ours[i]]
-          print(f"thin: total differing bytes: {len(diffs)}")
-          for i in diffs[:10]:
-              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
-          if len(dev) != len(ours):
-              print(f"thin: length differs dev={len(dev)} ours={len(ours)}")
           PYEOF
 
-      - name: Assemble Frida.framework
+      - name: Rebuild fat
         run: |
           set -euo pipefail
-          rm -rf "$FRAMEWORK_NAME"
-          mkdir -p "$FRAMEWORK_NAME"
-          cp W.dylib "$FRAMEWORK_NAME/W.dylib"
-
-          cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key><string>W.dylib</string>
-              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
-              <key>CFBundleShortVersionString</key><string>17.2.11</string>
-              <key>CFBundleVersion</key><string>17.2.11</string>
-              <key>CFBundleName</key><string>Frida</string>
-              <key>CFBundlePackageType</key><string>FMWK</string>
-              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
-              <key>DTPlatformName</key><string>iphoneos</string>
-              <key>MinimumOSVersion</key><string>12.0</string>
-          </dict>
-          </plist>
-          PLIST
-
-          cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
-          {
-            "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
-            "code_signing": "required"
-          }
-          CONFIG
-
-          echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
-
-      - name: Package with ditto
-        run: |
-          set -euo pipefail
-          # clean
-          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
-          find "$FRAMEWORK_NAME" -name "._*" -delete
-          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
-
-          # ditto creates iOS-compatible zip without resource forks
-          ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
-
-          echo "=== zip info ==="
-          ls -la Frida.framework.zip
-          unzip -l Frida.framework.zip
-          shasum -a 256 Frida.framework.zip
-
-      - name: Verify zip is clean
-        run: |
-          set -euo pipefail
-          if unzip -l Frida.framework.zip | grep -qE "__MACOSX|\._"; then
-            echo "::error::zip contains __MACOSX or ._ files"
-            exit 1
-          fi
-          echo "zip is clean"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Frida.framework
-          path: |
-            Frida.framework.zip
-            Frida.framework.zip.sha256
-          retention-days: 30
-          if-no-files-found: error
+          lipo -create -arch arm64 W.thin.dylib -output W.fat.rebuild.dylib
+          file W.fat.rebuild.dylib
+          lipo -info W.fat.rebuild.dylib
+          ls -la W.fat.rebuild.dylib
+          head -c 32 W.fat.rebuild.dylib
