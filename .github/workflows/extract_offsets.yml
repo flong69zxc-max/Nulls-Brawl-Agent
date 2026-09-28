@@ -110,7 +110,7 @@ jobs:
   cold:
     needs: prepare
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -170,14 +170,14 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=$(nproc)
-          rm -rf ghidra_project
+          rm -rf ghidra_project cold.log
           mkdir -p ghidra_project
           "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
             "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
             -import /tmp/brawl_bin \
             -processor AARCH64:LE:64:AppleSilicon \
             -loader MachoLoader \
-            -analysisTimeoutPerFile 5400 \
+            -analysisTimeoutPerFile 3600 \
             -max-cpu "$JOBS" 2>&1 | tee cold.log | tail -60
 
       - uses: actions/cache/save@v4
@@ -186,19 +186,11 @@ jobs:
           path: ghidra_project
           key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
 
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: cold-log
-          path: cold.log
-          retention-days: 7
-          if-no-files-found: ignore
-
   warm:
     needs: [prepare, cold]
-    if: always() && needs.prepare.result == 'success' && needs.cold.result == 'success'
+    if: always() && needs.prepare.result == 'success' && (needs.cold.result == 'success' || needs.cold.result == 'skipped')
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -247,7 +239,7 @@ jobs:
       - name: Fail if no project cache
         if: steps.cache-project.outputs.cache-hit != 'true'
         run: |
-          echo "ERROR: ghidra_project not found after cold job"
+          echo "ERROR: ghidra_project not found"
           exit 1
 
       - name: Run WARM
@@ -257,7 +249,8 @@ jobs:
         run: |
           set -euo pipefail
           JOBS=$(nproc)
-          rm -f offsets_new.js offsets_report.txt
+          rm -f offsets_resolved.js offsets_report.txt
+          git checkout -- offsets.js 2>/dev/null || true
           "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
             "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
             -process "${{ needs.prepare.outputs.program_name }}" -noanalysis \
@@ -269,12 +262,12 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          if [ ! -s offsets_new.js ]; then
-            echo "offsets_new.js missing or empty"
+          if [ ! -s offsets_resolved.js ]; then
+            echo "offsets_resolved.js missing or empty"
             tail -120 ghidra.log 2>/dev/null || true
             exit 1
           fi
-          echo "offsets_new.js lines: $(wc -l < offsets_new.js)"
+          echo "offsets_resolved.js lines: $(wc -l < offsets_resolved.js)"
 
       - name: Report
         if: always()
@@ -283,15 +276,13 @@ jobs:
           tail -120 ghidra.log 2>/dev/null || true
           echo "=== offsets_report.txt ==="
           cat offsets_report.txt 2>/dev/null || true
-          echo "=== offsets_new.js head ==="
-          head -30 offsets_new.js 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: brawl-offsets
           path: |
-            offsets_new.js
+            offsets_resolved.js
             offsets_report.txt
             signatures.json
             ghidra.log
@@ -304,10 +295,8 @@ jobs:
           set -uo pipefail
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
-          if [ -f offsets_new.js ] && [ -s offsets_new.js ]; then
-            cp offsets_new.js offsets.js
-          fi
-          git add -f offsets.js 2>/dev/null || true
+          git checkout -- offsets.js 2>/dev/null || true
+          git add -f offsets_resolved.js 2>/dev/null || true
           git add -f offsets_report.txt 2>/dev/null || true
           git add -f signatures.json 2>/dev/null || true
           if git diff --cached --quiet; then
