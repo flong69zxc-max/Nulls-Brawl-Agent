@@ -29,8 +29,6 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 15
     env:
-      FLORIDA_TAG: Florida
-      FLORIDA_ASSET: frida-gadget.dylib
       FLORIDA_URL: https://github.com/Mac-XK/Florida-iOS/releases/download/Florida/frida-gadget.dylib
       FRAMEWORK_NAME: Frida.framework
 
