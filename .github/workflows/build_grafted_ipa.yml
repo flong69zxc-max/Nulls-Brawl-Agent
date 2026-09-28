@@ -1,14 +1,13 @@
-name: Build Patched Frida Framework
+name: Build Florida Frida Framework
 
-# Собирает пропатченный Frida Gadget в готовый iOS Frida.framework бандл.
-# Патчер (electrondefuser/frida-bin-patcher) вырезает сигнатуры, по которым
-# защита приложений и сам Frida Gadget детектируют факт инструментации.
+# Собирает Florida-iOS (Frida 17.16.4 с удалёнными детектами) в готовый iOS Frida.framework.
+# Источник: https://github.com/Mac-XK/Florida-iOS
 #
 # Выход: Frida.framework.zip, внутри:
 #   Frida.framework/
-#   ├── W.dylib          (пропатченный Frida Gadget)
-#   ├── Info.plist       (описание фреймворка)
-#   ├── W.config         (конфиг Gadget)
+#   ├── W.dylib          (Florida Frida Gadget, уже без детектов)
+#   ├── Info.plist
+#   ├── W.config
 #   └── agent.js         (заглушка, заменишь своим скриптом)
 
 on:
@@ -17,12 +16,6 @@ on:
     paths:
       - '.github/workflows/build.yml'
   workflow_dispatch:
-    inputs:
-      frida_version:
-        description: 'Версия Frida Gadget (например 17.9.7)'
-        required: true
-        default: '17.9.7'
-        type: string
 
 permissions:
   contents: read
@@ -34,10 +27,11 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      FRIDA_VERSION: ${{ inputs.frida_version || '17.9.7' }}
-      PATCHER_DIR: frida-bin-patcher
+      FLORIDA_TAG: Florida
+      FLORIDA_ASSET: frida-gadget.dylib
+      FLORIDA_URL: https://github.com/Mac-XK/Florida-iOS/releases/download/Florida/frida-gadget.dylib
       FRAMEWORK_NAME: Frida.framework
 
     steps:
@@ -45,69 +39,32 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Show toolchain
+      - name: Download Florida Frida Gadget
         run: |
           set -euo pipefail
-          python3 --version
-          which python3
-
-      - name: Download patcher
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
-          cd "$PATCHER_DIR"
-
-          # Патчер фиксирует lief==0.14.1, для которой нет wheel под Python 3.14.
-          # Заменяем на lief==1.0.0 (совместим с Python 3.14, API сохранён).
-          sed -i '' 's/^lief==.*/lief==1.0.0/' requirements.txt
-          cat requirements.txt
-
-          python3 -m venv venv
-          source venv/bin/activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt
-          python3 -c "import lief; print('lief', lief.__version__)"
-
-      - name: Download Frida Gadget
-        run: |
-          set -euo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          echo "downloading $URL"
-          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
-          xz -d gadget.dylib.xz
-          mv gadget.dylib W.stock.dylib
+          echo "downloading ${FLORIDA_URL}"
+          curl -fL --retry 3 -o W.stock.dylib "${FLORIDA_URL}"
+          ls -l W.stock.dylib
           file W.stock.dylib
+
+      - name: Verify platform
+        run: |
+          set -euo pipefail
+          file W.stock.dylib | grep -q arm64 || {
+            echo "::error::не arm64"; exit 1
+          }
+          echo "--- LC_BUILD_VERSION ---"
           otool -l W.stock.dylib | grep -A4 LC_BUILD_VERSION | head -20
 
-      - name: Patch binary
+      - name: Check Florida markers
         run: |
           set -euo pipefail
-          cd "$PATCHER_DIR"
-          source venv/bin/activate
-          python main.py \
-            --binarypath "../W.stock.dylib" \
-            --output "../W.patched.dylib"
-          cd ..
-          ls -l W.patched.dylib
-          file W.patched.dylib
-          file W.patched.dylib | grep -q arm64
-
-      - name: Verify patch
-        run: |
-          set -euo pipefail
-          STOCK=$(stat -f%z W.stock.dylib)
-          PATCHED=$(stat -f%z W.patched.dylib)
-          echo "stock: $STOCK bytes"
-          echo "patched: $PATCHED bytes"
-          if [ "$STOCK" -eq "$PATCHED" ]; then
-            echo "::warning::размер не изменился — патч, возможно, не применён"
+          echo "--- строковые маркеры Frida (должно быть пусто) ---"
+          if strings W.stock.dylib | grep -E "frida-gadget|frida:rpc|FridaScriptEngine" | head -10; then
+            echo "::warning::строковые маркеры Frida всё ещё присутствуют"
+          else
+            echo "строковые маркеры Frida вычищены"
           fi
-          if strings W.patched.dylib | grep -q "frida-gadget"; then
-            echo "::error::строковый маркер 'frida-gadget' всё ещё в бинарнике"
-            strings W.patched.dylib | grep "frida" | head -10
-            exit 1
-          fi
-          echo "строковые маркеры Frida вычищены"
 
       - name: Assemble Frida.framework
         run: |
@@ -115,7 +72,7 @@ jobs:
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
 
-          cp W.patched.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.stock.dylib "$FRAMEWORK_NAME/W.dylib"
 
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -143,9 +100,9 @@ jobs:
             '        <string>iPhoneOS</string>' \
             '    </array>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>17.9.7</string>' \
+            '    <string>17.16.4</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>17.9.7</string>' \
+            '    <string>17.16.4</string>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -195,13 +152,12 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### patched frida framework"
+            echo "### florida frida framework"
             echo ""
             echo "| параметр | значение |"
             echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION} |"
-            echo "| patcher | electrondefuser/frida-bin-patcher |"
-            echo "| lief | 1.0.0 |"
+            echo "| source | Mac-XK/Florida-iOS |"
+            echo "| frida | 17.16.4 |"
             echo "| arch | arm64 |"
             echo "| размер dylib | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
