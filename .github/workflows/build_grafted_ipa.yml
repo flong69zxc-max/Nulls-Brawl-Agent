@@ -1,4 +1,4 @@
-name: Build Frida.framework
+name: Build Frida.framework 17.9.7
 
 on:
   workflow_dispatch:
@@ -11,8 +11,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
@@ -30,35 +29,18 @@ jobs:
         id: cache-gadget
         with:
           path: gadget-cache
-          key: frida-gadget-17.18.0-ios-universal-v1
+          key: frida-gadget-17.9.7-ios-universal-v1
 
-      - name: Download Frida Gadget 17.18.0
+      - name: Download Frida Gadget 17.9.7
         if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p gadget-cache
           curl -fL -o /tmp/frida.xz \
-            "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
+            "https://github.com/frida/frida/releases/download/17.9.7/frida-gadget-17.9.7-ios-universal.dylib.xz"
           xz -d /tmp/frida.xz
           mv /tmp/frida gadget-cache/FridaGadget.dylib
           file gadget-cache/FridaGadget.dylib
-
-      - uses: actions/cache@v4
-        id: cache-gum-graft
-        with:
-          path: gum-graft-bin
-          key: gum-graft-17.18.0-macos-arm64-v1
-
-      - name: Download gum-graft
-        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p gum-graft-bin
-          curl -fL -o /tmp/gum-graft.tar.xz \
-            "https://github.com/frida/frida/releases/download/17.18.0/gum-graft-17.18.0-macos-arm64.tar.xz"
-          tar xf /tmp/gum-graft.tar.xz -C gum-graft-bin
-          chmod +x gum-graft-bin/gum-graft
-          file gum-graft-bin/gum-graft
 
       - name: Thin to arm64
         run: |
@@ -67,19 +49,11 @@ jobs:
           lipo -info gadget-cache/FridaGadget-arm64
           ls -la gadget-cache/
 
-      - name: Apply gum-graft
-        run: |
-          set -euo pipefail
-          cp gadget-cache/FridaGadget-arm64 gadget-cache/FridaGadget-grafted
-          chmod +x gum-graft-bin/gum-graft
-          gum-graft-bin/gum-graft -i gadget-cache/FridaGadget-grafted
-          file gadget-cache/FridaGadget-grafted
-
       - name: Build Frida.framework
         run: |
           set -euo pipefail
           mkdir -p Frida.framework
-          cp gadget-cache/FridaGadget-grafted Frida.framework/W.dylib
+          cp gadget-cache/FridaGadget-arm64 Frida.framework/W.dylib
           chmod +x Frida.framework/W.dylib
           cp "${{ steps.agent.outputs.path }}" Frida.framework/agent.js
           cat > Frida.framework/Info.plist << 'EOF'
@@ -104,9 +78,9 @@ jobs:
                   <string>iPhoneOS</string>
               </array>
               <key>CFBundleVersion</key>
-              <string>17.18.0</string>
+              <string>17.9.7</string>
               <key>CFBundleShortVersionString</key>
-              <string>17.18.0</string>
+              <string>17.9.7</string>
               <key>DTPlatformName</key>
               <string>iphoneos</string>
               <key>MinimumOSVersion</key>
@@ -138,13 +112,13 @@ jobs:
           cd Frida.framework
           zip -qry ../Frida.framework.zip .
           cd ..
-          TAG="frida-framework-$(date +%Y%m%d)-r${{ github.run_number }}"
+          TAG="frida-framework-17.9.7-$(date +%Y%m%d)-r${{ github.run_number }}"
           gh release create "$TAG" Frida.framework.zip \
             --title "$TAG" \
-            --notes "Frida 17.18.0 + gum-graft, arm64 thin"
+            --notes "Frida 17.9.7 arm64 thin, Interceptor fix for iOS 26+"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Frida.framework
+          name: Frida.framework-17.9.7
           path: Frida.framework/
           retention-days: 7
