@@ -83,19 +83,18 @@ jobs:
         id: extract
         run: |
           set -euo pipefail
-          cd build
-          rm -rf extract
-          mkdir -p extract
-          unzip -q bs.ipa -d extract
-          if [ ! -d "extract/Payload" ]; then
+          rm -rf build/extract
+          mkdir -p build/extract
+          unzip -q build/bs.ipa -d build/extract
+          if [ ! -d "build/extract/Payload" ]; then
             echo "::error::Payload not found"
-            ls -la extract/
+            ls -la build/extract/
             exit 1
           fi
-          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          APP_DIR=$(find build/extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           if [ -z "$APP_DIR" ]; then
             echo "::error::No .app in Payload"
-            ls -la extract/Payload/
+            ls -la build/extract/Payload/
             exit 1
           fi
           BIN="$APP_DIR/Nulls Brawl"
@@ -181,6 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           BIN="${{ steps.extract.outputs.bin }}"
+          echo "BIN=$BIN"
+          ls -la "$BIN"
           insert_dylib --weak --all-yes \
             "@executable_path/Frameworks/FridaGadget.framework/FridaGadget" \
             "$BIN" "$BIN.patched"
