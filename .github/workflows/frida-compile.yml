@@ -28,32 +28,21 @@ jobs:
         with:
           node-version: '20'
 
-      - uses: actions/cache@v4
-        id: cache-npm
-        with:
-          path: ~/.npm
-          key: npm-frida-compile-17-${{ runner.os }}-v2
-          restore-keys: |
-            npm-frida-compile-17-
-
-      - name: Get npm global root
-        id: npmroot
-        run: |
-          set -euo pipefail
-          ROOT=$(npm root -g)
-          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v4
-        id: cache-frida-compile
-        with:
-          path: ${{ steps.npmroot.outputs.ROOT }}/frida-compile
-          key: frida-compile-17-${{ runner.os }}-v2
-
       - name: Install frida-compile
-        if: steps.cache-frida-compile.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           npm install -g frida-compile@17
+          NPM_BIN="$(npm prefix -g)/bin"
+          echo "$NPM_BIN" >> "$GITHUB_PATH"
+          echo "npm bin: $NPM_BIN"
+          ls -la "$NPM_BIN" | grep frida || true
+
+      - name: Verify frida-compile
+        run: |
+          set -euo pipefail
+          which frida-compile || { echo "NOT IN PATH"; ls -la $(npm prefix -g)/bin; exit 1; }
+          ROOT=$(npm root -g)
+          node -e "console.log('version: ' + require('$ROOT/frida-compile/package.json').version)"
 
       - name: Compile scripts
         run: |
