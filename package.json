@@ -1,0 +1,8 @@
+{
+  "name": "frida-agent",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "frida-objc-bridge": "^7.0.0"
+  }
+}
