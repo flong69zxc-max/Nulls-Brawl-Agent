@@ -7,8 +7,10 @@ const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
 
+const FIXED_DOCS = "/var/mobile/Containers/Data/Application/D03CD892-0A7F-4466-AC5C-BD38936C54BD/Documents";
+
 const DEFAULTS = {
-  patch: false,
+  patch: true,
   alert: true,
   alert_delay_ms: 5000,
   alert_tries: 40,
@@ -27,18 +29,12 @@ let updatedPath = null;
 let started = false;
 
 function str(v) {
-  try {
-    return v === null || v === undefined ? null : v.toString();
-  } catch (e) {
-    return null;
-  }
+  try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
 }
 
 function log(line) {
   const text = new Date().toISOString() + " " + line;
-  try {
-    console.log(text);
-  } catch (e) {}
+  try { console.log(text); } catch (e) {}
   if (logPath === null) return;
   try {
     const f = new File(logPath, "a");
@@ -48,17 +44,13 @@ function log(line) {
   } catch (e) {}
 }
 
-function fileManager() {
-  return ObjC.classes.NSFileManager.defaultManager();
-}
+function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
 function mkdir(path) {
   try {
     fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(path, true, null, null);
     return true;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 function listDir(path) {
@@ -78,9 +70,7 @@ function readText(path) {
     const text = f.readText();
     f.close();
     return text;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function writeText(path, text) {
@@ -90,9 +80,7 @@ function writeText(path, text) {
     f.flush();
     f.close();
     return true;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 function fileSize(path) {
@@ -101,29 +89,42 @@ function fileSize(path) {
     const bytes = f.readAllBytes();
     f.close();
     return bytes.length;
-  } catch (e) {
-    return -1;
-  }
+  } catch (e) { return -1; }
 }
 
 function filesystemDir() {
-  try {
-    const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
-    if (urls !== null && urls.count() > 0) {
-      const p = str(urls.firstObject().path());
-      if (p !== null && p.length > 0) return p;
-    }
-  } catch (e) {}
-  try {
-    const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
-    const home = fn().readUtf8String();
-    if (home !== null && home.length > 0) return home + "/Documents";
-  } catch (e) {}
-  try {
-    const bundle = str(ObjC.classes.NSBundle.mainBundle().bundlePath());
-    const m = /^(.*)\/[^/]+\.app$/.exec(bundle === null ? "" : bundle);
-    if (m !== null) return m[1] + "/Documents";
-  } catch (e) {}
+  const candidates = [
+    FIXED_DOCS,
+    (function() {
+      try {
+        const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
+        if (urls !== null && urls.count() > 0) {
+          const p = str(urls.firstObject().path());
+          if (p !== null && p.length > 0) return p;
+        }
+      } catch (e) {}
+      return null;
+    })(),
+    (function() {
+      try {
+        const fn = new NativeFunction(Module.getGlobalExportByName("NSTemporaryDirectory"), "pointer", []);
+        return fn().readUtf8String();
+      } catch (e) { return null; }
+    })()
+  ];
+  for (let i = 0; i < candidates.length; i++) {
+    const p = candidates[i];
+    if (!p) continue;
+    try {
+      const testPath = p + "/.__agent_test";
+      const f = new File(testPath, "w");
+      f.write("t");
+      f.flush();
+      f.close();
+      try { fileManager().removeItemAtPath_error_(testPath, null); } catch (e) {}
+      return p;
+    } catch (e) {}
+  }
   return null;
 }
 
@@ -131,9 +132,7 @@ function tempDir() {
   try {
     const fn = new NativeFunction(Module.getGlobalExportByName("NSTemporaryDirectory"), "pointer", []);
     return fn().readUtf8String();
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function uuidIn(path) {
@@ -154,18 +153,18 @@ function initPaths() {
   candidates.push("/tmp/" + LOG_NAME);
   for (let i = 0; i < candidates.length; i++) {
     const p = candidates[i];
-    const size = fileSize(p);
-    if (size > MAX_LOG_BYTES) writeText(p, "");
-    if (writeText(p, "") && (size >= 0 || fileSize(p) >= 0)) {
+    try {
+      const f = new File(p, "a");
+      f.write("");
+      f.flush();
+      f.close();
       logPath = p;
       return;
-    }
+    } catch (e) {}
   }
 }
 
-function saveConfig(path) {
-  writeText(path, JSON.stringify(DEFAULTS, null, 2) + "\n");
-}
+function saveConfig(path) { writeText(path, JSON.stringify(DEFAULTS, null, 2) + "\n"); }
 
 function loadConfig() {
   if (updatedPath === null) {
@@ -229,9 +228,7 @@ function applyTarget(target) {
   const name = target.name || "target";
   const size = sizeOf(type);
   let addr;
-  try {
-    addr = addrOf(target);
-  } catch (e) {
+  try { addr = addrOf(target); } catch (e) {
     log(name + " address failed: " + e.message);
     return "addr-error";
   }
@@ -245,9 +242,7 @@ function applyTarget(target) {
     return "unreadable";
   }
   let before;
-  try {
-    before = readAt(addr, type);
-  } catch (e) {
+  try { before = readAt(addr, type); } catch (e) {
     log(name + " @" + addr + " read failed: " + e.message);
     return "read-error";
   }
@@ -255,7 +250,7 @@ function applyTarget(target) {
   if (target.expect !== undefined && target.expect !== null) {
     const expect = valueOf(target.expect, type);
     if (expect !== before) {
-      log(name + " @" + addr + " expect " + str(expect) + " but found " + str(before) + ", skipped (offset changed?)");
+      log(name + " @" + addr + " expect " + str(expect) + " but found " + str(before) + ", skipped");
       return "expect-mismatch";
     }
   }
@@ -268,17 +263,13 @@ function applyTarget(target) {
     return "probe";
   }
   try {
-    Memory.patchCode(addr, size, function (code) {
-      writeAt(code, want, type);
-    });
+    Memory.patchCode(addr, size, function (code) { writeAt(code, want, type); });
   } catch (e) {
     log(name + " @" + addr + " patchCode failed: " + e.message);
     return "patch-error";
   }
   let after = null;
-  try {
-    after = readAt(addr, type);
-  } catch (e) {}
+  try { after = readAt(addr, type); } catch (e) {}
   if (after === want) {
     log(name + " @" + addr + " " + str(before) + " -> " + str(after) + " (" + range.protection + ")");
     return "ok";
@@ -292,9 +283,7 @@ function applyPatches() {
   const result = {};
   for (let i = 0; i < targets.length; i++) {
     const name = targets[i].name || ("target" + i);
-    try {
-      result[name] = applyTarget(targets[i]);
-    } catch (e) {
+    try { result[name] = applyTarget(targets[i]); } catch (e) {
       result[name] = "error";
       log(name + " apply failed: " + e.message);
     }
@@ -316,13 +305,8 @@ function keyWindowRoot() {
 function showAlertOnMain(title, message, tries) {
   const root = keyWindowRoot();
   if (root === null) {
-    if (tries >= cfg.alert_tries) {
-      log("alert skipped: no key window");
-      return false;
-    }
-    setTimeout(function () {
-      showAlertOnMain(title, message, tries + 1);
-    }, cfg.alert_try_ms);
+    if (tries >= cfg.alert_tries) { log("alert skipped: no key window"); return false; }
+    setTimeout(function () { showAlertOnMain(title, message, tries + 1); }, cfg.alert_try_ms);
     return false;
   }
   try {
@@ -333,11 +317,7 @@ function showAlertOnMain(title, message, tries) {
     top.presentViewController_animated_completion_(alert, true, null);
     log("alert shown: " + title + " / " + message);
     if (cfg.alert_auto_dismiss_ms > 0) {
-      setTimeout(function () {
-        try {
-          alert.dismissViewControllerAnimated_completion_(true, null);
-        } catch (e) {}
-      }, cfg.alert_auto_dismiss_ms);
+      setTimeout(function () { try { alert.dismissViewControllerAnimated_completion_(true, null); } catch (e) {} }, cfg.alert_auto_dismiss_ms);
     }
     return true;
   } catch (e) {
@@ -349,28 +329,19 @@ function showAlertOnMain(title, message, tries) {
 function showAlert(title, message) {
   if (cfg.alert === false) return false;
   setTimeout(function () {
-    ObjC.schedule(ObjC.mainQueue, function () {
-      showAlertOnMain(title, message, 0);
-    });
+    ObjC.schedule(ObjC.mainQueue, function () { showAlertOnMain(title, message, 0); });
   }, cfg.alert_delay_ms);
   return true;
 }
 
 function environment() {
-  try {
-    log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id);
-  } catch (e) {}
+  try { log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id); } catch (e) {}
   try {
     const device = ObjC.classes.UIDevice.currentDevice();
     log("device=" + str(device.systemName()) + " " + str(device.systemVersion()) + " " + str(device.model()));
   } catch (e) {}
-  try {
-    log("bundle=" + str(ObjC.classes.NSBundle.mainBundle().bundlePath()));
-  } catch (e) {}
-  try {
-    log("executable=" + Process.mainModule.path);
-    log("base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy);
-  } catch (e) {}
+  try { log("bundle=" + str(ObjC.classes.NSBundle.mainBundle().bundlePath())); } catch (e) {}
+  try { log("executable=" + Process.mainModule.path); log("base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy); } catch (e) {}
   log("documents=" + str(docsPath) + " uuid=" + uuidIn(docsPath));
   log("updated=" + str(updatedPath));
   log("tmp=" + str(tempDir()));
@@ -390,25 +361,16 @@ function start(stage, parameters) {
   log("patches: " + JSON.stringify(applyPatches()));
   const delays = cfg.reapply_ms || [];
   for (let i = 0; i < delays.length; i++) {
-    setTimeout(function () {
-      log("reapply " + JSON.stringify(applyPatches()));
-    }, delays[i]);
+    setTimeout(function () { log("reapply " + JSON.stringify(applyPatches())); }, delays[i]);
   }
   showAlert("Nulls Brawl", "agent loaded");
   log("=== agent armed ===");
 }
 
 rpc.exports = {
-  init: function (stage, parameters) {
-    start(stage, parameters);
-  },
-  dispose: function () {
-    log("=== agent dispose ===");
-    started = false;
-  },
-  patch: function () {
-    return applyPatches();
-  },
+  init: function (stage, parameters) { start(stage, parameters); },
+  dispose: function () { log("=== agent dispose ==="); started = false; },
+  patch: function () { return applyPatches(); },
   probe: function () {
     const targets = cfg.targets || DEFAULTS.targets;
     const out = {};
@@ -418,37 +380,14 @@ rpc.exports = {
       try {
         const addr = addrOf(t);
         const range = Process.findRangeByAddress(addr);
-        out[name] = {
-          addr: str(addr),
-          mapped: range !== null,
-          protection: range === null ? null : range.protection,
-          value: range === null ? null : str(readAt(addr, t.type || "u8"))
-        };
-      } catch (e) {
-        out[name] = { error: e.message };
-      }
+        out[name] = { addr: str(addr), mapped: range !== null, protection: range === null ? null : range.protection, value: range === null ? null : str(readAt(addr, t.type || "u8")) };
+      } catch (e) { out[name] = { error: e.message }; }
     }
     return out;
   },
-  alert: function (title, message) {
-    showAlert(str(title), str(message));
-    return true;
-  },
-  info: function () {
-    return {
-      log: logPath,
-      documents: docsPath,
-      updated: updatedPath,
-      uuid: uuidIn(docsPath),
-      patch: cfg.patch,
-      alert: cfg.alert,
-      targets: cfg.targets
-    };
-  },
-  reload: function () {
-    loadConfig();
-    return applyPatches();
-  }
+  alert: function (title, message) { showAlert(str(title), str(message)); return true; },
+  info: function () { return { log: logPath, documents: docsPath, updated: updatedPath, uuid: uuidIn(docsPath), patch: cfg.patch, alert: cfg.alert, targets: cfg.targets }; },
+  reload: function () { loadConfig(); return applyPatches(); }
 };
 
 start("top-level", {});
