@@ -38,8 +38,9 @@ jobs:
       - name: Install ldid-procursus
         run: |
           set -euo pipefail
-          sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid 2>/dev/null || true
+          sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid /usr/bin/ldid 2>/dev/null || true
           brew uninstall ldid 2>/dev/null || true
+          brew uninstall ldid-procursus 2>/dev/null || true
 
           PREBUILT_URL="https://github.com/ProcursusTeam/ldid/releases/download/${LDID_VERSION}/ldid_macos_arm64"
           if curl -fL --retry 3 -o /tmp/ldid "$PREBUILT_URL" 2>/dev/null; then
@@ -67,17 +68,25 @@ jobs:
             sudo chmod +x /usr/local/bin/ldid
           fi
 
-          hash -r
-          which ldid
-          ldid -v 2>&1 | head -3 || true
+          for p in /opt/homebrew/bin/ldid /usr/bin/ldid; do
+            [ -e "$p" ] && sudo rm -f "$p" || true
+          done
+
+          echo "=== checking ldid ==="
+          ls -la /usr/local/bin/ldid
+          /usr/local/bin/ldid -v 2>&1 | head -5 || true
+          echo "which resolves to: $(command -v ldid)"
+          echo "PATH=$PATH"
 
       - name: Resign with ldid-procursus
         run: |
           set -euo pipefail
-          ldid -S W.thin.dylib
+          /usr/local/bin/ldid -S W.thin.dylib
           echo "thin after sign: $(stat -f%z W.thin.dylib)"
           if [ "$(stat -f%z W.thin.dylib)" != "19006592" ]; then
             echo "::error::thin size is $(stat -f%z W.thin.dylib), expected 19006592"
+            echo "actual ldid: $(command -v ldid)"
+            /usr/local/bin/ldid -v 2>&1 | head -5 || true
             exit 1
           fi
 
