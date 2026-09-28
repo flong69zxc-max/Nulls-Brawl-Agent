@@ -88,8 +88,7 @@ def load_sigdb():
         d = json.load(fh)
         fh.close()
         return d
-    except Exception as e:
-        log("[!] sigdb load failed: %s" % e)
+    except Exception:
         return {}
 
 def save_sigdb(d):
@@ -97,8 +96,8 @@ def save_sigdb(d):
         fh = open(SIGDB, "w")
         json.dump(d, fh, indent=2, sort_keys=True)
         fh.close()
-    except Exception as e:
-        log("[!] sigdb save failed: %s" % e)
+    except Exception:
+        pass
 
 def find_function_exact(rva):
     try:
@@ -125,7 +124,6 @@ def build_sig_index(min_len=8):
     indexed = 0
     while it.hasNext():
         if time.time() - START > BUDGET_SEC - 300:
-            log("[!] sig index budget hit at %d funcs" % count)
             break
         try:
             f = it.next()
@@ -157,7 +155,6 @@ def main():
     rematched = 0
     failures = []
     new_sigs = {}
-
     sig_index = None
 
     for name, rva in offs.items():
@@ -222,7 +219,6 @@ def main():
     fh.close()
     log("[+] wrote %s" % OFF_OUT)
     log("[+] wrote %s" % REPORT)
-    log("[+] signatures.json entries written: %d" % len(new_sigs))
 
 try:
     main()
