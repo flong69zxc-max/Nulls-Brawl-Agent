@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/build.yml'
+      - '.github/workflows/build_grafted_ipa.yml'
   workflow_dispatch:
 
 permissions:
@@ -35,78 +35,118 @@ jobs:
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
           file W.stock.dylib
+          lipo -info W.stock.dylib
+          echo "SHA256 stock: $(shasum -a 256 W.stock.dylib | cut -c1-16)"
 
-      - name: Patch BRK #0x539
+      - name: Analyze original binary
+        run: |
+          set -euo pipefail
+          echo "=== BRK #0x539 count ==="
+          xxd W.stock.dylib | grep -c "20a720d4" || true
+          echo "=== BRK #1 count ==="
+          xxd W.stock.dylib | grep -c "200020d4" || true
+          echo "=== abort symbol ==="
+          nm -gU W.stock.dylib | grep -i abort || true
+
+      - name: Patch BRK and abort
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
-          import sys
+          import subprocess
+
           with open("W.stock.dylib", "rb") as f:
               data = bytearray(f.read())
-          brk = bytes.fromhex("20 A7 20 D4")
+
           nop = bytes.fromhex("1F 20 03 D5")
-          count = 0
+
+          # --- BRK #0x539 ---
+          brk539 = bytes.fromhex("20 A7 20 D4")
+          count_brk = 0
           idx = 0
           while True:
-              idx = data.find(brk, idx)
+              idx = data.find(brk539, idx)
               if idx == -1:
                   break
               data[idx:idx+4] = nop
-              count += 1
+              count_brk += 1
               idx += 4
-          with open("W.brk-patched.dylib", "wb") as f:
-              f.write(data)
-          print(f"Patched {count} BRK #0x539 -> NOP")
-          PYEOF
-          file W.brk-patched.dylib
+          print(f"BRK #0x539 patched: {count_brk}")
 
-      - name: Patch abort calls
-        run: |
-          set -euo pipefail
-          python3 - <<'PYEOF'
-          import subprocess, re
-
-          with open("W.brk-patched.dylib", "rb") as f:
-              data = bytearray(f.read())
-
-          nop = bytes.fromhex("1F 20 03 D5")
-
-          # Патчим прямые вызовы abort (bl <abort>) и переходы на abort
-          # Ищем все вхождения байтов вызова abort в бинарнике
-          # abort в Mach-O arm64 обычно вызывается через stub, ищем по паттерну BL
-          patched = 0
-
-          # Патчим BRK #1 (debug trap, иногда используется как abort-путь)
+          # --- BRK #1 ---
           brk1 = bytes.fromhex("20 00 20 D4")
+          count_brk1 = 0
           idx = 0
           while True:
               idx = data.find(brk1, idx)
               if idx == -1:
                   break
               data[idx:idx+4] = nop
-              patched += 1
+              count_brk1 += 1
               idx += 4
+          print(f"BRK #1 patched: {count_brk1}")
+
+          # --- BL abort ---
+          out = subprocess.run(["nm", "-gU", "W.stock.dylib"], capture_output=True, text=True)
+          abort_addr = None
+          for line in out.stdout.splitlines():
+              parts = line.split()
+              if len(parts) >= 3 and parts[2] == "_abort":
+                  abort_addr = int(parts[0], 16)
+                  break
+          count_abort = 0
+          if abort_addr:
+              print(f"abort symbol address: 0x{abort_addr:x}")
+              for i in range(0, len(data) - 4, 4):
+                  instr = int.from_bytes(data[i:i+4], "little")
+                  if (instr & 0xFC000000) == 0x94000000:
+                      imm26 = instr & 0x03FFFFFF
+                      if imm26 & 0x02000000:
+                          imm26 -= 0x04000000
+                      target = i + imm26 * 4
+                      if target == abort_addr:
+                          data[i:i+4] = nop
+                          count_abort += 1
+              print(f"BL abort patched: {count_abort}")
+          else:
+              print("abort symbol not found, skipping BL patch")
 
           with open("W.full-patched.dylib", "wb") as f:
               f.write(data)
-          print(f"Patched {patched} BRK #1 instructions")
+          print("=== patching done ===")
           PYEOF
           file W.full-patched.dylib
 
       - name: Verify patches
         run: |
           set -euo pipefail
+          echo "=== verify BRK #0x539 removed ==="
           if xxd W.full-patched.dylib | grep -q "20a720d4"; then
-            echo "::warning::BRK #0x539 still present"
-          else
-            echo "BRK #0x539 removed"
+            echo "::error::BRK #0x539 still present"
+            exit 1
           fi
+          echo "OK: BRK #0x539 removed"
+
+          echo "=== verify BRK #1 removed ==="
           if xxd W.full-patched.dylib | grep -q "200020d4"; then
-            echo "::warning::BRK #1 still present"
-          else
-            echo "BRK #1 removed"
+            echo "::error::BRK #1 still present"
+            exit 1
           fi
-          ls -l W.full-patched.dylib
+          echo "OK: BRK #1 removed"
+
+          echo "=== verify NOP count increased ==="
+          STOCK_NOP=$(xxd W.stock.dylib | grep -c "1f2003d5" || true)
+          PATCHED_NOP=$(xxd W.full-patched.dylib | grep -c "1f2003d5" || true)
+          echo "stock NOP patterns: $STOCK_NOP"
+          echo "patched NOP patterns: $PATCHED_NOP"
+          if [ "$PATCHED_NOP" -le "$STOCK_NOP" ]; then
+            echo "::error::no new NOPs inserted, patch did not apply"
+            exit 1
+          fi
+          echo "OK: patches applied"
+
+          echo "=== verify arm64 arch ==="
+          file W.full-patched.dylib | grep -q arm64 || { echo "::error::not arm64"; exit 1; }
+          echo "OK: arm64"
 
       - name: Assemble Frida.framework
         run: |
@@ -179,13 +219,42 @@ jobs:
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
+            codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
           fi
+
+      - name: Final verification
+        run: |
+          set -euo pipefail
+          echo "=== final binary checks ==="
+          file "$FRAMEWORK_NAME/W.dylib"
+          otool -l "$FRAMEWORK_NAME/W.dylib" | grep -A4 LC_BUILD_VERSION | head -10 || true
+          echo "=== BRK #0x539 in final ==="
+          xxd "$FRAMEWORK_NAME/W.dylib" | grep -c "20a720d4" || echo "0 (good)"
+          echo "=== BRK #1 in final ==="
+          xxd "$FRAMEWORK_NAME/W.dylib" | grep -c "200020d4" || echo "0 (good)"
+          echo "=== framework structure ==="
+          find "$FRAMEWORK_NAME" -type f | sort
 
       - name: Package
         run: |
           set -euo pipefail
           zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
-          shasum -a 256 "$FRAMEWORK_NAME.zip"
+          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### patched frida framework"
+            echo ""
+            echo "| param | value |"
+            echo "|---|---|"
+            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| patches | BRK #0x539, BRK #1, BL abort |"
+            echo "| arch | arm64 |"
+            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
+            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
