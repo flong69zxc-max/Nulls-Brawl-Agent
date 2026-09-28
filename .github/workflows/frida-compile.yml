@@ -32,16 +32,24 @@ jobs:
         id: cache-npm
         with:
           path: ~/.npm
-          key: npm-frida-compile-17-${{ runner.os }}-v1
+          key: npm-frida-compile-17-${{ runner.os }}-v2
           restore-keys: |
             npm-frida-compile-17-
             npm-frida-compile-
 
+      - name: Get npm global root
+        id: npmroot
+        run: |
+          set -euo pipefail
+          ROOT=$(npm root -g)
+          echo "ROOT=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "npm global root: $ROOT"
+
       - uses: actions/cache@v4
         id: cache-frida-compile
         with:
-          path: /usr/local/lib/node_modules/frida-compile
-          key: frida-compile-17-${{ runner.os }}-v1
+          path: ${{ steps.npmroot.outputs.ROOT }}/frida-compile
+          key: frida-compile-17-${{ runner.os }}-v2
 
       - name: Install frida-compile
         if: steps.cache-frida-compile.outputs.cache-hit != 'true'
@@ -54,7 +62,8 @@ jobs:
           set -euo pipefail
           which frida-compile
           ls -la $(which frida-compile)
-          node -e "console.log('frida-compile version: ' + require('/usr/local/lib/node_modules/frida-compile/package.json').version)"
+          ROOT=$(npm root -g)
+          node -e "console.log('frida-compile version: ' + require('$ROOT/frida-compile/package.json').version)"
 
       - name: Compile scripts
         run: |
