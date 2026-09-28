@@ -28,10 +28,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install frida-compile
+      - name: Install frida-compile and frida
         run: |
           set -euo pipefail
-          npm install -g frida-compile@17
+          npm install -g frida-compile@17 frida
           NPM_BIN="$(npm prefix -g)/bin"
           echo "$NPM_BIN" >> "$GITHUB_PATH"
           ls -la "$NPM_BIN" | grep frida || true
