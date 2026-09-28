@@ -40,10 +40,16 @@ jobs:
           #import <sys/sysctl.h>
 
           #define CS_OPS_STATUS 0
+          #define CS_DEBUGGED 0x10000000
+          #define CS_HARD 0x00000100
+          #define CS_KILL 0x00000200
+          #define CS_RESTRICT 0x00000800
+          #define CS_REQUIRE_LV 0x00002000
 
           extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 
           static int g_log_fd = -1;
+          static int g_ran = 0;
 
           static void openLogFile(void) {
               NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -59,166 +65,223 @@ jobs:
               }
           }
 
-          static void writeLine(const char *fmt, ...) {
+          static void w(const char *fmt, ...) {
               if (g_log_fd < 0) return;
-              va_list args;
-              va_start(args, fmt);
-              char buf[4096];
-              int n = vsnprintf(buf, sizeof(buf), fmt, args);
-              va_end(args);
+              va_list a;
+              va_start(a, fmt);
+              char buf[8192];
+              int n = vsnprintf(buf, sizeof(buf), fmt, a);
+              va_end(a);
               if (n > 0) write(g_log_fd, buf, n);
           }
 
-          static void dumpEnv(void) {
-              writeLine("[Inspector] === ENVIRONMENT ===\n");
-              const char *keys[] = {"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "HOME", "TMPDIR", "MallocNanoZone"};
-              for (int i = 0; i < 6; i++) {
-                  char *val = getenv(keys[i]);
-                  if (val) writeLine("[Inspector] %s = %s\n", keys[i], val);
-              }
-              uint32_t flags = 0;
-              csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
-              writeLine("[Inspector] csops flags: 0x%x\n", flags);
-              writeLine("[Inspector] get-task-allow: %s\n", (flags & 0x1000000) ? "YES" : "NO");
-              writeLine("[Inspector] platform: %s\n", TARGET_OS_SIMULATOR ? "simulator" : "device");
-              writeLine("[Inspector] pid: %d\n", getpid());
-              writeLine("[Inspector] ppid: %d\n", getppid());
-              writeLine("[Inspector] uid: %d euid: %d\n", getuid(), geteuid());
+          static NSString *appPath(void) {
+              static NSString *cached = nil;
+              if (cached) return cached;
+              NSString *bundle = [[NSBundle mainBundle] bundlePath];
+              cached = [bundle stringByDeletingLastPathComponent];
+              return cached;
           }
 
-          static void dumpFiles(void) {
-              writeLine("[Inspector] === FILE CHECKS ===\n");
-              NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-              NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
-              NSString *fwDir = [bundlePath stringByAppendingPathComponent:@"Frameworks"];
-              NSString *container = NSHomeDirectory();
-              NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
+          static void checkPath(NSString *p) {
+              NSFileManager *fm = [NSFileManager defaultManager];
+              BOOL isDir = NO;
+              BOOL exists = [fm fileExistsAtPath:p isDirectory:&isDir];
+              if (!exists) {
+                  w("[INS] MISS %s\n", [p UTF8String]);
+                  return;
+              }
+              if (isDir) {
+                  w("[INS] DIR  %s\n", [p UTF8String]);
+                  NSArray *items = [fm contentsOfDirectoryAtPath:p error:nil];
+                  for (NSString *item in items) {
+                      NSString *full = [p stringByAppendingPathComponent:item];
+                      NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
+                      NSNumber *sz = a[NSFileSize];
+                      w("[INS]   - %s (%s B)\n", [item UTF8String], sz ? [[sz stringValue] UTF8String] : "?");
+                  }
+              } else {
+                  NSDictionary *a = [fm attributesOfItemAtPath:p error:nil];
+                  NSNumber *sz = a[NSFileSize];
+                  w("[INS] FILE %s (%s B)\n", [p UTF8String], sz ? [[sz stringValue] UTF8String] : "?");
+              }
+          }
+
+          static void dumpFile(NSString *p) {
+              NSFileManager *fm = [NSFileManager defaultManager];
+              if (![fm fileExistsAtPath:p]) return;
+              NSString *content = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+              if (!content) {
+                  NSData *d = [NSData dataWithContentsOfFile:p];
+                  w("[INS] %s (binary, %lu B)\n", [p UTF8String], (unsigned long)d.length);
+                  return;
+              }
+              w("[INS] === CONTENT %s ===\n%s\n=== END ===\n", [p UTF8String], [content UTF8String]);
+          }
+
+          static void dumpCandidates(void) {
+              NSString *app = appPath();
+              NSString *bundle = [[NSBundle mainBundle] bundlePath];
+              NSString *home = NSHomeDirectory();
+              NSString *docs = [home stringByAppendingPathComponent:@"Documents"];
               NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
               NSString *appsDir = [docs stringByAppendingPathComponent:@"Applications"];
 
-              NSArray *allCandidates = @[
-                  [bundlePath stringByAppendingPathComponent:@"W.config"],
-                  [bundlePath stringByAppendingPathComponent:@"agent.js"],
-                  [bundlePath stringByAppendingPathComponent:@"FridaGadget.config"],
-                  [fwDir stringByAppendingPathComponent:@"W.config"],
-                  [fwDir stringByAppendingPathComponent:@"agent.js"],
-                  [fwDir stringByAppendingPathComponent:@"FridaGadget.config"],
-                  [appDir stringByAppendingPathComponent:@"W.config"],
-                  [appDir stringByAppendingPathComponent:@"agent.js"],
-                  [docs stringByAppendingPathComponent:@"W.config"],
-                  [docs stringByAppendingPathComponent:@"agent.js"],
-                  [tweaks stringByAppendingPathComponent:@"W.config"],
-                  [tweaks stringByAppendingPathComponent:@"agent.js"],
-                  [tweaks stringByAppendingPathComponent:@"W.dylib"],
-              ];
+              w("\n[INS] ===== PATH TREE =====\n");
+              checkPath(app);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks"]);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks/Frida.framework"]);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/W.dylib"]);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/W.config"]);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/agent.js"]);
+              checkPath([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/Info.plist"]);
+              checkPath([app stringByAppendingPathComponent:@"W.config"]);
+              checkPath([app stringByAppendingPathComponent:@"agent.js"]);
+              checkPath([app stringByAppendingPathComponent:@"FridaGadget.config"]);
+              checkPath(bundle);
+              checkPath([bundle stringByAppendingPathComponent:@"Frameworks"]);
+              checkPath(docs);
+              checkPath(tweaks);
+              checkPath(appsDir);
 
-              NSFileManager *fm = [NSFileManager defaultManager];
-              for (NSString *p in allCandidates) {
-                  BOOL exists = [fm fileExistsAtPath:p];
-                  NSDictionary *attrs = [fm attributesOfItemAtPath:p error:nil];
-                  NSNumber *size = attrs[NSFileSize];
-                  writeLine("[Inspector] %s %s (%s B)\n", exists ? "FOUND" : "MISSING", [p UTF8String], size ? [[size stringValue] UTF8String] : "-");
-              }
-
-              writeLine("[Inspector] === DIRECTORY LISTINGS ===\n");
-              NSArray *dirs = @[bundlePath, fwDir, tweaks, appsDir, docs];
-              for (NSString *dir in dirs) {
-                  BOOL isDir = NO;
-                  if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) {
-                      writeLine("[Inspector] DIR %s:\n", [dir UTF8String]);
-                      NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-                      for (NSString *item in items) {
-                          NSString *full = [dir stringByAppendingPathComponent:item];
-                          NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
-                          writeLine("[Inspector]   %s (%s B)\n", [item UTF8String], a ? [[a[NSFileSize] stringValue] UTF8String] : "-");
-                      }
-                  } else {
-                      writeLine("[Inspector] DIR %s -> MISSING\n", [dir UTF8String]);
-                  }
-              }
+              w("\n[INS] ===== CONFIG DUMPS =====\n");
+              dumpFile([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/W.config"]);
+              dumpFile([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/agent.js"]);
+              dumpFile([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/FridaGadget.config"]);
+              dumpFile([app stringByAppendingPathComponent:@"Frameworks/Frida.framework/Info.plist"]);
+              dumpFile([app stringByAppendingPathComponent:@"W.config"]);
+              dumpFile([app stringByAppendingPathComponent:@"agent.js"]);
           }
 
-          static void dumpModules(void) {
-              writeLine("[Inspector] === LOADED MODULES ===\n");
+          static void dumpAllModules(void) {
+              w("\n[INS] ===== ALL DYLD IMAGES =====\n");
               uint32_t count = _dyld_image_count();
+              w("[INS] total: %u\n", count);
               for (uint32_t i = 0; i < count; i++) {
                   const char *name = _dyld_get_image_name(i);
-                  if (!name) continue;
-                  NSString *n = [NSString stringWithUTF8String:name];
-                  if ([n containsString:@"W.dylib"] || [n containsString:@"Frida"] ||
-                      [n containsString:@"frida"] || [n containsString:@"TweakLoader"] ||
-                      [n containsString:@"Inspector"] || [n containsString:@"Locator"] ||
-                      [n containsString:@".app/"]) {
-                      const struct mach_header *header = _dyld_get_image_header(i);
-                      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-                      writeLine("[Inspector]   [%u] %s base=%p slide=%p\n", i, name, header, (void*)slide);
+                  const struct mach_header *h = _dyld_get_image_header(i);
+                  intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+                  const char *arch = "?";
+                  if (h) {
+                      if (h->magic == 0xfeedfacf) arch = "arm64";
+                      else if (h->cputype == 12) arch = "arm64e";
                   }
+                  w("[INS] [%u] %s  base=%p slide=%p\n", i, name ? name : "?", h, (void*)slide);
               }
+              w("[INS] ===== END =====\n");
           }
 
-          static void dumpThreads(void) {
-              writeLine("[Inspector] === THREADS ===\n");
+          static void checkFridaPresent(void) {
+              w("\n[INS] ===== FRIDA CHECK =====\n");
+              void *handle = dlopen("@executable_path/Frameworks/Frida.framework/W.dylib", RTLD_NOLOAD);
+              if (!handle) {
+                  handle = dlopen("@executable_path/Frameworks/Frida.framework/W.dylib", RTLD_NOW);
+                  if (!handle) {
+                      w("[INS] Frida dlopen failed: %s\n", dlerror());
+                  } else {
+                      w("[INS] Frida dlopen OK handle=%p\n", handle);
+                  }
+              } else {
+                  w("[INS] Frida already loaded handle=%p\n", handle);
+              }
+
+              const char *sym = "frida_gadget_init";
+              void *p = dlsym(RTLD_DEFAULT, sym);
+              w("[INS] dlsym(%s) = %p\n", sym, p);
+
+              NSFileManager *fm = [NSFileManager defaultManager];
+              NSArray *searchPaths = @[
+                  @"@executable_path/Frameworks/Frida.framework/W.dylib",
+                  @"/var/mobile/Library/Preferences/com.kdt.livecontainer.plist",
+                  @"/var/mobile/Library/Preferences/re.frida.gadget.w.plist",
+              ];
+              for (NSString *sp in searchPaths) {
+                  if ([fm fileExistsAtPath:sp]) {
+                      w("[INS] FOUND %s\n", [sp UTF8String]);
+                  }
+              }
+              w("[INS] ===== END FRIDA =====\n");
+          }
+
+          static void dumpEnvFull(void) {
+              w("\n[INS] ===== ENV =====\n");
+              extern char **environ;
+              for (char **e = environ; *e != NULL; e++) {
+                  w("[INS] env: %s\n", *e);
+              }
+              uint32_t flags = 0;
+              csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
+              w("[INS] csops flags: 0x%08x\n", flags);
+              w("[INS]   CS_DEBUGGED: %s\n", (flags & CS_DEBUGGED) ? "YES" : "NO");
+              w("[INS]   CS_HARD: %s\n", (flags & CS_HARD) ? "YES" : "NO");
+              w("[INS]   CS_KILL: %s\n", (flags & CS_KILL) ? "YES" : "NO");
+              w("[INS]   CS_RESTRICT: %s\n", (flags & CS_RESTRICT) ? "YES" : "NO");
+              w("[INS]   CS_REQUIRE_LV: %s\n", (flags & CS_REQUIRE_LV) ? "YES" : "NO");
+              w("[INS] pid=%d ppid=%d uid=%d euid=%d\n", getpid(), getppid(), getuid(), geteuid());
+              w("[INS] platform=%s\n", TARGET_OS_SIMULATOR ? "simulator" : "device");
+              w("[INS] ===== END ENV =====\n");
+          }
+
+          static void dumpThreadsFull(void) {
+              w("\n[INS] ===== THREADS =====\n");
               thread_act_array_t threads;
-              mach_msg_type_number_t threadCount = 0;
-              if (task_threads(mach_task_self(), &threads, &threadCount) == KERN_SUCCESS) {
-                  writeLine("[Inspector] total threads: %u\n", threadCount);
-                  for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
+              mach_msg_type_number_t cnt = 0;
+              if (task_threads(mach_task_self(), &threads, &cnt) == KERN_SUCCESS) {
+                  w("[INS] count: %u\n", cnt);
+                  for (mach_msg_type_number_t i = 0; i < cnt; i++) {
                       thread_t t = threads[i];
                       thread_extended_info_data_t info;
-                      mach_msg_type_number_t infoCount = THREAD_EXTENDED_INFO_COUNT;
-                      if (thread_info(t, THREAD_EXTENDED_INFO, (thread_info_t)&info, &infoCount) == KERN_SUCCESS) {
-                          NSString *name = [NSString stringWithUTF8String:info.pth_name];
-                          writeLine("[Inspector]   thread %u: %s\n", i, name.length > 0 ? [name UTF8String] : "(unnamed)");
+                      mach_msg_type_number_t ic = THREAD_EXTENDED_INFO_COUNT;
+                      if (thread_info(t, THREAD_EXTENDED_INFO, (thread_info_t)&info, &ic) == KERN_SUCCESS) {
+                          NSString *n = [NSString stringWithUTF8String:info.pth_name];
+                          w("[INS] thread[%u]: %s\n", i, n.length > 0 ? [n UTF8String] : "(unnamed)");
                       }
                   }
-                  vm_deallocate(mach_task_self(), (vm_address_t)threads, threadCount * sizeof(thread_t));
+                  vm_deallocate(mach_task_self(), (vm_address_t)threads, cnt * sizeof(thread_t));
               }
+              w("[INS] ===== END THREADS =====\n");
           }
 
-          static void dumpConfigContents(void) {
-              writeLine("[Inspector] === CONFIG CONTENTS ===\n");
-              NSFileManager *fm = [NSFileManager defaultManager];
-              NSArray *paths = @[
-                  [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"W.config"],
-                  [[[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"Frameworks"] stringByAppendingPathComponent:@"W.config"],
-                  [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/W.config"],
-                  [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Tweaks/W.config"],
-              ];
-              for (NSString *p in paths) {
-                  if ([fm fileExistsAtPath:p]) {
-                      NSString *content = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
-                      writeLine("[Inspector] CONFIG %s:\n%s\n", [p UTF8String], content ? [content UTF8String] : "(unreadable)");
-                  }
-              }
-          }
-
-          static void runInspector(void) {
+          static void runAll(void) {
+              if (g_ran) return;
+              g_ran = 1;
               @autoreleasepool {
                   openLogFile();
-                  writeLine("[Inspector] ========================================\n");
-                  writeLine("[Inspector] Inspector loaded\n");
-                  writeLine("[Inspector] Bundle: %s\n", [[[NSBundle mainBundle] bundlePath] UTF8String]);
-                  writeLine("[Inspector] Executable: %s\n", [[[NSBundle mainBundle] executablePath] UTF8String]);
-                  writeLine("[Inspector] Container: %s\n", [NSHomeDirectory() UTF8String]);
-                  writeLine("[Inspector] Process name: %s\n", [[[NSProcessInfo processInfo] processName] UTF8String]);
-                  dumpEnv();
-                  dumpFiles();
-                  dumpConfigContents();
-                  dumpModules();
-                  dumpThreads();
-                  writeLine("[Inspector] ========================================\n");
+                  w("\n\n[INS] ########## INSPECTOR START ##########\n");
+                  w("[INS] bundle: %s\n", [[[NSBundle mainBundle] bundlePath] UTF8String]);
+                  w("[INS] exec: %s\n", [[[NSBundle mainBundle] executablePath] UTF8String]);
+                  w("[INS] home: %s\n", [NSHomeDirectory() UTF8String]);
+                  dumpEnvFull();
+                  dumpCandidates();
+                  checkFridaPresent();
+                  dumpAllModules();
+                  dumpThreadsFull();
+                  w("[INS] ########## INSPECTOR END ##########\n\n");
               }
           }
 
           __attribute__((constructor))
           __attribute__((used))
-          static void onLoad(void) {
-              runInspector();
+          static void onLoadImmediate(void) {
+              openLogFile();
+              w("\n[INS] constructor fired pid=%d\n", getpid());
+          }
+
+          __attribute__((constructor))
+          __attribute__((used))
+          static void onLoadDelayed(void) {
+              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                             dispatch_get_main_queue(), ^{
+                  runAll();
+              });
           }
 
           @interface InspectorLoader : NSObject @end
           @implementation InspectorLoader
-          + (void)load { onLoad(); }
+          + (void)load {
+              onLoadImmediate();
+              onLoadDelayed();
+          }
           @end
           OBJC_EOF
 
