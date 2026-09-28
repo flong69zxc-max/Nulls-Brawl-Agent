@@ -50,6 +50,8 @@ jobs:
           set -euo pipefail
           git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
           cd "$PATCHER_DIR"
+          python3 -m venv venv
+          source venv/bin/activate
           python3 -m pip install --upgrade pip
           python3 -m pip install -r requirements.txt
           python3 -c "import lief; print('lief', lief.__version__)"
@@ -69,7 +71,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PATCHER_DIR"
-          python3 main.py \
+          source venv/bin/activate
+          python main.py \
             --binarypath "../W.stock.dylib" \
             --output "../W.patched.dylib"
           cd ..
