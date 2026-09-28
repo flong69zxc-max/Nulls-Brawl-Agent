@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       frida_version:
-        description: 'Frida version (e.g. 17.5.0 or latest)'
+        description: 'Frida version (e.g. 17.18.0 or latest)'
         required: true
         default: 'latest'
 
@@ -34,9 +34,17 @@ jobs:
 
       - name: Resolve Frida version
         id: frida_ver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "$FRIDA_VERSION" = "latest" ]; then
-            VER=$(curl -s https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+            RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/frida/frida/releases/latest)
+            VER=$(echo "$RESPONSE" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('tag_name') or '')")
+            if [ -z "$VER" ]; then
+              echo "Failed to resolve latest Frida version. Response:"
+              echo "$RESPONSE" | head -50
+              exit 1
+            fi
           else
             VER="$FRIDA_VERSION"
           fi
