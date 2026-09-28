@@ -1,4 +1,4 @@
-name: Reorganize repository
+name: Reorganize and Build
 
 on:
   workflow_dispatch:
@@ -9,53 +9,83 @@ permissions:
 jobs:
   reorganize:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Remove junk
+      - name: Delete junk
         run: |
           set -euo pipefail
-          git rm -f .github/workflows/compare.yml 2>/dev/null || true
-          git rm -f .github/workflows/create.yml 2>/dev/null || true
-          git rm -rf FridaGadget.framework 2>/dev/null || true
-          git rm -f offsets_report.txt 2>/dev/null || true
-          git rm -f offsets_resolved.js 2>/dev/null || true
-          git rm -f scripts/agent.js 2>/dev/null || true
+          rm -f .github/workflows/create.yml
+          rm -f .github/workflows/compare.yml
+          rm -f CHANGELOG.md
+          rm -f offsets_report.txt
+          rm -f offsets_resolved.js
+          rm -f scripts/agent.js
+          rm -rf FridaGadget.framework
 
-      - name: Create .gitignore
+      - name: Rename workflows
+        run: |
+          set -euo pipefail
+          cd .github/workflows
+          [ -f build.yml ] && mv build.yml Build-Frida-Framework.yml || true
+          [ -f frida-compile.yml ] && mv frida-compile.yml Build-Agent.yml || true
+          [ -f extract_offsets.yml ] && mv extract_offsets.yml Extract-Offsets.yml || true
+          [ -f Frida.yaml ] && mv Frida.yaml Build-Frida-Framework.yml || true
+          ls -la
+
+      - name: Reorganize folders
+        run: |
+          set -euo pipefail
+          mkdir -p Config Frida Scripts/Frida-Scripts Reference
+
+          if [ -f config/agent_config.json ]; then
+            mv config/agent_config.json Config/Agent-Config.json
+            rmdir config 2>/dev/null || true
+          fi
+
+          if [ -d scripts/frida-scripts ]; then
+            find scripts/frida-scripts -maxdepth 1 -type f -exec mv {} Scripts/Frida-Scripts/ \;
+            rm -rf scripts
+          fi
+
+          [ -f W.dylib.zip ] && mv W.dylib.zip Frida/W.dylib.zip || true
+          [ -f offsets.js ] && mv offsets.js Reference/Offsets.js || true
+          [ -f hints.md ] && mv hints.md HINTS.md || true
+
+          find . -maxdepth 2 -not -path './.git*' -not -path './.github/*' -type d | sort
+
+      - name: Update paths in workflows
+        run: |
+          set -euo pipefail
+          sed -i 's|scripts/frida-scripts|Scripts/Frida-Scripts|g' .github/workflows/*.yml || true
+          sed -i 's|W\.dylib\.zip|Frida/W.dylib.zip|g' .github/workflows/*.yml || true
+          sed -i "s|paths:|paths:|g" .github/workflows/Build-Frida-Framework.yml || true
+          sed -i "s|- 'W.dylib.zip'|- 'Frida/W.dylib.zip'|g" .github/workflows/*.yml || true
+          sed -i "s|- 'offsets.js'|- 'Reference/Offsets.js'|g" .github/workflows/*.yml || true
+
+      - name: Write .gitignore
         run: |
           cat > .gitignore << 'EOF'
-          # Build artifacts
           dist/
           .meta/
           FridaGadget.framework/
           *.framework.zip
-
-          # Generated
           offsets_report.txt
           offsets_resolved.js
-          scripts/agent.js
-
-          # Node
           node_modules/
           package-lock.json
-          npm-debug.log*
-
-          # macOS
           .DS_Store
           __MACOSX/
           ._*
-
-          # IDE
           .vscode/
           .idea/
           *.swp
-          *.swo
           EOF
 
-      - name: Create .editorconfig
+      - name: Write .editorconfig
         run: |
           cat > .editorconfig << 'EOF'
           root = true
@@ -71,134 +101,116 @@ jobs:
           [*.md]
           trim_trailing_whitespace = false
 
-          [*.{yml,yaml}]
-          indent_size = 2
-
           [Makefile]
           indent_style = tab
           EOF
 
-      - name: Create README.md
+      - name: Write README.md
         run: |
           cat > README.md << 'EOF'
           # Nulls Brawl Agent
 
-          Frida Gadget agent для iOS-билда Nulls Brawl, работающий через LiveContainer.
-
-          ## Что это
-
-          Плоский Frida-скрипт (`agent.js`), который собирается из модульных исходников в `scripts/frida-scripts/` и загружается в игру через Frida Gadget, вшитый в `Frida.framework`.
+          Frida Gadget agent для iOS через LiveContainer.
 
           ## Структура
 
           ```
           .
           ├── .github/workflows/
-          │   ├── build.yml          # сборка Frida.framework с gadget + agent.js
-          │   ├── frida-compile.yml  # сборка agent.js из модулей
-          │   └── extract_offsets.yml # извлечение офсетов для target-патчей
-          ├── config/
-          │   └── agent_config.json  # рантайм-конфиг (пути, targets, alert)
-          ├── scripts/
-          │   └── frida-scripts/
-          │       └── agent.js       # точка входа agent
-          ├── frida/
-          │   └── W.dylib.zip        # dev-эталон для верификации
-          ├── offsets.js             # сгенерированные офсеты
+          │   ├── Build-Frida-Framework.yml
+          │   ├── Build-Agent.yml
+          │   └── Extract-Offsets.yml
+          ├── Config/
+          │   └── Agent-Config.json
+          ├── Frida/
+          │   └── W.dylib.zip
+          ├── Reference/
+          │   └── Offsets.js
+          ├── Scripts/
+          │   └── Frida-Scripts/
+          │       └── agent.js
+          ├── HINTS.md
+          ├── README.md
+          ├── .gitignore
+          ├── .editorconfig
           ├── package.json
           └── tsconfig.json
           ```
 
-          ## Сборка
+          ## Установка
 
-          Два независимых артефакта, оба собираются через GitHub Actions:
+          1. Actions → Build Frida Framework → Run workflow
+          2. Скачать Frida.framework.zip
+          3. Распаковать
+          4. Положить Frida.framework в nt.nb.ios.app/Frameworks/
+          5. Запустить игру
 
-          ### 1. `agent.js` (workflow `frida-compile.yml`)
+          ## Документация
 
-          Собирает `scripts/frida-scripts/agent.js` в один плоский файл без `node_modules`-путей, с вшитым `frida-objc-bridge`. Выход: `dist/agent.js`.
-
-          Запуск: **Actions → Frida Compile → Run workflow**.
-
-          ### 2. `Frida.framework` (workflow `build.yml`)
-
-          Собирает готовый iOS framework из стокового `frida-gadget-17.2.11-ios-universal`:
-          1. `lipo -thin arm64`
-          2. `strip -Sx`
-          3. Упаковка в `Frida.framework/` с `Info.plist`, `W.config`, `agent.js`
-          4. Подпись `ldid -S`
-
-          Выход: `Frida.framework.zip`.
-
-          Запуск: **Actions → Build → Run workflow**.
-
-          ## Установка в LiveContainer
-
-          1. Скачать оба артефакта (`agent.js` и `Frida.framework.zip`).
-          2. Распаковать `Frida.framework.zip`.
-          3. Заменить `Frida.framework/agent.js` на свой `agent.js`.
-          4. Положить `Frida.framework` в `nt.nb.ios.app/Frameworks/`.
-          5. Запустить игру.
-
-          ## Конфиг
-
-          `config/agent_config.json` — рантайм-настройки агента:
-
-          | Поле | Описание |
-          |---|---|
-          | `patch` | Включить патчинг (иначе только probe) |
-          | `alert` | Показывать UIAlertController при загрузке |
-          | `alert_delay_ms` | Задержка перед показом alert |
-          | `targets` | Список target-патчей (rva + type + value) |
-          | `scan_strings` | Автоматический скан строк при старте |
-          | `reapply_ms` | Через сколько мс переприменять патчи |
-
-          ## Разработка
-
-          Требуется Node.js 20+.
-
-          ```
-          npm install
-          npm run build    # собрать agent.js локально (esbuild)
-          npm run watch    # watch-режим
-          ```
-
-          ## Отладка
-
-          Логи агента пишутся в `Documents/agent.log` **контейнера гостя** (не LiveContainer'а). Путь в реальном времени виден в системном логе iOS по тегу `[Nulls Brawl]` или через StikDebug.
-
-          ## Лицензия
-
-          Приватный репозиторий. Использование на свой риск.
+          Смотри HINTS.md для деталей по сборке Frida.framework.
           EOF
 
-      - name: Create CHANGELOG.md
+      - name: Write HINTS.md
         run: |
-          cat > CHANGELOG.md << 'EOF'
-          # Changelog
+          cat > HINTS.md << 'EOF'
+          # HINTS
 
-          Все значимые изменения по проекту. Формат — [Keep a Changelog](https://keepachangelog.com/).
+          Заметки по сборке Frida.framework под iOS 27 + LiveContainer.
 
-          ## [Unreleased]
+          ## Ключевой факт
 
-          ### Added
-          - Модульная структура агента в `scripts/frida-scripts/`
-          - CI-сборка `Frida.framework` под Frida 17.2.11
-          - Отладочный лог агента в `Documents/agent.log`
+          dev-W.dylib это сток Frida 17.2.11 + lipo -thin arm64 + ldid-procursus -S + обнуление LC_CODE_SIGNATURE blob + lipo -create.
 
-          ### Changed
-          - Переход с `frida-compile@17` на `esbuild` для сборки flat agent.js
-          - Целевой рантайм обновлён до Frida 17.2.11
+          Никакого gum-graft. Счётчики brk/nop/ret в dev, стоке и нашей сборке совпадают до единицы.
 
-          ### Removed
-          - Устаревшие отладочные утилиты (`compare.yml`, `create.yml`)
-          - Сгенерированные артефакты из git (`offsets_report.txt`, `offsets_resolved.js`)
+          ## Порядок операций
 
-          ## [0.1.0] - 2026-09-29
+          ```
+          stock fat 17.2.11
+            -> lipo -thin arm64 (19006768)
+            -> ldid-procursus -S (19006592, LC_CODE_SIGNATURE.size=256496)
+            -> обнулить blob
+            -> lipo -create -arch arm64 (19022976)
+          ```
 
-          ### Added
-          - Первый рабочий агент под Nulls Brawl
-          - Патчинг `isDeveloperBuild` через rva-таргеты
-          - Автопереприменение патчей
+          ## Почему 17.2.11
+
+          Последний релиз до появления __FRIDA_TEXT*/__FRIDA_DATA* сегментов (17.2.15+). Эти сегменты iOS 27 отвергает с CODESIGNING 2 Invalid Page.
+
+          Использует LC_DYLD_INFO_ONLY, не LC_DYLD_CHAINED_FIXUPS.
+
+          ## Почему ldid-procursus
+
+          Обычный ldid от Saurik пишет подпись ~238 КБ без DER-encoded entitlements. Файл на 17 КБ короче dev.
+
+          ldid-procursus добавляет DER entitlements для iOS 15.1+ и пишет 256 КБ, как dev.
+
+          ```
+          brew uninstall ldid
+          brew install ldid-procursus
+          ```
+
+          ## Ключевые цифры
+
+          - fat size: 19022976
+          - arm64 slice: 19006592
+          - LC_CODE_SIGNATURE.offset: 18750096
+          - LC_CODE_SIGNATURE.size: 256496
+
+          ## Что НЕ работает
+
+          - gum-graft: создаёт __FRIDA_TEXT* сегменты, iOS 27 отвергает
+          - ручная обрезка файла: __LINKEDIT.filesize вылезает за конец файла
+          - Frida 17.2.15+: brk #0x539 в инициализаторе dyld
+          - обычный ldid: подпись короче на 17 КБ
+
+          ## Проверка на устройстве
+
+          ```
+          python3 an.py NULLS.dylib OUR.dylib
+          ```
+
+          Ожидается slice size diff: 0, code_sig совпадает.
           EOF
 
       - name: Commit
@@ -207,5 +219,146 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "chore: reorganize repo, add docs, cleanup junk" || echo "nothing to commit"
+          git commit -m "chore: reorganize repository" || echo "nothing to commit"
           git push
+
+  build:
+    needs: reorganize
+    runs-on: macos-14
+    timeout-minutes: 15
+    env:
+      FRIDA_VERSION: '17.2.11'
+      FRAMEWORK_NAME: Frida.framework
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download Frida Gadget
+        run: |
+          set -euo pipefail
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.fat.dylib
+          file W.fat.dylib
+
+      - name: Extract arm64 slice
+        run: |
+          set -euo pipefail
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+          file W.thin.dylib
+          echo "before sign: $(stat -f%z W.thin.dylib)"
+
+      - name: Install ldid-procursus
+        run: |
+          set -euo pipefail
+          brew uninstall ldid 2>/dev/null || true
+          brew install ldid-procursus
+          which ldid
+
+      - name: Resign
+        run: |
+          set -euo pipefail
+          ldid -S W.thin.dylib
+          echo "after sign: $(stat -f%z W.thin.dylib)"
+
+      - name: Zero signature blob
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import struct
+          with open("W.thin.dylib", "rb") as f:
+              d = bytearray(f.read())
+          n = struct.unpack_from("<I", d, 16)[0]
+          o = 32
+          for _ in range(n):
+              c, s = struct.unpack_from("<II", d, o)
+              if c == 0x1d:
+                  off, sz = struct.unpack_from("<II", d, o + 8)
+                  print(f"LC_CODE_SIGNATURE: offset={off} size={sz}")
+                  for i in range(off, off + sz):
+                      d[i] = 0
+                  break
+              o += s
+          with open("W.thin.dylib", "wb") as f:
+              f.write(d)
+          print(f"final thin size: {len(d)}")
+          PYEOF
+
+      - name: Wrap into fat
+        run: |
+          set -euo pipefail
+          lipo -create -arch arm64 W.thin.dylib -output W.dylib
+          file W.dylib
+          echo "fat size: $(stat -f%z W.dylib)"
+
+      - name: Compare with dev
+        run: |
+          set -euo pipefail
+          if [ ! -f Frida/W.dylib.zip ]; then
+            echo "Frida/W.dylib.zip not found, skipping"
+            exit 0
+          fi
+          mkdir -p dev
+          unzip -o Frida/W.dylib.zip -d dev > /dev/null
+          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
+          cp "$DEV" W.dev.dylib
+          echo "dev:  $(stat -f%z W.dev.dylib)"
+          echo "ours: $(stat -f%z W.dylib)"
+          python3 - << 'PYEOF'
+          with open("W.dev.dylib","rb") as f: dev = f.read()
+          with open("W.dylib","rb") as f: ours = f.read()
+          n = min(len(dev), len(ours))
+          diffs = [i for i in range(n) if dev[i] != ours[i]]
+          print(f"total differing bytes: {len(diffs)}")
+          for i in diffs[:20]:
+              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
+          PYEOF
+
+      - name: Assemble Frida.framework
+        run: |
+          set -euo pipefail
+          rm -rf "$FRAMEWORK_NAME"
+          mkdir -p "$FRAMEWORK_NAME"
+          cp W.dylib "$FRAMEWORK_NAME/W.dylib"
+          cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>W.dylib</string>
+              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
+              <key>CFBundleShortVersionString</key><string>17.2.11</string>
+              <key>CFBundleVersion</key><string>17.2.11</string>
+              <key>CFBundleName</key><string>Frida</string>
+              <key>CFBundlePackageType</key><string>FMWK</string>
+              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+              <key>DTPlatformName</key><string>iphoneos</string>
+              <key>MinimumOSVersion</key><string>12.0</string>
+          </dict>
+          </plist>
+          PLIST
+          cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
+          {
+            "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
+            "code_signing": "required"
+          }
+          CONFIG
+          echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
+          find "$FRAMEWORK_NAME" -name "._*" -delete
+          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
+          ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
+          shasum -a 256 Frida.framework.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Frida.framework
+          path: Frida.framework.zip
+          retention-days: 30
