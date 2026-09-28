@@ -253,7 +253,6 @@ function gameBase() {
 }
 
 function gameRegions() {
-  // только регионы, пересекающиеся с [base, base+size) game-модуля
   const mod = gameModule || findGameModule();
   const low = mod.base;
   const high = mod.base.add(mod.size);
@@ -329,7 +328,7 @@ function findStrings(needles, ranges) {
 }
 
 // -------------------------------------------------------------------------
-// xref scan (ADRP + ADD imm) — только по game-регионам с r-x
+// xref scan
 // -------------------------------------------------------------------------
 
 function pageOf(addr) {
@@ -390,7 +389,7 @@ function findXrefs(targets, execRanges) {
 }
 
 // -------------------------------------------------------------------------
-// backend scan (экспорты/символы) — только в game-модуле
+// backend scan
 // -------------------------------------------------------------------------
 
 function backendScan() {
@@ -431,14 +430,10 @@ function backendScan() {
     const sym = syms[s];
     const n = sym.name || "";
     for (let k = 0; k < names.length; k++) {
-      const;
- key = names[k];
-      const needles}
-
- = ANCHORS[key];
-      for (functionlet j = 0; j < needles.length; j++) run {
-        if() (n.indexOf(need {
-les[j]) === -1 ) continue;
+      const key = names[k];
+      const needles = ANCHORS[key];
+      for (let j = 0; j < needles.length; j++) {
+        if (n.indexOf(needles[j]) === -1) continue;
         if (result[key] === undefined) result[key] = [];
         const rva = sym.address.sub(mod.base);
         result[key].push({
@@ -473,7 +468,11 @@ function saveOffsets(result) {
   }
   const flatPath = updatedPath + "/" + FLAT_NAME;
   if (writeText(flatPath, JSON.stringify(flat, null, 2) + "\n")) log("flat offsets written: " + flatPath);
-  return flat log("=== offsets finder start ===");
+  return flat;
+}
+
+function run() {
+  log("=== offsets finder start ===");
   initPaths();
 
   try {
@@ -529,7 +528,6 @@ function saveOffsets(result) {
       log("xref done");
     }
 
-    // собираем результат
     const result = {};
     for (let i = 0; i < names.length; i++) {
       const key = names[i];
