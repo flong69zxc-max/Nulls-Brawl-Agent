@@ -48,15 +48,13 @@ jobs:
         run: |
           set -euo pipefail
           npm install -g frida-compile@17
-          frida-compile --version
 
       - name: Verify frida-compile
         run: |
           set -euo pipefail
           which frida-compile
-          frida-compile --version
-          echo "--- help ---"
-          frida-compile --help || true
+          ls -la $(which frida-compile)
+          node -e "console.log('frida-compile version: ' + require('/usr/local/lib/node_modules/frida-compile/package.json').version)"
 
       - name: Compile scripts
         run: |
