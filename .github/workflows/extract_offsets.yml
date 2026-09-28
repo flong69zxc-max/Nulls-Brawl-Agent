@@ -23,7 +23,7 @@ jobs:
 
       - uses: actions/setup-java@v4
         with:
-          java-version: "25"
+          java-version: "21"
           distribution: temurin
 
       - name: Install helper tools
@@ -37,13 +37,13 @@ jobs:
         id: cache-ghidra
         with:
           path: ghidra
-          key: ghidra-12.1.2-jython-v4
+          key: ghidra-12.1.2-jython-v1
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260205.zip
           unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
           mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
@@ -106,8 +106,6 @@ jobs:
           unzip -q ipa_cache/bs.ipa -d extract
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           test -n "$APP_DIR"
-          echo "--- APP_DIR contents ---"
-          ls -la "$APP_DIR" | head -40
           BIN="$APP_DIR/Nulls Brawl"
           if [ ! -f "$BIN" ]; then
             BIN=""
@@ -131,15 +129,12 @@ jobs:
 
       - name: Validate scripts
         run: |
+          set +e
           set -uo pipefail
           test -f "$GITHUB_WORKSPACE/scripts/find_offsets.py"
           test -f "$GITHUB_WORKSPACE/offsets.js"
           echo "find_offsets.py: $(wc -l < "$GITHUB_WORKSPACE/scripts/find_offsets.py") lines"
           echo "offsets.js: $(wc -l < "$GITHUB_WORKSPACE/offsets.js") lines"
-          echo "--- find_offsets.py head ---"
-          head -5 "$GITHUB_WORKSPACE/scripts/find_offsets.py"
-          echo "--- find_offsets.py tail ---"
-          tail -5 "$GITHUB_WORKSPACE/scripts/find_offsets.py"
 
       - uses: actions/cache@v4
         id: cache-project
@@ -180,10 +175,10 @@ jobs:
 
       - name: Validate outputs
         run: |
+          set +e
           set -uo pipefail
           if [ ! -s offsets_new.js ]; then
             echo "offsets_new.js missing or empty"
-            echo "--- ghidra.log tail ---"
             tail -120 ghidra.log 2>/dev/null || true
             exit 1
           fi
@@ -213,6 +208,7 @@ jobs:
       - name: Commit result
         if: always()
         run: |
+          set +e
           set -uo pipefail
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
