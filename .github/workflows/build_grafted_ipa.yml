@@ -14,7 +14,14 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - uses: actions/cache@v4
+        id: cache-gum-graft
+        with:
+          path: gum-graft-bin
+          key: gum-graft-17.18.0-macos-arm64-v1
+
       - name: Checkout frida-gum
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
         uses: actions/checkout@v4
         with:
           repository: frida/frida-gum
@@ -22,41 +29,60 @@ jobs:
           submodules: recursive
           path: frida-gum
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
         with:
           python-version: '3.12'
 
       - name: Install build dependencies
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
         run: |
           brew install meson ninja pkg-config libffi glib
           pip install setuptools
 
       - name: Build gum-graft
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           cd frida-gum
           meson setup build --prefix=/tmp/frida-build -Dgraft_tool=enabled
           ninja -C build tools/gum-graft
-          cp build/tools/gum-graft /tmp/frida-build/gum-graft
-          ls -la /tmp/frida-build/gum-graft
-          file /tmp/frida-build/gum-graft
+          mkdir -p ../gum-graft-bin
+          cp build/tools/gum-graft ../gum-graft-bin/gum-graft
+          chmod +x ../gum-graft-bin/gum-graft
+          ls -la ../gum-graft-bin/gum-graft
+          file ../gum-graft-bin/gum-graft
 
-      - name: Download Frida Gadget 17.18.0
+      - name: Verify gum-graft
         run: |
           set -euo pipefail
-          mkdir -p work
-          curl -fL -o work/frida-gadget.dylib.xz \
+          ls -la gum-graft-bin/gum-graft
+          file gum-graft-bin/gum-graft
+
+      - uses: actions/cache@v4
+        id: cache-gadget
+        with:
+          path: gadget-cache
+          key: frida-gadget-17.18.0-ios-universal-v1
+
+      - name: Download Frida Gadget
+        if: steps.cache-gadget.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p gadget-cache
+          curl -fL -o /tmp/frida-gadget.dylib.xz \
             "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
-          xz -d work/frida-gadget.dylib.xz
-          mv work/frida-gadget.dylib work/FridaGadget.dylib
-          file work/FridaGadget.dylib
+          xz -d /tmp/frida-gadget.dylib.xz
+          mv /tmp/frida-gadget.dylib gadget-cache/FridaGadget.dylib
+          file gadget-cache/FridaGadget.dylib
 
       - name: Apply gum-graft
         run: |
           set -euo pipefail
-          chmod +x /tmp/frida-build/gum-graft
-          /tmp/frida-build/gum-graft -i work/FridaGadget.dylib -a 0xb24998
+          mkdir -p work
+          cp gadget-cache/FridaGadget.dylib work/FridaGadget.dylib
+          chmod +x gum-graft-bin/gum-graft
+          ./gum-graft-bin/gum-graft -i work/FridaGadget.dylib -a 0xb24998
           file work/FridaGadget.dylib
 
       - name: Create Framework structure
