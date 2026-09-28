@@ -1,4 +1,4 @@
-name: Build DebugLogger
+name: Build Locator
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  debuglogger:
+  locator:
     runs-on: macos-14
     timeout-minutes: 15
     steps:
@@ -26,81 +26,109 @@ jobs:
       - name: Write source
         run: |
           set -euo pipefail
-          cat > debuglogger.m <<'OBJC_EOF'
+          cat > locator.m <<'OBJC_EOF'
           #import <Foundation/Foundation.h>
           #import <mach-o/dyld.h>
           #import <dlfcn.h>
           #import <objc/runtime.h>
-
-          static NSString *SafePath(const char *path) {
-              return path ? [NSString stringWithUTF8String:path] : @"(null)";
-          }
-
-          #define DLOG(fmt, ...) NSLog(@"[FridaDebug] " fmt, ##__VA_ARGS__)
+          #import <unistd.h>
+          #import <fcntl.h>
 
           static void redirectLogs(void) {
               NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
               NSString *docs = paths.count > 0 ? paths[0] : nil;
-              if (!docs) docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-              NSString *logPath = [docs stringByAppendingPathComponent:@"frida_debug.log"];
-              NSFileManager *fm = [NSFileManager defaultManager];
-              if (![fm fileExistsAtPath:logPath]) {
-                  [fm createFileAtPath:logPath contents:nil attributes:nil];
+              if (!docs) {
+                  docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
               }
-              freopen([logPath fileSystemRepresentation], "a+", stderr);
-              DLOG(@"log redirected to %@", logPath);
+              NSString *logPath = [docs stringByAppendingPathComponent:@"locator.log"];
+              int fd = open([logPath fileSystemRepresentation], O_CREAT | O_WRONLY | O_APPEND, 0666);
+              if (fd >= 0) {
+                  dup2(fd, STDERR_FILENO);
+                  dup2(fd, STDOUT_FILENO);
+                  close(fd);
+                  setvbuf(stderr, NULL, _IONBF, 0);
+                  setvbuf(stdout, NULL, _IONBF, 0);
+              }
+              NSLog(@"[Locator] log: %@", logPath);
           }
 
-          __attribute__((constructor(101)))
+          static void checkFile(NSString *dir, NSString *name) {
+              NSString *full = [dir stringByAppendingPathComponent:name];
+              BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:full];
+              NSLog(@"[Locator]   %@/%@ -> %@", dir, name, exists ? @"FOUND" : @"missing");
+          }
+
+          static void scanDir(NSString *dir) {
+              NSFileManager *fm = [NSFileManager defaultManager];
+              BOOL isDir = NO;
+              if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
+                  NSLog(@"[Locator] %@ -> not a directory", dir);
+                  return;
+              }
+              NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+              NSLog(@"[Locator] %@ contents (%lu): %@", dir, (unsigned long)items.count, items);
+          }
+
+          __attribute__((constructor))
           __attribute__((used))
           static void onLoad(void) {
               @autoreleasepool {
                   redirectLogs();
-                  DLOG(@"========================================");
-                  DLOG(@"DebugLogger loaded pid=%d", getpid());
-                  DLOG(@"Bundle: %@", [[NSBundle mainBundle] bundlePath]);
-                  DLOG(@"Executable: %@", [[NSBundle mainBundle] executablePath]);
-                  DLOG(@"Container: %@", NSHomeDirectory());
-                  DLOG(@"Bundle ID: %@", [[NSBundle mainBundle] bundleIdentifier]);
+                  NSLog(@"[Locator] ========================================");
+                  NSLog(@"[Locator] Locator loaded pid=%d", getpid());
+                  NSLog(@"[Locator] Bundle: %@", [[NSBundle mainBundle] bundlePath]);
+                  NSLog(@"[Locator] Executable: %@", [[NSBundle mainBundle] executablePath]);
+                  NSLog(@"[Locator] Container: %@", NSHomeDirectory());
+                  NSLog(@"[Locator] Bundle ID: %@", [[NSBundle mainBundle] bundleIdentifier]);
 
-                  NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
-                  BOOL isLC = [defs boolForKey:@"isLiveProcess"] ||
-                              [defs stringForKey:@"lcGuestAppId"] != nil ||
-                              [defs stringForKey:@"lcAppGroupPath"] != nil;
-                  DLOG(@"LiveContainer: %@", isLC ? @"YES" : @"NO");
-                  if (isLC) {
-                      DLOG(@"  lcGuestAppId: %@", [defs stringForKey:@"lcGuestAppId"]);
-                      DLOG(@"  lcAppGroupPath: %@", [defs stringForKey:@"lcAppGroupPath"]);
-                  }
+                  NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+                  NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
+                  NSString *container = NSHomeDirectory();
+                  NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
+                  NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
+                  NSString *appsDir = [docs stringByAppendingPathComponent:@"Applications"];
 
-                  DLOG(@"--- loaded modules ---");
+                  NSLog(@"[Locator] --- checking W files ---");
+                  checkFile(bundlePath, @"W.dylib");
+                  checkFile(bundlePath, @"W.config");
+                  checkFile(bundlePath, @"agent.js");
+                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"W.dylib");
+                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"W.config");
+                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"agent.js");
+                  checkFile(appDir, @"W.dylib");
+                  checkFile(appDir, @"W.config");
+                  checkFile(appDir, @"agent.js");
+                  checkFile(docs, @"W.dylib");
+                  checkFile(docs, @"W.config");
+                  checkFile(docs, @"agent.js");
+                  checkFile(tweaks, @"W.dylib");
+                  checkFile(tweaks, @"W.config");
+                  checkFile(tweaks, @"agent.js");
+
+                  NSLog(@"[Locator] --- scanning directories ---");
+                  scanDir(bundlePath);
+                  scanDir([bundlePath stringByAppendingPathComponent:@"Frameworks"]);
+                  scanDir(tweaks);
+                  scanDir(appsDir);
+                  scanDir(docs);
+
+                  NSLog(@"[Locator] --- loaded modules ---");
                   uint32_t count = _dyld_image_count();
                   for (uint32_t i = 0; i < count; i++) {
                       const char *name = _dyld_get_image_name(i);
                       if (!name) continue;
                       NSString *n = [NSString stringWithUTF8String:name];
                       if ([n containsString:@"W.dylib"] || [n containsString:@"Frida"] ||
-                          [n containsString:@"TweakLoader"] || [n containsString:@"gadget"]) {
-                          DLOG(@"  [%u] %@", i, n);
+                          [n containsString:@"TweakLoader"] || [n containsString:@"Locator"]) {
+                          NSLog(@"[Locator]   [%u] %@", i, n);
                       }
                   }
 
                   Dl_info info;
                   if (dladdr((void *)&onLoad, &info) && info.dli_fname) {
-                      NSString *myPath = SafePath(info.dli_fname);
-                      DLOG(@"Loaded from: %@", myPath);
-                      NSString *dir = [myPath stringByDeletingLastPathComponent];
-                      for (NSString *file in @[@"W.dylib", @"W.config", @"agent.js"]) {
-                          NSString *full = [dir stringByAppendingPathComponent:file];
-                          BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:full];
-                          DLOG(@"  %@ next to dylib: %@", file, exists ? @"YES" : @"NO");
-                      }
+                      NSLog(@"[Locator] Loaded from: %s", info.dli_fname);
                   }
-
-                  NSString *docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-                  DLOG(@"Documents: %@ writable: %@", docs,
-                       [[NSFileManager defaultManager] isWritableFileAtPath:docs] ? @"YES" : @"NO");
-                  DLOG(@"========================================");
+                  NSLog(@"[Locator] ========================================");
               }
           }
           OBJC_EOF
@@ -110,8 +138,8 @@ jobs:
           set -euo pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -dynamiclib \
-            -o DebugLogger.dylib \
-            debuglogger.m \
+            -o Locator.dylib \
+            locator.m \
             -framework Foundation \
             -arch arm64 \
             -miphoneos-version-min=12.0 \
@@ -119,32 +147,31 @@ jobs:
             -fobjc-arc \
             -O2 \
             -Wall -Wextra \
+            -Wl,-init,_onLoad \
             -Wl,-no_dead_strip_inits_and_terms \
-            -Wl,-all_load \
-            -install_name "@executable_path/Frameworks/DebugLogger.dylib"
-          ls -l DebugLogger.dylib
+            -install_name "@executable_path/Frameworks/Locator.dylib"
+          ls -l Locator.dylib
 
       - name: Verify
         run: |
           set -euo pipefail
-          file DebugLogger.dylib | grep -q arm64
-          otool -l DebugLogger.dylib | grep -A3 -i 'init_array' || echo "WARNING: no init_array"
-          nm -gU DebugLogger.dylib | grep -i onLoad || echo "WARNING: onLoad not exported"
+          file Locator.dylib | grep -q arm64
+          otool -l Locator.dylib | grep -A3 -i 'init_array' || echo "WARNING: no init_array"
 
       - name: Sign
         run: |
           set -euo pipefail
           brew install ldid || true
           if command -v ldid >/dev/null; then
-            cp DebugLogger.dylib DebugLogger.signed.dylib
-            ldid -S DebugLogger.signed.dylib
+            cp Locator.dylib Locator.signed.dylib
+            ldid -S Locator.signed.dylib
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: debuglogger
+          name: locator
           path: |
-            DebugLogger.dylib
-            DebugLogger.signed.dylib
+            Locator.dylib
+            Locator.signed.dylib
           retention-days: 30
           if-no-files-found: error
