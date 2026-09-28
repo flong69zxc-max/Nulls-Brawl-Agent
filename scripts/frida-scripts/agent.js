@@ -242,15 +242,14 @@ function findTargetModule() {
       const m = mods[i];
       const p = m.path || "";
       if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) {
-        log("target module matched NB.app: " + m.name + " " + m.base + " size=" + m.size);
+        log("target module: " + m.name + " " + m.base + " size=" + m.size);
         return m;
       }
     }
     for (let i = 0; i < mods.length; i++) {
-      const m = mods[i];
-      if (/nulls/i.test(m.name || "")) {
-        log("target module matched name: " + m.name + " " + m.base);
-        return m;
+      if (/nulls/i.test(mods[i].name || "")) {
+        log("target module (name): " + mods[i].name + " " + mods[i].base);
+        return mods[i];
       }
     }
     let best = mods.length > 0 ? mods[0] : null;
@@ -260,7 +259,7 @@ function findTargetModule() {
       }
     }
     if (best !== null) {
-      log("target module fallback largest: " + best.name + " " + best.base);
+      log("target module (fallback): " + best.name + " " + best.base);
     }
     return best;
   } catch (e) {
@@ -279,7 +278,7 @@ function readArgAsString(arg) {
   try {
     const obj = new ObjC.Object(arg);
     const cls = obj.$className;
-    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls) || /^__NSCF/.test(cls)) {
+    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls) || /^__NSCF/.test(cls) || /^NSTaggedPointerString/.test(cls)) {
       const out = obj.toString();
       if (out !== null && out.length > 0) {
         return out;
