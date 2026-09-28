@@ -46,18 +46,14 @@ jobs:
           cp "$DEV" W.dev.dylib
           lipo -thin arm64 -output W.dev.thin.dylib W.dev.dylib
           echo "dev thin: $(stat -f%z W.dev.thin.dylib)"
+          echo "dev fat:  $(stat -f%z W.dev.dylib)"
 
-      - name: Extract thin arm64 from stock
+      - name: Extract stock thin arm64
         run: |
           set -euo pipefail
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "thin before: $(stat -f%z W.thin.dylib)"
-
-      - name: Remove existing signature
-        run: |
-          set -euo pipefail
           codesign --remove-signature W.thin.dylib 2>/dev/null || true
-          echo "after remove: $(stat -f%z W.thin.dylib)"
+          echo "thin unsigned: $(stat -f%z W.thin.dylib)"
 
       - name: Build Frida.framework
         run: |
@@ -90,107 +86,146 @@ jobs:
           CONFIG
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
 
-      - name: Sign framework as bundle
+      - name: Sign framework
         run: |
           set -euo pipefail
-          TARGET=$(stat -f%z W.dev.thin.dylib)
-          echo "target dylib size: $TARGET"
-
-          # Sign the whole framework as bundle → codesign adds Info.plist + resources slots
-          codesign --force --sign - --timestamp=none "$FRAMEWORK_NAME" 2>&1 || true
-
+          codesign --force --sign - --timestamp=none "$FRAMEWORK_NAME"
           SZ=$(stat -f%z "$FRAMEWORK_NAME/W.dylib")
-          echo "after framework sign: $SZ (diff $((SZ - TARGET)))"
-
+          TARGET=$(stat -f%z W.dev.thin.dylib)
+          echo "signed thin: $SZ (target $TARGET, diff $((SZ - TARGET)))"
           if [ "$SZ" != "$TARGET" ]; then
-            echo "bundle sign did not produce target, trying alternatives"
-
-            # restore thin dylib and try other variants
-            cp W.thin.dylib "$FRAMEWORK_NAME/W.dylib"
-
-            # try signing framework with identifier override
-            codesign --force --sign - --timestamp=none --identifier re.frida.gadget "$FRAMEWORK_NAME" 2>&1 || true
-            SZ=$(stat -f%z "$FRAMEWORK_NAME/W.dylib")
-            echo "with identifier: $SZ (diff $((SZ - TARGET)))"
-
-            if [ "$SZ" != "$TARGET" ]; then
-              echo "::error::cannot match target $TARGET"
-              echo "closest frameworks:"
-              ls -la "$FRAMEWORK_NAME/W.dylib"
-              exit 1
-            fi
+            echo "::error::framework sign gave $SZ, expected $TARGET"
+            exit 1
           fi
 
-      - name: Zero signature blob
-        run: |
-          set -euo pipefail
-          python3 - << 'PYEOF'
-          import struct
-          path = "Frida.framework/W.dylib"
-          with open(path, "rb") as f:
-              d = bytearray(f.read())
-          n = struct.unpack_from("<I", d, 16)[0]
-          o = 32
-          for _ in range(n):
-              c, s = struct.unpack_from("<II", d, o)
-              if c == 0x1d:
-                  off, sz = struct.unpack_from("<II", d, o + 8)
-                  print("sig offset=" + str(off) + " size=" + str(sz))
-                  for i in range(off, off + sz):
-                      d[i] = 0
-                  break
-              o += s
-          with open(path, "wb") as f:
-              f.write(d)
-          print("done")
-          PYEOF
-
-      - name: Compare with dev thin
+      - name: Copy signed thin
         run: |
           set -euo pipefail
           cp "$FRAMEWORK_NAME/W.dylib" W.thin.dylib
-          echo "dev thin:  $(stat -f%z W.dev.thin.dylib)"
-          echo "ours thin: $(stat -f%z W.thin.dylib)"
-          python3 - << 'PYEOF'
-          with open("W.dev.thin.dylib", "rb") as f: dev = f.read()
-          with open("W.thin.dylib", "rb") as f: ours = f.read()
-          if len(dev) != len(ours):
-              print("SIZE MISMATCH: dev=" + str(len(dev)) + " ours=" + str(len(ours)) + " diff=" + str(abs(len(dev)-len(ours))))
-          n = min(len(dev), len(ours))
-          diffs = [i for i in range(n) if dev[i] != ours[i]]
-          print("diffs: " + str(len(diffs)))
-          for i in diffs[:32]:
-              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
-          if not diffs and len(dev) == len(ours):
-              print("PERFECT")
-          PYEOF
+          echo "thin: $(stat -f%z W.thin.dylib)"
 
-      - name: Wrap into fat binary
+      - name: Wrap into fat
         run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
 
-      - name: Compare with dev fat
+      - name: Zero signature blob in fat
         run: |
           set -euo pipefail
-          echo "dev fat:  $(stat -f%z W.dev.dylib)"
-          echo "ours fat: $(stat -f%z W.dylib)"
+          python3 - << 'PYEOF'
+          import struct
+
+          with open("W.dylib", "rb") as f:
+              data = bytearray(f.read())
+
+          magic = struct.unpack_from(">I", data, 0)[0]
+          print("magic=0x%x" % magic)
+
+          if magic == 0xcafebabe:
+              # fat binary, find arm64 slice
+              nfat = struct.unpack_from(">I", data, 4)[0]
+              print("nfat=%d" % nfat)
+              slice_off = None
+              slice_size = None
+              for i in range(nfat):
+                  base = 8 + i * 20
+                  cputype = struct.unpack_from(">I", data, base)[0]
+                  cpusub = struct.unpack_from(">I", data, base + 4)[0]
+                  offset = struct.unpack_from(">I", data, base + 8)[0]
+                  size = struct.unpack_from(">I", data, base + 12)[0]
+                  print("  slice[%d] cputype=0x%x offset=%d size=%d" % (i, cputype, offset, size))
+                  if cputype == 0x0100000c and cpusub == 0:
+                      slice_off = offset
+                      slice_size = size
+                      break
+              if slice_off is None:
+                  print("::error::arm64 slice not found")
+                  raise SystemExit(1)
+          elif magic == 0xfeedfacf:
+              slice_off = 0
+              slice_size = len(data)
+          else:
+              print("::error::unknown magic")
+              raise SystemExit(1)
+
+          print("slice offset=%d size=%d" % (slice_off, slice_size))
+
+          # parse mach header within slice
+          ncmds = struct.unpack_from("<I", data, slice_off + 16)[0]
+          cmd_off = slice_off + 32
+          sig_off = None
+          sig_size_off = None
+          sig_size = None
+          for _ in range(ncmds):
+              cmd, cmdsize = struct.unpack_from("<II", data, cmd_off)
+              if cmd == 0x1d:
+                  off, sz = struct.unpack_from("<II", data, cmd_off + 8)
+                  sig_off = off  # absolute offset within fat (slice_off=0 in file? no)
+                  # NOTE: LC_CODE_SIGNATURE offsets in fat are relative to slice start
+                  sig_off = slice_off + off
+                  sig_size = sz
+                  sig_size_off = cmd_off + 12
+                  print("LC_CODE_SIGNATURE: relative=%d absolute=%d size=%d" % (off, sig_off, sz))
+                  break
+              cmd_off += cmdsize
+
+          if sig_off is None:
+              print("::error::no LC_CODE_SIGNATURE")
+              raise SystemExit(1)
+
+          end = sig_off + sig_size
+          if end > len(data):
+              print("::error::sig extends past EOF")
+              raise SystemExit(1)
+
+          for i in range(sig_off, end):
+              data[i] = 0
+          print("zeroed %d bytes at 0x%x" % (sig_size, sig_off))
+
+          with open("W.dylib", "wb") as f:
+              f.write(data)
+          print("fat final: %d" % len(data))
+          PYEOF
+
+      - name: Compare with dev
+        run: |
+          set -euo pipefail
+          echo "dev:  $(stat -f%z W.dev.dylib)"
+          echo "ours: $(stat -f%z W.dylib)"
           python3 - << 'PYEOF'
           with open("W.dev.dylib", "rb") as f: dev = f.read()
           with open("W.dylib", "rb") as f: ours = f.read()
+          if len(dev) != len(ours):
+              print("SIZE: dev=%d ours=%d diff=%d" % (len(dev), len(ours), len(ours)-len(dev)))
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
-          print("diffs: " + str(len(diffs)))
+          print("diffs: %d" % len(diffs))
+          for i in diffs[:40]:
+              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
           if not diffs and len(dev) == len(ours):
               print("PERFECT")
+          else:
+              # group diffs into ranges
+              ranges = []
+              if diffs:
+                  s = diffs[0]
+                  p = diffs[0]
+                  for i in diffs[1:]:
+                      if i - p > 64:
+                          ranges.append((s, p))
+                          s = i
+                      p = i
+                  ranges.append((s, p))
+              print("diff ranges:")
+              for s, e in ranges[:20]:
+                  print("  0x%x - 0x%x (%d bytes)" % (s, e, e - s + 1))
           PYEOF
 
-      - name: Final assemble
+      - name: Update framework with final dylib
         run: |
           set -euo pipefail
           cp W.dylib "$FRAMEWORK_NAME/W.dylib"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
