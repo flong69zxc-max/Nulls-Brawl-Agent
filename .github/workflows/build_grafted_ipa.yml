@@ -12,6 +12,25 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Locate agent script
+        id: agent
+        run: |
+          set -euo pipefail
+          CAND=""
+          for p in scripts/agents.js scripts/agent.js agent/agents.js agent/agent.js scripts/frida-scripts/agent.js; do
+            if [ -f "$p" ]; then CAND="$p"; break; fi
+          done
+          if [ -z "$CAND" ]; then
+            echo "::error::agent script not found in repo"
+            find . -maxdepth 3 -name "*.js" -not -path "./node_modules/*" -not -path "./ghidra/*"
+            exit 1
+          fi
+          echo "path=$CAND" >> "$GITHUB_OUTPUT"
+          echo "size=$(wc -c < "$CAND")" >> "$GITHUB_OUTPUT"
+          echo "found: $CAND"
 
       - name: Download Frida Gadget
         id: frida
@@ -42,17 +61,15 @@ jobs:
           ")
           fi
           if [ -z "$URL" ]; then
-            echo "::error::No iOS gadget asset found for $VERSION"
+            echo "::error::No iOS gadget asset in release $VERSION"
             echo "$META" | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin).get('assets',[])]"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "url=$URL" >> "$GITHUB_OUTPUT"
           curl -fL -o /tmp/frida.xz "$URL"
           xz -d /tmp/frida.xz
           mv /tmp/frida /tmp/FridaGadget.dylib
-          cp /tmp/FridaGadget.dylib build/FridaGadget.dylib
-          file build/FridaGadget.dylib
+          file /tmp/FridaGadget.dylib
 
       - name: Download Nulls Brawl IPA
         run: |
@@ -71,13 +88,13 @@ jobs:
           mkdir -p extract
           unzip -q bs.ipa -d extract
           if [ ! -d "extract/Payload" ]; then
-            echo "::error::Payload directory not found"
+            echo "::error::Payload not found"
             ls -la extract/
             exit 1
           fi
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           if [ -z "$APP_DIR" ]; then
-            echo "::error::No .app bundle in Payload"
+            echo "::error::No .app in Payload"
             ls -la extract/Payload/
             exit 1
           fi
@@ -94,40 +111,69 @@ jobs:
           echo "bin=$BIN" >> "$GITHUB_OUTPUT"
           file "$BIN"
 
-      - name: Setup Frameworks
+      - name: Build FridaGadget.framework
         run: |
           set -euo pipefail
           APP_DIR="${{ steps.extract.outputs.app_dir }}"
-          mkdir -p "$APP_DIR/Frameworks"
-          cp build/FridaGadget.dylib "$APP_DIR/Frameworks/"
-          mkdir -p "$APP_DIR/Frameworks/scripts"
-          cp scripts/agents.js "$APP_DIR/Frameworks/scripts/agents.js"
-          cat > "$APP_DIR/Frameworks/FridaGadget.config" << 'EOF'
+          FW="$APP_DIR/Frameworks/FridaGadget.framework"
+          mkdir -p "$FW/scripts"
+          cp /tmp/FridaGadget.dylib "$FW/FridaGadget"
+          chmod +x "$FW/FridaGadget"
+          cp "${{ steps.agent.outputs.path }}" "$FW/scripts/agents.js"
+          cat > "$FW/Info.plist" << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>FridaGadget</string>
+              <key>CFBundleIdentifier</key>
+              <string>re.frida.gadget</string>
+              <key>CFBundleName</key>
+              <string>FridaGadget</string>
+              <key>CFBundlePackageType</key>
+              <string>FMWK</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${{ steps.frida.outputs.version }}</string>
+              <key>CFBundleVersion</key>
+              <string>${{ steps.frida.outputs.version }}</string>
+              <key>MinimumOSVersion</key>
+              <string>11.0</string>
+          </dict>
+          </plist>
+          EOF
+          cat > "$FW/FridaGadget.config" << 'EOF'
           {
             "interaction": {
               "type": "script",
-              "path": "Frameworks/scripts/agents.js",
+              "path": "Frameworks/FridaGadget.framework/scripts/agents.js",
               "on_change": "ignore"
             },
             "runtime": "qjs",
             "code_signing": "required"
           }
           EOF
+          ls -la "$FW"
+          ls -la "$FW/scripts"
 
       - name: Install tools
         run: |
+          set -euo pipefail
           brew install ldid
           git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
           cd /tmp/insert_dylib
           xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO 2>&1 | tail -5
           sudo cp build/Release/insert_dylib /usr/local/bin/
           sudo chmod +x /usr/local/bin/insert_dylib
+          which insert_dylib ldid
 
       - name: Inject dylib
         run: |
           set -euo pipefail
           BIN="${{ steps.extract.outputs.bin }}"
-          insert_dylib --weak --all-yes "@executable_path/Frameworks/FridaGadget.dylib" "$BIN" "$BIN.patched"
+          insert_dylib --weak --all-yes \
+            "@executable_path/Frameworks/FridaGadget.framework/FridaGadget" \
+            "$BIN" "$BIN.patched"
           mv "$BIN.patched" "$BIN"
           chmod +x "$BIN"
           otool -L "$BIN" | grep -i frida || echo "no frida load command"
@@ -137,7 +183,8 @@ jobs:
           set -euo pipefail
           APP_DIR="${{ steps.extract.outputs.app_dir }}"
           BIN="${{ steps.extract.outputs.bin }}"
-          ldid -S "$APP_DIR/Frameworks/FridaGadget.dylib"
+          FW="$APP_DIR/Frameworks/FridaGadget.framework"
+          ldid -S "$FW/FridaGadget"
           ldid -S "$BIN"
           echo "signed"
 
@@ -145,17 +192,20 @@ jobs:
         run: |
           set -euo pipefail
           cd build/extract
+          rm -f ../bs_patched.ipa
           zip -qry ../bs_patched.ipa Payload
+          cd ..
+          ls -la bs_patched.ipa
 
       - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="brawl-$(date +%Y%m%d)-run${{ github.run_number }}"
+          TAG="brawl-$(date +%Y%m%d)-r${{ github.run_number }}"
           gh release create "$TAG" build/bs_patched.ipa \
-            --title "Brawl $TAG" \
-            --notes "Auto-built from run ${{ github.run_number }} (Frida ${{ steps.frida.outputs.version }})"
+            --title "$TAG" \
+            --notes "Frida ${{ steps.frida.outputs.version }}, agent ${{ steps.agent.outputs.path }} (${{ steps.agent.outputs.size }} bytes)"
 
       - uses: actions/upload-artifact@v4
         with:
