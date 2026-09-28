@@ -36,54 +36,44 @@ jobs:
           mv gadget.dylib W.stock.dylib
           file W.stock.dylib
           lipo -info W.stock.dylib
-          echo "SHA256 stock: $(shasum -a 256 W.stock.dylib | cut -c1-16)"
 
-      - name: Analyze original binary
-        run: |
-          set -euo pipefail
-          count_pattern() {
-            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
-          }
-          echo "BRK #0x539 in stock: $(count_pattern W.stock.dylib 20a720d4)"
-          echo "BRK #1 in stock: $(count_pattern W.stock.dylib 200020d4)"
-          echo "NOP in stock: $(count_pattern W.stock.dylib 1f2003d5)"
-          echo "abort symbol:"
-          nm -gU W.stock.dylib | grep -i abort || true
-
-      - name: Patch BRK and abort
+      - name: Analyze and patch
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
-          import subprocess
+          import subprocess, sys
+
+          PATTERN_BRK539 = bytes.fromhex("20A720D4")
+          PATTERN_BRK1   = bytes.fromhex("200020D4")
+          NOP            = bytes.fromhex("1F2003D5")
 
           with open("W.stock.dylib", "rb") as f:
               data = bytearray(f.read())
 
-          nop = bytes.fromhex("1F 20 03 D5")
+          stock_brk539 = bytes(data).count(PATTERN_BRK539)
+          stock_brk1   = bytes(data).count(PATTERN_BRK1)
+          stock_nop    = bytes(data).count(NOP)
+          print(f"[stock] BRK #0x539={stock_brk539} BRK #1={stock_brk1} NOP={stock_nop}")
 
-          brk539 = bytes.fromhex("20 A7 20 D4")
-          count_brk = 0
+          patched_brk539 = 0
           idx = 0
           while True:
-              idx = data.find(brk539, idx)
+              idx = data.find(PATTERN_BRK539, idx)
               if idx == -1:
                   break
-              data[idx:idx+4] = nop
-              count_brk += 1
+              data[idx:idx+4] = NOP
+              patched_brk539 += 1
               idx += 4
-          print(f"BRK #0x539 patched: {count_brk}")
 
-          brk1 = bytes.fromhex("20 00 20 D4")
-          count_brk1 = 0
+          patched_brk1 = 0
           idx = 0
           while True:
-              idx = data.find(brk1, idx)
+              idx = data.find(PATTERN_BRK1, idx)
               if idx == -1:
                   break
-              data[idx:idx+4] = nop
-              count_brk1 += 1
+              data[idx:idx+4] = NOP
+              patched_brk1 += 1
               idx += 4
-          print(f"BRK #1 patched: {count_brk1}")
 
           out = subprocess.run(["nm", "-gU", "W.stock.dylib"], capture_output=True, text=True)
           abort_addr = None
@@ -92,9 +82,10 @@ jobs:
               if len(parts) >= 3 and parts[2] == "_abort":
                   abort_addr = int(parts[0], 16)
                   break
-          count_abort = 0
-          if abort_addr:
-              print(f"abort symbol address: 0x{abort_addr:x}")
+
+          patched_abort = 0
+          if abort_addr is not None:
+              print(f"[abort] symbol address 0x{abort_addr:x}")
               for i in range(0, len(data) - 4, 4):
                   instr = int.from_bytes(data[i:i+4], "little")
                   if (instr & 0xFC000000) == 0x94000000:
@@ -103,57 +94,61 @@ jobs:
                           imm26 -= 0x04000000
                       target = i + imm26 * 4
                       if target == abort_addr:
-                          data[i:i+4] = nop
-                          count_abort += 1
-              print(f"BL abort patched: {count_abort}")
+                          data[i:i+4] = NOP
+                          patched_abort += 1
           else:
-              print("abort symbol not found, skipping BL patch")
+              print("[abort] symbol not found, skipping BL patch")
+
+          print(f"[patched] BRK #0x539={patched_brk539} BRK #1={patched_brk1} BL_abort={patched_abort}")
 
           with open("W.full-patched.dylib", "wb") as f:
               f.write(data)
-          print("=== patching done ===")
+
+          patched_data = bytes(data)
+          final_brk539 = patched_data.count(PATTERN_BRK539)
+          final_brk1   = patched_data.count(PATTERN_BRK1)
+          final_nop    = patched_data.count(NOP)
+          print(f"[final] BRK #0x539={final_brk539} BRK #1={final_brk1} NOP={final_nop}")
+
+          errors = []
+          if final_brk539 != 0:
+              errors.append(f"BRK #0x539 still present: {final_brk539}")
+          if final_brk1 != 0:
+              errors.append(f"BRK #1 still present: {final_brk1}")
+          if stock_brk539 == 0 and stock_brk1 == 0:
+              errors.append("no BRKs found in stock binary")
+          expected_nop_min = stock_nop + stock_brk539 + stock_brk1
+          if final_nop < expected_nop_min:
+              errors.append(f"NOP count {final_nop} < expected {expected_nop_min}")
+
+          with open("patch-report.txt", "w") as f:
+              f.write(f"stock_brk539={stock_brk539}\n")
+              f.write(f"stock_brk1={stock_brk1}\n")
+              f.write(f"stock_nop={stock_nop}\n")
+              f.write(f"patched_brk539={patched_brk539}\n")
+              f.write(f"patched_brk1={patched_brk1}\n")
+              f.write(f"patched_abort={patched_abort}\n")
+              f.write(f"final_brk539={final_brk539}\n")
+              f.write(f"final_brk1={final_brk1}\n")
+              f.write(f"final_nop={final_nop}\n")
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+
+          print("OK: all patches verified")
           PYEOF
           file W.full-patched.dylib
 
-      - name: Verify patches
+      - name: Show patch report
         run: |
           set -euo pipefail
-          count_pattern() {
-            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
-          }
-
-          STOCK_BRK539=$(count_pattern W.stock.dylib 20a720d4)
-          PATCHED_BRK539=$(count_pattern W.full-patched.dylib 20a720d4)
-          STOCK_BRK1=$(count_pattern W.stock.dylib 200020d4)
-          PATCHED_BRK1=$(count_pattern W.full-patched.dylib 200020d4)
-          STOCK_NOP=$(count_pattern W.stock.dylib 1f2003d5)
-          PATCHED_NOP=$(count_pattern W.full-patched.dylib 1f2003d5)
-
-          echo "BRK #0x539: stock=$STOCK_BRK539 patched=$PATCHED_BRK539"
-          echo "BRK #1:     stock=$STOCK_BRK1 patched=$PATCHED_BRK1"
-          echo "NOP:        stock=$STOCK_NOP patched=$PATCHED_NOP"
-
-          if [ "$PATCHED_BRK539" -ne 0 ]; then
-            echo "::error::BRK #0x539 still present ($PATCHED_BRK539)"
-            exit 1
-          fi
-          if [ "$PATCHED_BRK1" -ne 0 ]; then
-            echo "::error::BRK #1 still present ($PATCHED_BRK1)"
-            exit 1
-          fi
-
-          EXPECTED_MIN=$((STOCK_NOP + STOCK_BRK539 + STOCK_BRK1))
-          if [ "$PATCHED_NOP" -lt "$EXPECTED_MIN" ]; then
-            echo "::error::NOP count $PATCHED_NOP < expected $EXPECTED_MIN (patch did not apply)"
-            exit 1
-          fi
-
-          if [ "$STOCK_BRK539" -eq 0 ] && [ "$STOCK_BRK1" -eq 0 ]; then
-            echo "::warning::no BRKs found in stock — verification limited to NOP growth"
-          fi
-
-          file W.full-patched.dylib | grep -q arm64 || { echo "::error::not arm64"; exit 1; }
-          echo "OK: all patches verified"
+          echo "=== patch report ==="
+          cat patch-report.txt
+          echo "=== arch ==="
+          file W.full-patched.dylib | grep -q arm64
+          echo "arm64 OK"
 
       - name: Assemble Frida.framework
         run: |
@@ -217,7 +212,7 @@ jobs:
           printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
 
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
-          ls -la "$FRAMEWORK_NAME"
+          find "$FRAMEWORK_NAME" -type f | sort
 
       - name: Sign framework
         run: |
@@ -232,16 +227,17 @@ jobs:
       - name: Final verification
         run: |
           set -euo pipefail
-          count_pattern() {
-            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
-          }
-          echo "=== final framework checks ==="
-          file "$FRAMEWORK_NAME/W.dylib"
-          echo "BRK #0x539: $(count_pattern $FRAMEWORK_NAME/W.dylib 20a720d4)"
-          echo "BRK #1:     $(count_pattern $FRAMEWORK_NAME/W.dylib 200020d4)"
-          echo "NOP:        $(count_pattern $FRAMEWORK_NAME/W.dylib 1f2003d5)"
-          echo "=== framework structure ==="
-          find "$FRAMEWORK_NAME" -type f | sort
+          python3 - <<'PYEOF'
+          with open("Frida.framework/W.dylib", "rb") as f:
+              data = f.read()
+          brk539 = data.count(bytes.fromhex("20A720D4"))
+          brk1   = data.count(bytes.fromhex("200020D4"))
+          nop    = data.count(bytes.fromhex("1F2003D5"))
+          print(f"final BRK #0x539={brk539} BRK #1={brk1} NOP={nop}")
+          if brk539 or brk1:
+              raise SystemExit("patches missing in final W.dylib")
+          print("OK: final W.dylib verified")
+          PYEOF
 
       - name: Package
         run: |
@@ -252,9 +248,6 @@ jobs:
       - name: Summary
         run: |
           set -euo pipefail
-          count_pattern() {
-            xxd -p "$1" | tr -d '\n' | grep -o "$2" | wc -l | tr -d ' '
-          }
           {
             echo "### patched frida framework"
             echo ""
@@ -262,12 +255,13 @@ jobs:
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
             echo "| patches | BRK #0x539, BRK #1, BL abort |"
-            echo "| BRK #0x539 remaining | $(count_pattern $FRAMEWORK_NAME/W.dylib 20a720d4) |"
-            echo "| BRK #1 remaining | $(count_pattern $FRAMEWORK_NAME/W.dylib 200020d4) |"
-            echo "| NOP count | $(count_pattern $FRAMEWORK_NAME/W.dylib 1f2003d5) |"
             echo "| arch | arm64 |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
+            echo ""
+            echo '```'
+            cat patch-report.txt
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
@@ -276,5 +270,6 @@ jobs:
           path: |
             Frida.framework.zip
             Frida.framework.zip.sha256
+            patch-report.txt
           retention-days: 30
           if-no-files-found: error
