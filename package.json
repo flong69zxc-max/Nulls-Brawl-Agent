@@ -1,8 +1,9 @@
 {
-  "name": "frida-agent",
+  "name": "nulls-brawl-agent",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "dependencies": {
-    "frida-objc-bridge": "^7.0.0"
+    "frida-objc-bridge": "8.0.6"
   }
 }
