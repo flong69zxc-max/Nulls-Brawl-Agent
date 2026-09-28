@@ -27,17 +27,64 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: List release assets
+        run: |
+          set -euo pipefail
+          curl -sL \
+            "https://api.github.com/repos/frida/frida/releases/tags/${FRIDA_VERSION}" \
+            > release.json
+          echo "=== all asset names ==="
+          python3 -c "
+          import json
+          with open('release.json') as f:
+              d = json.load(f)
+          for a in d.get('assets', []):
+              print(a['name'])
+          "
+          echo "=== gum-graft assets ==="
+          python3 -c "
+          import json
+          with open('release.json') as f:
+              d = json.load(f)
+          for a in d.get('assets', []):
+              if 'gum-graft' in a['name']:
+                  print(a['name'], a['browser_download_url'])
+          "
+
       - name: Download gum-graft
         run: |
           set -euo pipefail
           mkdir -p tools
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-macos-arm64.tar.xz"
+          # Ищем нужный ассет по паттерну через GitHub API
+          URL=$(python3 -c "
+          import json, sys
+          with open('release.json') as f:
+              d = json.load(f)
+          for a in d.get('assets', []):
+              n = a['name']
+              if n.startswith('gum-graft-macos-arm64') and not n.endswith('.sha256'):
+                  print(a['browser_download_url'])
+                  sys.exit(0)
+          sys.exit(1)
+          ") || { echo "::error::no gum-graft-macos-arm64 asset found"; exit 1; }
+
           echo "downloading $URL"
-          curl -fL --retry 3 -o tools/gum-graft.tar.xz "$URL"
-          tar -xJf tools/gum-graft.tar.xz -C tools/
-          chmod +x tools/gum-graft
-          file tools/gum-graft
-          tools/gum-graft --help || true
+          curl -fL --retry 3 -o tools/gum-graft.archive "$URL"
+
+          # tar.xz или tar.gz — определяем по содержимому
+          if file tools/gum-graft.archive | grep -q "XZ compressed"; then
+            tar -xJf tools/gum-graft.archive -C tools/
+          else
+            tar -xzf tools/gum-graft.archive -C tools/
+          fi
+
+          # Ищем бинарник gum-graft в распакованном дереве
+          BIN=$(find tools -type f -name "gum-graft" ! -name "*.archive" | head -1)
+          [ -n "$BIN" ] || { echo "::error::gum-graft binary not found after extraction"; find tools -type f; exit 1; }
+          chmod +x "$BIN"
+          echo "GUM_GRAFT=$(realpath $BIN)" >> "$GITHUB_ENV"
+          file "$BIN"
+          "$BIN" --help || true
 
       - name: Download Frida Gadget
         run: |
@@ -52,6 +99,7 @@ jobs:
       - name: Extract arm64 slice
         run: |
           set -euo pipefail
+          # gum-graft работает только с arm64, не arm64e
           if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
             cp W.stock.dylib W.thin.dylib
           else
@@ -63,7 +111,7 @@ jobs:
       - name: Run gum-graft
         run: |
           set -euo pipefail
-          ./tools/gum-graft --ingest-function-starts W.thin.dylib
+          "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
           echo "=== after grafting ==="
           file W.thin.dylib
           echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
@@ -117,6 +165,7 @@ jobs:
             '</plist>' \
             > "$FRAMEWORK_NAME/Info.plist"
 
+          # code_signing: required — обязательно для работы gum-graft
           printf '%s\n' \
             '{' \
             '  "interaction": {' \
@@ -164,7 +213,7 @@ jobs:
             echo "| param | value |"
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
-            echo "| tool | gum-graft (ingest-function-starts) |"
+            echo "| tool | gum-graft --ingest-function-starts |"
             echo "| arch | arm64 |"
             echo "| code_signing | required |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
