@@ -1,11 +1,8 @@
-name: Compare Dev W.dylib with Frida 17.2.11
+name: Compare Our gum-graft vs Dev W.dylib
 
 on:
   push:
     branches: [main]
-    paths:
-      - 'W.dylib.zip'
-      - '.github/workflows/compare.yml'
   workflow_dispatch:
 
 permissions:
@@ -16,203 +13,303 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  compare:
+  build:
     runs-on: macos-14
-    timeout-minutes: 25
+    timeout-minutes: 60
+    env:
+      FRIDA_VERSION: '17.2.11'
+      FRAMEWORK_NAME: Frida.framework
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          set -euo pipefail
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+          brew install node@22 meson ninja pkg-config glib || true
+          brew link --overwrite --force node@22
+          echo "/opt/homebrew/opt/node@22/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$HOME/pyenv"
+          source "$HOME/pyenv/bin/activate"
+          python3 -m pip install --upgrade pip setuptools
+
+      - name: Cache frida-gum
+        id: cache-gum
+        uses: actions/cache@v4
         with:
-          fetch-depth: 1
+          path: frida-gum
+          key: frida-gum-${{ env.FRIDA_VERSION }}-compare-v1
+          restore-keys: |
+            frida-gum-${{ env.FRIDA_VERSION }}-
 
-      - name: Unpack dev dylib
+      - name: Clone frida-gum
+        if: steps.cache-gum.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          rm -rf dev_unpacked
-          mkdir -p dev_unpacked
-          unzip -o W.dylib.zip -d dev_unpacked
-          find dev_unpacked -type f | sort
+          rm -rf frida-gum
+          git clone --depth 1 --branch ${FRIDA_VERSION} \
+            https://github.com/frida/frida-gum.git frida-gum
+          cd frida-gum
+          git submodule update --init --recursive --depth 1
 
-          DEV=$(find dev_unpacked -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          [ -n "$DEV" ] || { echo "::error::no file found"; exit 1; }
+      - name: Configure
+        run: |
+          set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
+          cd frida-gum
+          [ -f build/build.ninja ] && exit 0
+          ./configure --host=macos-arm64 -- \
+            -Dgraft_tool=enabled \
+            -Dgumjs=disabled \
+            -Dtests=disabled \
+            -Doptimization=s \
+            -Db_ndebug=true \
+            -Dstrip=true \
+            -Ddefault_library=static
+
+      - name: Build gum-graft
+        run: |
+          set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
+          cd frida-gum/build
+          ninja 2>&1 | tail -20
+
+      - name: Locate gum-graft
+        run: |
+          set -euo pipefail
+          GUM_GRAFT=$(find frida-gum -type f -name "gum-graft" -perm +111 | head -1)
+          [ -n "$GUM_GRAFT" ] || { echo "::error::gum-graft not found"; exit 1; }
+          chmod +x "$GUM_GRAFT"
+          echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
+
+      - name: Prepare stock
+        run: |
+          set -euo pipefail
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.stock.dylib
+          lipo -thin arm64 -output W.thin.dylib W.stock.dylib
+          xcrun strip -Sx W.thin.dylib -o W.thin-stripped.dylib
+          mv W.thin-stripped.dylib W.thin.dylib
+          cp W.thin.dylib W.ours.dylib
+          echo "stock: $(stat -f%z W.thin.dylib) bytes"
+
+      - name: Graft our binary
+        run: |
+          set -euo pipefail
+          "$GUM_GRAFT" --ingest-function-starts W.ours.dylib
+          xcrun strip -Sx W.ours.dylib -o W.ours-stripped.dylib
+          mv W.ours-stripped.dylib W.ours.dylib
+          echo "grafted: $(stat -f%z W.ours.dylib) bytes"
+
+      - name: Unpack dev
+        run: |
+          set -euo pipefail
+          mkdir -p dev
+          unzip -o W.dylib.zip -d dev > /dev/null
+          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
           cp "$DEV" W.dev.raw.dylib
-          xattr -c W.dev.raw.dylib 2>/dev/null || true
-
-          FILE_INFO=$(file -b W.dev.raw.dylib)
-          echo "file info: $FILE_INFO"
-
-          if echo "$FILE_INFO" | grep -q "universal"; then
-            lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
-          else
+          if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
             cp W.dev.raw.dylib W.dev.dylib
-          fi
-          file W.dev.dylib
-          echo "dev size: $(stat -f%z W.dev.dylib) bytes"
-
-      - name: Download Frida 17.2.11
-        run: |
-          set -euo pipefail
-          mkdir -p stock
-          URL="https://github.com/frida/frida/releases/download/17.2.11/frida-gadget-17.2.11-ios-universal.dylib.xz"
-          curl -fL --retry 3 -o stock/17.2.11.xz "$URL"
-          (cd stock && xz -d 17.2.11.xz)
-          mv stock/17.2.11 stock/17.2.11.dylib
-
-          if lipo -info stock/17.2.11.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp stock/17.2.11.dylib stock/17.2.11.thin.dylib
           else
-            lipo -thin arm64e -output stock/17.2.11.thin.dylib stock/17.2.11.dylib
+            lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
           fi
-          file stock/17.2.11.thin.dylib
-          echo "stock size: $(stat -f%z stock/17.2.11.thin.dylib) bytes"
+          echo "dev: $(stat -f%z W.dev.dylib) bytes"
 
-      - name: Write comparison script
+      - name: Dump section headers
         run: |
           set -euo pipefail
-          mkdir -p scripts
-          cat > scripts/diff.py << 'PYEOF'
-          import subprocess, os, sys
+          for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
+            echo "=== $f sections ==="
+            otool -l "$f" | awk '/sectname/{s=$2} /segname/{g=$2} /size /{if(s)print g,s,$2; s=""}' | sort -u
+            echo ""
+          done
 
-          MAX_OFFSETS = 20
-          MAX_REPORT = 100 * 1024
-
-          def sections(path):
-              out = subprocess.run(["otool", "-l", path],
-                                   capture_output=True, text=True).stdout
-              result = []
-              cur = {}
-              for line in out.splitlines():
-                  s = line.strip()
-                  if s.startswith("sectname "):
-                      cur["sect"] = s.split()[1]
-                  elif s.startswith("segname "):
-                      cur["seg"] = s.split()[1]
-                  elif s.startswith("addr "):
-                      cur["addr"] = int(s.split()[1], 16)
-                  elif s.startswith("size "):
-                      cur["size"] = int(s.split()[1], 16)
-                  elif s.startswith("offset "):
-                      cur["off"] = int(s.split()[1])
-                      if all(k in cur for k in ("sect", "seg", "addr", "size", "off")):
-                          result.append(dict(cur))
-                      cur = {}
-              return result
-
-          def read(path, off, size):
-              with open(path, "rb") as f:
+      - name: Dump __FRIDA segments of ours
+        run: |
+          set -euo pipefail
+          echo "=== __FRIDA_TEXT0 __trampolines (first 64 bytes) ==="
+          otool -l W.ours.dylib | grep -A5 '__FRIDA_TEXT0' | head -10
+          echo ""
+          echo "=== hexdump of trampoline section ==="
+          python3 - << 'PYEOF'
+          import subprocess
+          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
+          lines = out.splitlines()
+          sect = None
+          off = None
+          size = None
+          for i,l in enumerate(lines):
+              if 'sectname __trampolines' in l and 'segname __FRIDA_TEXT0' in lines[i-1]:
+                  for j in range(i,i+12):
+                      s=lines[j].strip()
+                      if s.startswith('offset '): off=int(s.split()[1])
+                      if s.startswith('size '): size=int(s.split()[1],16)
+          if off is not None and size:
+              with open("W.ours.dylib","rb") as f:
                   f.seek(off)
-                  return f.read(size)
-
-          dev_path = "W.dev.dylib"
-          stock_path = "stock/17.2.11.thin.dylib"
-
-          dev_secs = sections(dev_path)
-          stock_secs = sections(stock_path)
-
-          def key(s):
-              return (s["seg"], s["sect"])
-
-          dev_map = {key(s): s for s in dev_secs}
-          stock_map = {key(s): s for s in stock_secs}
-
-          common = sorted(set(dev_map) & set(stock_map))
-          only_dev = sorted(set(dev_map) - set(stock_map))
-          only_stock = sorted(set(stock_map) - set(dev_map))
-
-          out = open("diff-report.txt", "w")
-          def w(line):
-              out.write(line + "\n")
-
-          w("=== dev vs stock 17.2.11 ===")
-          w("dev sections:   " + str(len(dev_secs)))
-          w("stock sections: " + str(len(stock_secs)))
-          w("common:         " + str(len(common)))
-          w("")
-
-          if only_dev:
-              w("=== only in DEV ===")
-              for x in only_dev:
-                  w("  " + str(x))
-          if only_stock:
-              w("=== only in STOCK ===")
-              for x in only_stock:
-                  w("  " + str(x))
-          w("")
-
-          total = 0
-          results = []
-          for k in common:
-              sd = dev_map[k]
-              ss = stock_map[k]
-              if sd["size"] != ss["size"]:
-                  w("[" + str(k) + "] SIZE dev=0x" + format(sd["size"], "x") +
-                    " stock=0x" + format(ss["size"], "x"))
-                  continue
-              if sd["size"] == 0:
-                  continue
-              dd = read(dev_path, sd["off"], sd["size"])
-              ds = read(stock_path, ss["off"], ss["size"])
-              if dd == ds:
-                  continue
-              diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]
-              cnt = len(diffs)
-              total += cnt
-              results.append((k, cnt, diffs, dd, ds))
-
-          results.sort(key=lambda x: -x[1])
-
-          w("=== sections with diffs: " + str(len(results)) + " ===")
-          w("=== total diff bytes: " + str(total) + " ===")
-          w("")
-
-          w("=== top sections by diff count ===")
-          for k, cnt, diffs, dd, ds in results:
-              w("[" + str(k) + "] size=0x" + format(len(dd), "x") + " diff=" + str(cnt))
-          w("")
-
-          if results:
-              k, cnt, diffs, dd, ds = results[0]
-              w("=== first section details: " + str(k) + " ===")
-              for i in diffs[:MAX_OFFSETS]:
-                  w("  off 0x" + format(i, "x") + ": stock=" +
-                    format(ds[i], "02x") + " dev=" + format(dd[i], "02x"))
-              if len(diffs) > MAX_OFFSETS:
-                  w("  ... and " + str(len(diffs) - MAX_OFFSETS) + " more")
-
-          out.close()
-
-          size = os.path.getsize("diff-report.txt")
-          if size > MAX_REPORT:
-              with open("diff-report.txt", "rb") as f:
-                  data = f.read(MAX_REPORT)
-              with open("diff-report.txt", "wb") as f:
-                  f.write(data)
-                  f.write(b"\n\n=== TRUNCATED ===\n")
-              print("::warning::diff report truncated to " + str(MAX_REPORT) + " bytes")
+                  data=f.read(min(size,256))
+              for i in range(0,len(data),16):
+                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in data[i:i+16]))
           else:
-              print("diff report size: " + str(size) + " bytes")
+              print("not found")
           PYEOF
-          echo "script written"
 
-      - name: Run comparison
+      - name: Compare counts and sizes
         run: |
           set -euo pipefail
-          python3 scripts/diff.py
+          python3 - << 'PYEOF'
+          def counts(path):
+              with open(path,"rb") as f: d=f.read()
+              return {
+                  "brk539": d.count(bytes.fromhex("20A720D4")),
+                  "brk1": d.count(bytes.fromhex("200020D4")),
+                  "nop": d.count(bytes.fromhex("1F2003D5")),
+                  "ret": d.count(bytes.fromhex("C0035FD6")),
+              }
+          import os
+          dev = counts("W.dev.dylib")
+          ours = counts("W.ours.dylib")
+          print("=== counts ===")
+          for k in dev:
+              print(f"{k}: dev={dev[k]} ours={ours[k]}")
+          print("")
+          print("=== sizes ===")
+          print(f"dev:  {os.path.getsize('W.dev.dylib')}")
+          print(f"ours: {os.path.getsize('W.ours.dylib')}")
+          print(f"stock:{os.path.getsize('W.thin.dylib')}")
+          PYEOF
 
-      - name: Show report
+      - name: Disassemble dev __text head
         run: |
           set -euo pipefail
-          echo "=== report size ==="
-          stat -f%z diff-report.txt
-          echo "=== contents ==="
-          cat diff-report.txt
+          echo "=== dev __text first 128 bytes ==="
+          python3 - << 'PYEOF'
+          import subprocess
+          out = subprocess.run(["otool","-l","W.dev.dylib"],capture_output=True,text=True).stdout
+          lines=out.splitlines()
+          off=None
+          for i,l in enumerate(lines):
+              if 'sectname __text' in l and 'segname __TEXT' in lines[i-1]:
+                  for j in range(i,i+12):
+                      s=lines[j].strip()
+                      if s.startswith('offset '): off=int(s.split()[1])
+                  break
+          if off is not None:
+              with open("W.dev.dylib","rb") as f:
+                  f.seek(off); d=f.read(128)
+              for i in range(0,len(d),16):
+                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
+          else:
+              print("offset not found")
+          PYEOF
+
+      - name: Disassemble ours __text head
+        run: |
+          set -euo pipefail
+          echo "=== ours __text first 128 bytes ==="
+          python3 - << 'PYEOF'
+          import subprocess
+          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
+          lines=out.splitlines()
+          off=None
+          for i,l in enumerate(lines):
+              if 'sectname __text' in l and 'segname __TEXT' in lines[i-1]:
+                  for j in range(i,i+12):
+                      s=lines[j].strip()
+                      if s.startswith('offset '): off=int(s.split()[1])
+                  break
+          if off is not None:
+              with open("W.ours.dylib","rb") as f:
+                  f.seek(off); d=f.read(128)
+              for i in range(0,len(d),16):
+                  print(f"0x{i:04x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
+          else:
+              print("offset not found")
+          PYEOF
+
+      - name: Analyze LC_FUNCTION_STARTS
+        run: |
+          set -euo pipefail
+          echo "=== LC_FUNCTION_STARTS ==="
+          for f in W.dev.dylib W.ours.dylib; do
+            echo "--- $f ---"
+            otool -l "$f" | grep -A2 LC_FUNCTION_STARTS || echo "no LC_FUNCTION_STARTS"
+          done
+          echo ""
+          echo "=== LC_DYLD_CHAINED_FIXUPS ==="
+          for f in W.dev.dylib W.ours.dylib; do
+            echo "--- $f ---"
+            otool -l "$f" | grep -A3 LC_DYLD_CHAINED_FIXUPS || echo "no chained fixups"
+          done
+
+      - name: Compare symbol tables
+        run: |
+          set -euo pipefail
+          echo "=== dev symbols count ==="
+          nm -gU W.dev.dylib 2>/dev/null | wc -l
+          echo "=== ours symbols count ==="
+          nm -gU W.ours.dylib 2>/dev/null | wc -l
+          echo ""
+          echo "=== diff of symbols (first 40) ==="
+          diff <(nm -gU W.dev.dylib 2>/dev/null | awk '{print $3}') \
+               <(nm -gU W.ours.dylib 2>/dev/null | awk '{print $3}') | head -40 || true
+
+      - name: Assemble final framework (ours)
+        run: |
+          set -euo pipefail
+          rm -rf "$FRAMEWORK_NAME"
+          mkdir -p "$FRAMEWORK_NAME"
+          cp W.ours.dylib "$FRAMEWORK_NAME/W.dylib"
+          cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>W.dylib</string>
+              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
+              <key>CFBundleShortVersionString</key><string>17.2.11</string>
+              <key>CFBundleVersion</key><string>17.2.11</string>
+              <key>CFBundleName</key><string>Frida</string>
+              <key>CFBundlePackageType</key><string>FMWK</string>
+              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+              <key>DTPlatformName</key><string>iphoneos</string>
+              <key>MinimumOSVersion</key><string>12.0</string>
+          </dict>
+          </plist>
+          PLIST
+          cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
+          {
+            "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
+            "code_signing": "required"
+          }
+          CONFIG
+          echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
+
+      - name: Sign
+        run: |
+          set -euo pipefail
+          brew install ldid || true
+          command -v ldid >/dev/null && ldid -S "$FRAMEWORK_NAME/W.dylib"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
+          find "$FRAMEWORK_NAME" -name "._*" -delete
+          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
+          zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
+          shasum -a 256 "$FRAMEWORK_NAME.zip"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: comparison
+          name: Frida.framework-and-compare
           path: |
-            diff-report.txt
-            scripts/diff.py
+            Frida.framework.zip
+            Frida.framework.zip.sha256
           retention-days: 30
           if-no-files-found: warn
