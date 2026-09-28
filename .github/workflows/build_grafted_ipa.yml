@@ -37,85 +37,74 @@ jobs:
           python3 -m venv "$HOME/pyenv"
           source "$HOME/pyenv/bin/activate"
           python3 -m pip install --upgrade pip setuptools
+          node --version && meson --version && ninja --version
 
       - name: Cache Frida source and build
         id: cache-frida
         uses: actions/cache@v4
         with:
           path: frida-src
-          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v6
+          key: frida-src-${{ env.FRIDA_VERSION }}-v7
           restore-keys: |
-            frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
+            frida-src-${{ env.FRIDA_VERSION }}-
 
       - name: Clone Frida
         if: steps.cache-frida.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch ${FRIDA_VERSION} \
-            https://github.com/frida/frida.git frida-src || \
+          git clone --depth 1 --branch ${FRIDA_VERSION} https://github.com/frida/frida.git frida-src || \
           git clone --depth 1 https://github.com/frida/frida.git frida-src
           cd frida-src
           git submodule update --init --recursive --depth 1
 
-      - name: Patch post-process.py to skip codesign
-        run: |
-          set -euo pipefail
-          cd frida-src/subprojects/frida-core/tools
-          python3 - << 'PYEOF'
-          import re
-          with open("post-process.py") as f:
-              src = f.read()
-          # заменяем вызов codesign на true (no-op)
-          src = re.sub(
-              r"(\bstep\(\s*\[[^\]]*codesign[^\]]*\])",
-              r"\1 if False else None",
-              src,
-          )
-          with open("post-process.py", "w") as f:
-              f.write(src)
-          PYEOF
-          grep -n "codesign" post-process.py | head -10 || true
-          echo "patched"
-
-      - name: Configure
+      - name: Configure (gum only, no tools, no helper)
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
           [ -f build/build.ninja ] && exit 0
-          ./configure --enable-graft-tool --host=macos-arm64
+          ./configure --host=macos-arm64 -- -Dfrida-gum:graft_tool=enabled -Dfrida-gum:gumjs=disabled -Dfrida-gum:tests=disabled
 
-      - name: List targets
+      - name: List available targets
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src/build
-          ninja -t targets all | grep -iE "gum-graft|graft" | head -20 || true
+          echo "=== graft/gum targets ==="
+          ninja -t targets all 2>/dev/null | grep -iE "graft|gum" | head -40 || true
 
       - name: Build gum-graft
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src/build
-          if ninja -t targets all | grep -q "gum-graft"; then
-            ninja gum-graft 2>&1 | tail -50
-          else
-            echo "gum-graft target not found, building gum module"
-            ninja frida-gum 2>&1 | tail -50
-          fi
+          # Пробуем разные имена таргета
+          for t in "gum-graft" "graft" "frida-gum-graft" "subprojects/frida-gum/tools/gum-graft"; do
+            if ninja -t targets all 2>/dev/null | grep -q "$t"; then
+              echo "building target: $t"
+              ninja "$t" 2>&1 | tail -60
+              exit 0
+            fi
+          done
+          echo "specific target not found, building gum library"
+          ninja frida-gum 2>&1 | tail -60
 
       - name: Locate gum-graft
         run: |
           set -euo pipefail
-          GUM_GRAFT=$(find frida-src/build -type f -name "gum-graft" | head -1)
+          GUM_GRAFT=$(find frida-src -type f -name "gum-graft" | head -1)
           if [ -z "$GUM_GRAFT" ]; then
             echo "::error::gum-graft not found"
-            find frida-src/build -type f -iname "*graft*" || true
+            echo "=== all graft files ==="
+            find frida-src -type f -iname "*graft*" || true
+            echo "=== bin dirs ==="
+            find frida-src -type d -name bin -exec ls -la {} \; || true
             exit 1
           fi
           chmod +x "$GUM_GRAFT"
           echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
           echo "found: $(realpath $GUM_GRAFT)"
+          "$GUM_GRAFT" --help 2>&1 | head -20 || true
 
       - name: Download Frida Gadget
         run: |
@@ -125,13 +114,15 @@ jobs:
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
           lipo -thin arm64 -output W.thin.dylib W.stock.dylib
+          file W.thin.dylib
 
       - name: Run gum-graft
         run: |
           set -euo pipefail
           "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
           file W.thin.dylib
-          echo "grafted: $(stat -f%z W.thin.dylib) bytes"
+          echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
+          otool -l W.thin.dylib | grep -i graft || echo "no graft sections found"
 
       - name: Assemble Frida.framework
         run: |
@@ -139,7 +130,6 @@ jobs:
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
           cp W.thin.dylib "$FRAMEWORK_NAME/W.dylib"
-
           cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -157,18 +147,12 @@ jobs:
           </dict>
           </plist>
           PLIST
-
           cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
           {
-            "interaction": {
-              "type": "script",
-              "path": "agent.js",
-              "on_change": "ignore"
-            },
+            "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
             "code_signing": "required"
           }
           CONFIG
-
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
@@ -184,8 +168,7 @@ jobs:
           find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
           find "$FRAMEWORK_NAME" -name "._*" -delete
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
-          zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME" \
-            -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
+          zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME" -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
           shasum -a 256 "$FRAMEWORK_NAME.zip"
 
       - uses: actions/upload-artifact@v4
