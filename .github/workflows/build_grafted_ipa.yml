@@ -110,84 +110,6 @@ jobs:
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
 
-      - name: Zero signature blob in fat
-        run: |
-          set -euo pipefail
-          python3 - << 'PYEOF'
-          import struct
-
-          with open("W.dylib", "rb") as f:
-              data = bytearray(f.read())
-
-          magic = struct.unpack_from(">I", data, 0)[0]
-          print("magic=0x%x" % magic)
-
-          if magic == 0xcafebabe:
-              # fat binary, find arm64 slice
-              nfat = struct.unpack_from(">I", data, 4)[0]
-              print("nfat=%d" % nfat)
-              slice_off = None
-              slice_size = None
-              for i in range(nfat):
-                  base = 8 + i * 20
-                  cputype = struct.unpack_from(">I", data, base)[0]
-                  cpusub = struct.unpack_from(">I", data, base + 4)[0]
-                  offset = struct.unpack_from(">I", data, base + 8)[0]
-                  size = struct.unpack_from(">I", data, base + 12)[0]
-                  print("  slice[%d] cputype=0x%x offset=%d size=%d" % (i, cputype, offset, size))
-                  if cputype == 0x0100000c and cpusub == 0:
-                      slice_off = offset
-                      slice_size = size
-                      break
-              if slice_off is None:
-                  print("::error::arm64 slice not found")
-                  raise SystemExit(1)
-          elif magic == 0xfeedfacf:
-              slice_off = 0
-              slice_size = len(data)
-          else:
-              print("::error::unknown magic")
-              raise SystemExit(1)
-
-          print("slice offset=%d size=%d" % (slice_off, slice_size))
-
-          # parse mach header within slice
-          ncmds = struct.unpack_from("<I", data, slice_off + 16)[0]
-          cmd_off = slice_off + 32
-          sig_off = None
-          sig_size_off = None
-          sig_size = None
-          for _ in range(ncmds):
-              cmd, cmdsize = struct.unpack_from("<II", data, cmd_off)
-              if cmd == 0x1d:
-                  off, sz = struct.unpack_from("<II", data, cmd_off + 8)
-                  sig_off = off  # absolute offset within fat (slice_off=0 in file? no)
-                  # NOTE: LC_CODE_SIGNATURE offsets in fat are relative to slice start
-                  sig_off = slice_off + off
-                  sig_size = sz
-                  sig_size_off = cmd_off + 12
-                  print("LC_CODE_SIGNATURE: relative=%d absolute=%d size=%d" % (off, sig_off, sz))
-                  break
-              cmd_off += cmdsize
-
-          if sig_off is None:
-              print("::error::no LC_CODE_SIGNATURE")
-              raise SystemExit(1)
-
-          end = sig_off + sig_size
-          if end > len(data):
-              print("::error::sig extends past EOF")
-              raise SystemExit(1)
-
-          for i in range(sig_off, end):
-              data[i] = 0
-          print("zeroed %d bytes at 0x%x" % (sig_size, sig_off))
-
-          with open("W.dylib", "wb") as f:
-              f.write(data)
-          print("fat final: %d" % len(data))
-          PYEOF
-
       - name: Compare with dev
         run: |
           set -euo pipefail
@@ -201,12 +123,11 @@ jobs:
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print("diffs: %d" % len(diffs))
-          for i in diffs[:40]:
+          for i in diffs[:60]:
               print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
           if not diffs and len(dev) == len(ours):
               print("PERFECT")
           else:
-              # group diffs into ranges
               ranges = []
               if diffs:
                   s = diffs[0]
