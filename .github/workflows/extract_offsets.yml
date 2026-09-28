@@ -52,6 +52,13 @@ STRING_ANCHORS = {
     "Sprite__removeChild": ["removeChild"],
 }
 
+# --- Флаги разработчика (SCRE: v53, v44, DeepWiki) ---
+DEVELOPER_FLAGS = {
+    "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
+    "LogicVersion_isDev": ["isDev"],
+    "LogicVersion_isProd": ["isProd"],
+}
+
 def addr(rva_val):
     try:
         return currentProgram.getAddressFactory().getAddress("%X" % (TEXT_BASE + rva_val))
@@ -202,6 +209,47 @@ def find_by_strings(name):
             continue
     return None
 
+def find_developer_flags():
+    """Поиск флагов разработчика по строкам и символам (метод SCRE)."""
+    log("[*] searching developer flags...")
+    found_flags = {}
+    st = currentProgram.getSymbolTable()
+    rm = currentProgram.getReferenceManager()
+    
+    for flag_name, anchors in DEVELOPER_FLAGS.items():
+        for anchor in anchors:
+            try:
+                it = st.getSymbolIterator(anchor, True)
+                if it is None:
+                    continue
+                while it.hasNext():
+                    sym = it.next()
+                    sa = sym.getAddress()
+                    if sa is None:
+                        continue
+                    # Ищем ссылки на символ
+                    refs = rm.getReferencesTo(sa)
+                    rit = refs.iterator()
+                    while rit.hasNext():
+                        r = rit.next()
+                        fa = r.getFromAddress()
+                        f = getFunctionContaining(fa)
+                        if f is None:
+                            continue
+                        fr = rva(f.getEntryPoint())
+                        if fr < MIN_FUNC_RVA:
+                            continue
+                        found_flags[flag_name] = fr
+                        log("[+] found %s @ 0x%x" % (flag_name, fr))
+                        break
+                    if flag_name in found_flags:
+                        break
+                if flag_name in found_flags:
+                    break
+            except:
+                continue
+    return found_flags
+
 def main():
     log("=== find_offsets (SCRE-style) ===")
     offs = read_offsets()
@@ -278,6 +326,11 @@ def main():
 
         failures.append((name, old_rva, "no-func"))
 
+    # Поиск флагов разработчика
+    dev_flags = find_developer_flags()
+    for flag_name, flag_rva in dev_flags.items():
+        resolved[flag_name] = flag_rva
+
     fh = open(OFF_OUT, "w")
     fh.write("export const offsets = Object.freeze(\n{\n")
     for n in sorted(offs.keys()):
@@ -285,6 +338,8 @@ def main():
             fh.write("    %s: 0x%x,\n" % (n, resolved[n]))
         else:
             fh.write("    %s: 0x%x,\n" % (n, offs[n]))
+    for n in sorted(dev_flags.keys()):
+        fh.write("    %s: 0x%x,\n" % (n, dev_flags[n]))
     fh.write("});\n")
     fh.close()
 
@@ -294,6 +349,9 @@ def main():
     w("input: %d" % len(offs))
     w("resolved: %d (verified=%d rematched=%d string=%d)" % (
         len(resolved), verified, rematched, string_hits))
+    w("developer flags found: %d" % len(dev_flags))
+    for n, r in dev_flags.items():
+        w("  DEV %s @ 0x%x" % (n, r))
     w("failed: %d" % len(failures))
     for n, r, msg in failures:
         w("  FAIL %s @ 0x%x (%s)" % (n, r, msg))
