@@ -1,4 +1,4 @@
-name: Build Grafted IPA (Florida-iOS)
+name: Build Frida.framework with gum-graft
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 25
     env:
-      FLORIDA_URL: https://github.com/Mac-XK/Florida-iOS/releases/download/Florida/frida-gadget.dylib
+      FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
 
     steps:
@@ -27,46 +27,55 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Download Florida Frida Gadget
+      - name: Download gum-graft
         run: |
           set -euo pipefail
-          echo "downloading ${FLORIDA_URL}"
-          curl -fL --retry 3 -o W.stock.dylib "${FLORIDA_URL}"
-          echo "=== file ==="
-          file W.stock.dylib
-          echo "=== lipo ==="
-          lipo -info W.stock.dylib || true
-          echo "=== arch ==="
-          otool -hv W.stock.dylib | head -5
+          mkdir -p tools
+          # gum-graft для macOS arm64. Имя артефакта в релизах Frida:
+          # gum-graft-macos-arm64 (по данным CI-конфига Frida)
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-macos-arm64.tar.xz"
+          echo "downloading $URL"
+          curl -fL --retry 3 -o tools/gum-graft.tar.xz "$URL"
+          tar -xJf tools/gum-graft.tar.xz -C tools/
+          chmod +x tools/gum-graft
+          file tools/gum-graft
+          tools/gum-graft --help || true
 
-      - name: Prepare binary
+      - name: Download Frida Gadget
         run: |
           set -euo pipefail
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.stock.dylib
+          file W.stock.dylib
+          lipo -info W.stock.dylib || true
+
+      - name: Extract arm64 slice
+        run: |
+          set -euo pipefail
+          # gum-graft работает только с arm64 (не arm64e)
           if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
-            echo "already thin, using as-is"
             cp W.stock.dylib W.thin.dylib
           else
-            echo "fat binary, extracting arm64e"
-            lipo -thin arm64e -output W.thin.dylib W.stock.dylib
+            lipo -thin arm64 -output W.thin.dylib W.stock.dylib
           fi
           file W.thin.dylib
-          lipo -info W.thin.dylib || true
+          echo "thin size: $(stat -f%z W.thin.dylib) bytes"
 
-      - name: Verify no frida strings
+      - name: Run gum-graft
         run: |
           set -euo pipefail
-          echo "=== checking for frida strings ==="
-          if strings W.thin.dylib | grep -E "frida-gadget|FridaScriptEngine|gum-js-loop|frida:rpc"; then
-            echo "::warning::Frida strings still present"
-          else
-            echo "OK: no frida strings found"
-          fi
-          echo "=== check brk #0x539 ==="
-          if xxd -p W.thin.dylib | tr -d '\n' | grep -q "20a720d4"; then
-            echo "::warning::BRK #0x539 present"
-          else
-            echo "OK: no BRK #0x539"
-          fi
+          # --ingest-function-starts: автоматически инструментировать все функции
+          # из LC_FUNCTION_STARTS. gum-graft пишет результат в тот же файл.
+          ./tools/gum-graft \
+            --ingest-function-starts \
+            W.thin.dylib
+          echo "=== after grafting ==="
+          file W.thin.dylib
+          echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
+          # Проверяем, что появились новые секции (graft trampolines)
+          otool -l W.thin.dylib | grep -i graft || echo "no graft sections found"
 
       - name: Assemble Frida.framework
         run: |
@@ -101,9 +110,9 @@ jobs:
             '        <string>iPhoneOS</string>' \
             '    </array>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>17.16.4</string>' \
+            '    <string>17.2.11</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>17.16.4</string>' \
+            '    <string>17.2.11</string>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -116,6 +125,7 @@ jobs:
             '</plist>' \
             > "$FRAMEWORK_NAME/Info.plist"
 
+          # ВАЖНО: code_signing должен быть "required" для работы gum-graft
           printf '%s\n' \
             '{' \
             '  "interaction": {' \
@@ -123,7 +133,7 @@ jobs:
             '    "path": "agent.js",' \
             '    "on_change": "ignore"' \
             '  },' \
-            '  "code_signing": "optional"' \
+            '  "code_signing": "required"' \
             '}' \
             > "$FRAMEWORK_NAME/W.config"
 
@@ -142,48 +152,30 @@ jobs:
             codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
           fi
 
-      - name: Final verification
-        run: |
-          set -euo pipefail
-          file "$FRAMEWORK_NAME/W.dylib"
-          echo "=== final framework ==="
-          find "$FRAMEWORK_NAME" -type f | sort
-
       - name: Package
         run: |
           set -euo pipefail
           find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
           find "$FRAMEWORK_NAME" -name "._*" -delete
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
-
           rm -f "$FRAMEWORK_NAME.zip"
           zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME" \
             -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
-
-          echo "=== zip contents ==="
           unzip -l "$FRAMEWORK_NAME.zip"
-
-          if unzip -l "$FRAMEWORK_NAME.zip" | grep -qE "__MACOSX|\._"; then
-            echo "::error::__MACOSX or ._ files present in archive"
-            exit 1
-          fi
-          echo "OK: clean zip"
-
           shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
 
       - name: Summary
         run: |
           set -euo pipefail
           {
-            echo "### florida frida framework"
+            echo "### frida framework with gum-graft"
             echo ""
             echo "| param | value |"
             echo "|---|---|"
-            echo "| source | Mac-XK/Florida-iOS |"
-            echo "| frida version | 17.16.4 |"
-            echo "| arch | arm64e |"
-            echo "| patches | already removed in source |"
-            echo "| code_signing | optional |"
+            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| tool | gum-graft (ingest-function-starts) |"
+            echo "| arch | arm64 |"
+            echo "| code_signing | required |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
           } >> "$GITHUB_STEP_SUMMARY"
