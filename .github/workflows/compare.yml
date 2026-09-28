@@ -11,10 +11,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   compare:
     runs-on: macos-14
@@ -31,32 +27,21 @@ jobs:
           rm -rf dev_unpacked
           mkdir -p dev_unpacked
           unzip -o W.dylib.zip -d dev_unpacked
-          echo "=== extracted ==="
           find dev_unpacked -type f | sort
 
           DEV=$(find dev_unpacked -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          if [ -z "$DEV" ]; then
-            DEV=$(find dev_unpacked -type f ! -path "*__MACOSX*" ! -name "._*" ! -name ".DS_Store" | head -1)
-          fi
           [ -n "$DEV" ] || { echo "::error::no file found"; exit 1; }
           cp "$DEV" W.dev.raw.dylib
-
           xattr -c W.dev.raw.dylib 2>/dev/null || true
 
           FILE_INFO=$(file -b W.dev.raw.dylib)
           echo "file info: $FILE_INFO"
 
-          if echo "$FILE_INFO" | grep -q "Mach-O"; then
-            if echo "$FILE_INFO" | grep -q "universal"; then
-              lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
-            else
-              cp W.dev.raw.dylib W.dev.dylib
-            fi
+          if echo "$FILE_INFO" | grep -q "universal"; then
+            lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
           else
-            echo "::error::not Mach-O: $FILE_INFO"
-            exit 1
+            cp W.dev.raw.dylib W.dev.dylib
           fi
-
           file W.dev.dylib
           echo "dev size: $(stat -f%z W.dev.dylib) bytes"
 
@@ -65,7 +50,6 @@ jobs:
           set -euo pipefail
           mkdir -p stock
           URL="https://github.com/frida/frida/releases/download/17.2.11/frida-gadget-17.2.11-ios-universal.dylib.xz"
-          echo "downloading $URL"
           curl -fL --retry 3 -o stock/17.2.11.xz "$URL"
           (cd stock && xz -d 17.2.11.xz)
           mv stock/17.2.11 stock/17.2.11.dylib
@@ -87,48 +71,36 @@ jobs:
           python3 -m pip install "lief>=0.17.2"
           python3 -c "import lief; print('lief', lief.__version__)"
 
-      - name: Write analysis scripts
+      - name: Write analysis script
         run: |
           set -euo pipefail
           mkdir -p scripts
 
           printf '%s\n' \
-            'import lief' \
-            'import sys' \
+            'import lief, sys' \
             '' \
             'def get_sections(path):' \
             '    try:' \
             '        fat = lief.MachO.parse(path)' \
-            '        if fat is None:' \
-            '            print(f"::error::parse returned None for {path}")' \
-            '            return None' \
+            '        if fat is None: return None' \
             '        binary = fat.at(0)' \
-            '        if binary is None:' \
-            '            print(f"::error::no slice at index 0 for {path}")' \
-            '            return None' \
+            '        if binary is None: return None' \
             '        sections = {}' \
-            '        for segment in binary.segments:' \
-            '            for section in segment.sections:' \
-            '                sections[(segment.name, section.name)] = section' \
+            '        for seg in binary.segments:' \
+            '            for sec in seg.sections:' \
+            '                sections[(seg.name, sec.name)] = sec' \
             '        return sections' \
             '    except Exception as e:' \
             '        print(f"::error::exception parsing {path}: {e}")' \
             '        return None' \
             '' \
-            'def read(path):' \
-            '    with open(path, "rb") as f:' \
-            '        return f.read()' \
-            '' \
-            'DEV = "W.dev.dylib"' \
-            'STOCK = "stock/17.2.11.thin.dylib"' \
-            '' \
-            'secs_dev = get_sections(DEV)' \
-            'secs_stock = get_sections(STOCK)' \
+            'secs_dev = get_sections("W.dev.dylib")' \
+            'secs_stock = get_sections("stock/17.2.11.thin.dylib")' \
             'if secs_dev is None or secs_stock is None:' \
             '    sys.exit(1)' \
             '' \
-            'data_dev = read(DEV)' \
-            'data_stock = read(STOCK)' \
+            'with open("W.dev.dylib", "rb") as f: data_dev = f.read()' \
+            'with open("stock/17.2.11.thin.dylib", "rb") as f: data_stock = f.read()' \
             '' \
             'out = open("diff-report.txt", "w")' \
             'def w(line):' \
@@ -139,9 +111,6 @@ jobs:
             'w(f"dev size:   {len(data_dev)}")' \
             'w(f"stock size: {len(data_stock)}")' \
             'w(f"diff:       {len(data_dev) - len(data_stock)}")' \
-            'w("")' \
-            'w(f"dev sections:   {len(secs_dev)}")' \
-            'w(f"stock sections: {len(secs_stock)}")' \
             'w("")' \
             '' \
             'common = sorted(secs_dev.keys() & secs_stock.keys())' \
@@ -163,14 +132,11 @@ jobs:
             '    if sd.size != ss.size:' \
             '        w(f"[{k[0]},{k[1]}] SIZE dev=0x{sd.size:x} stock=0x{ss.size:x}")' \
             '        continue' \
-            '    if sd.offset == 0 or ss.offset == 0:' \
-            '        continue' \
-            '    if sd.offset + sd.size > len(data_dev) or ss.offset + ss.size > len(data_stock):' \
-            '        continue' \
+            '    if sd.offset == 0 or ss.offset == 0: continue' \
+            '    if sd.offset + sd.size > len(data_dev) or ss.offset + ss.size > len(data_stock): continue' \
             '    dd = data_dev[sd.offset:sd.offset+sd.size]' \
             '    ds = data_stock[ss.offset:ss.offset+ss.size]' \
-            '    if dd == ds:' \
-            '        continue' \
+            '    if dd == ds: continue' \
             '    diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]' \
             '    total += len(diffs)' \
             '    w(f"[{k[0]},{k[1]}] size=0x{sd.size:x} diff={len(diffs)}")' \
@@ -185,7 +151,6 @@ jobs:
             > scripts/diff.py
 
           printf '%s\n' \
-            'import sys' \
             'patterns = [' \
             '    (bytes.fromhex("20A720D4"), "brk539"),' \
             '    (bytes.fromhex("200020D4"), "brk1"),' \
@@ -195,15 +160,13 @@ jobs:
             ']' \
             'out = open("brk-analysis.txt", "w")' \
             'for path in ["W.dev.dylib", "stock/17.2.11.thin.dylib"]:' \
-            '    with open(path, "rb") as f:' \
-            '        data = f.read()' \
+            '    with open(path, "rb") as f: data = f.read()' \
             '    out.write(f"=== {path} (size={len(data)}) ===\n")' \
             '    print(f"=== {path} ===")' \
             '    for pat, name in patterns:' \
             '        cnt = data.count(pat)' \
-            '        line = f"  {name}: {cnt}"' \
-            '        out.write(line + "\n")' \
-            '        print(line)' \
+            '        out.write(f"  {name}: {cnt}\n")' \
+            '        print(f"  {name}: {cnt}")' \
             '    out.write("\n")' \
             'out.close()' \
             > scripts/brk.py
@@ -233,22 +196,6 @@ jobs:
             strings stock/17.2.11.thin.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 || true
           } > version-strings.txt
           cat version-strings.txt
-
-      - name: Summary
-        run: |
-          set -euo pipefail
-          {
-            echo "### dev vs stock 17.2.11"
-            echo ""
-            echo "| field | value |"
-            echo "|---|---|"
-            echo "| dev size | $(stat -f%z W.dev.dylib) B |"
-            echo "| stock size | $(stat -f%z stock/17.2.11.thin.dylib) B |"
-            echo ""
-            echo '```'
-            cat brk-analysis.txt 2>/dev/null || echo "no brk analysis"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
