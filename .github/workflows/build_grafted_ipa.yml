@@ -1,4 +1,4 @@
-name: Build Frida.framework (dev-matching)
+name: Build Frida.framework (unsigned)
 
 on:
   push:
@@ -30,66 +30,121 @@ jobs:
           curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
-          file W.stock.dylib
-          lipo -info W.stock.dylib || true
-
-      - name: Extract arm64
-        run: |
-          set -euo pipefail
-          if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.stock.dylib W.dylib
-          else
-            lipo -thin arm64 -output W.dylib W.stock.dylib
-          fi
+          lipo -thin arm64 -output W.dylib W.stock.dylib
           file W.dylib
-          echo "size: $(stat -f%z W.dylib) bytes"
+          echo "after lipo: $(stat -f%z W.dylib) bytes"
 
-      - name: Strip (match dev size)
+      - name: Strip
         run: |
           set -euo pipefail
           xcrun strip -Sx W.dylib -o W.stripped.dylib
           mv W.stripped.dylib W.dylib
+          echo "after strip: $(stat -f%z W.dylib) bytes"
+
+      - name: Remove signature
+        run: |
+          set -euo pipefail
+          # Способ 1: codesign --remove-signature
+          codesign --remove-signature W.dylib 2>&1 || echo "codesign remove failed, trying ldid"
+
+          # Способ 2: если codesign не сработал — ldid -M (remove)
+          if codesign -dvv W.dylib 2>&1 | grep -q "code signature"; then
+            echo "still signed, trying ldid -M"
+            brew install ldid || true
+            ldid -M W.dylib 2>&1 || true
+          fi
+
+          echo "after remove-signature: $(stat -f%z W.dylib) bytes"
+
+      - name: Zero out code signature blob
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import struct, sys
+
+          with open("W.dylib", "rb") as f:
+              data = bytearray(f.read())
+
+          magic = data[:4]
+          if magic == b"\xcf\xfa\xed\xfe":
+              offset_size = 4
+              ncmds_off = 16
+          elif magic == b"\xfe\xed\xfa\xcf":
+              offset_size = 8
+              ncmds_off = 16
+          else:
+              print(f"unknown magic: {magic.hex()}, size={len(data)}")
+              sys.exit(0)
+
+          # parse mach header 64-bit
+          cpu, subtype, ftype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from("<IIIIIII", data, 4)
+          print(f"ncmds={ncmds} sizeofcmds={sizeofcmds}")
+
+          cmd_off = 32
+          lc_code_sig = None
+          for i in range(ncmds):
+              cmd, cmdsize = struct.unpack_from("<II", data, cmd_off)
+              if cmd == 0x1d:  # LC_CODE_SIGNATURE
+                  dataoff, datasize = struct.unpack_from("<II", data, cmd_off + 8)
+                  lc_code_sig = (cmd_off, dataoff, datasize)
+                  print(f"LC_CODE_SIGNATURE: offset={dataoff} size={datasize}")
+              cmd_off += cmdsize
+
+          if lc_code_sig is None:
+              print("no LC_CODE_SIGNATURE found")
+              sys.exit(0)
+
+          cmd_off, dataoff, datasize = lc_code_sig
+          if datasize == 0:
+              print("empty signature blob already")
+              sys.exit(0)
+
+          # Zero out the signature blob
+          end = min(dataoff + datasize, len(data))
+          for i in range(dataoff, end):
+              data[i] = 0
+
+          with open("W.dylib", "wb") as f:
+              f.write(data)
+
+          print(f"zeroed {end - dataoff} bytes at offset {dataoff}")
+          print(f"new size: {len(data)}")
+          PYEOF
           file W.dylib
-          echo "stripped size: $(stat -f%z W.dylib) bytes"
+          echo "final: $(stat -f%z W.dylib) bytes"
 
       - name: Compare with dev
         run: |
           set -euo pipefail
           if [ ! -f W.dylib.zip ]; then
-            echo "W.dylib.zip not found, skipping comparison"
+            echo "no W.dylib.zip to compare"
             exit 0
           fi
           mkdir -p dev
           unzip -o W.dylib.zip -d dev > /dev/null
           DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          cp "$DEV" W.dev.raw.dylib
-          if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.dev.raw.dylib W.dev.dylib
-          else
-            lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
-          fi
-          echo "=== dev size vs ours ==="
-          echo "dev:  $(stat -f%z W.dev.dylib)"
-          echo "ours: $(stat -f%z W.dylib)"
-          echo "diff: $(( $(stat -f%z W.dylib) - $(stat -f%z W.dev.dylib) ))"
+          cp "$DEV" dev.dylib
 
-          echo "=== byte-level diff (first 200 differing offsets) ==="
-          python3 - << 'PYEOF' > compare.txt 2>&1
-          with open("W.dev.dylib","rb") as f: dev = f.read()
+          echo "=== sizes ==="
+          echo "dev:  $(stat -f%z dev.dylib)"
+          echo "ours: $(stat -f%z W.dylib)"
+          echo "diff: $(( $(stat -f%z W.dylib) - $(stat -f%z dev.dylib) ))"
+
+          echo ""
+          echo "=== byte diff ==="
+          python3 - << 'PYEOF'
+          with open("dev.dylib","rb") as f: dev = f.read()
           with open("W.dylib","rb") as f: ours = f.read()
           n = min(len(dev), len(ours))
-          diffs = []
-          for i in range(n):
-              if dev[i] != ours[i]:
-                  diffs.append(i)
-          print(f"total differing bytes (of {n}): {len(diffs)}")
-          print(f"first 200 offsets:")
-          for i in diffs[:200]:
+          diffs = [i for i in range(n) if dev[i] != ours[i]]
+          print(f"total differing bytes: {len(diffs)}")
+          print("first 30 offsets:")
+          for i in diffs[:30]:
               print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
-          if len(dev) != len(ours):
-              print(f"length differs: dev={len(dev)} ours={len(ours)}")
+          print(f"last 10 offsets:")
+          for i in diffs[-10:]:
+              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
           PYEOF
-          cat compare.txt
 
       - name: Assemble Frida.framework
         run: |
@@ -123,13 +178,6 @@ jobs:
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
-      - name: Sign
-        run: |
-          set -euo pipefail
-          brew install ldid || true
-          command -v ldid >/dev/null && ldid -S "$FRAMEWORK_NAME/W.dylib"
-          codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
-
       - name: Package
         run: |
           set -euo pipefail
@@ -145,6 +193,5 @@ jobs:
           path: |
             Frida.framework.zip
             Frida.framework.zip.sha256
-            compare.txt
           retention-days: 30
           if-no-files-found: error
