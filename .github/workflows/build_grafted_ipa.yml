@@ -1,0 +1,98 @@
+name: Build FridaGadget Framework
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Checkout frida-gum
+        uses: actions/checkout@v4
+        with:
+          repository: frida/frida-gum
+          ref: 17.18.0
+          submodules: recursive
+          path: frida-gum
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build dependencies
+        run: |
+          brew install meson ninja pkg-config libffi glib
+          pip install setuptools
+
+      - name: Build gum-graft
+        run: |
+          cd frida-gum
+          meson setup build --prefix=/tmp/frida-build -Dgraft_tool=enabled
+          ninja -C build gum-graft
+          cp build/gum-graft /tmp/frida-build/gum-graft
+          ls -la /tmp/frida-build/gum-graft
+
+      - name: Download Frida Gadget 17.18.0
+        run: |
+          mkdir -p work
+          curl -fL -o work/frida-gadget.dylib.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
+          xz -d work/frida-gadget.dylib.xz
+          mv work/frida-gadget.dylib work/FridaGadget.dylib
+          file work/FridaGadget.dylib
+
+      - name: Apply gum-graft (bypass code signing)
+        run: |
+          chmod +x /tmp/frida-build/gum-graft
+          /tmp/frida-build/gum-graft -i work/FridaGadget.dylib -a 0xb24998
+          file work/FridaGadget.dylib
+
+      - name: Create Framework structure with Info.plist
+        run: |
+          mkdir -p FridaGadget.framework
+          cp work/FridaGadget.dylib FridaGadget.framework/FridaGadget
+          cat > FridaGadget.framework/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>FridaGadget</string>
+              <key>CFBundleIdentifier</key>
+              <string>re.frida.gadget</string>
+              <key>CFBundleName</key>
+              <string>FridaGadget</string>
+              <key>CFBundlePackageType</key>
+              <string>FMWK</string>
+              <key>CFBundleShortVersionString</key>
+              <string>17.18.0</string>
+              <key>CFBundleVersion</key>
+              <string>17.18.0</string>
+              <key>MinimumOSVersion</key>
+              <string>11.0</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Create FridaGadget.config
+        run: |
+          cat > FridaGadget.framework/FridaGadget.config << 'EOF'
+          {
+            "interaction": {
+              "type": "script",
+              "path": "updated/script_69_252.js",
+              "on_change": "ignore"
+            },
+            "runtime": "qjs",
+            "code_signing": "required"
+          }
+          EOF
+
+      - name: Upload Framework
+        uses: actions/upload-artifact@v4
+        with:
+          name: FridaGadget.framework
+          path: FridaGadget.framework/
+          retention-days: 7
