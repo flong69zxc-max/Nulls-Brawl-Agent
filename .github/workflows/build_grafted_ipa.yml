@@ -1,12 +1,21 @@
-name: Build Frida.framework (ldid-resigned)
+name: Build Frida.framework (dev-identical)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
@@ -14,57 +23,108 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download and prepare stock
+      - name: Download Frida Gadget
         run: |
           set -euo pipefail
           URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          curl -fL --retry 3 -o gadget.xz "$URL"
-          xz -d gadget.xz
-          mv gadget W.fat.dylib
-          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "before ldid: $(stat -f%z W.thin.dylib)"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.fat.dylib
+          file W.fat.dylib
+          lipo -info W.fat.dylib || true
 
-      - name: Resign with ldid (fixes segment size and blob)
+      - name: Extract arm64 slice
         run: |
           set -euo pipefail
-          brew install ldid || true
-          # ldid -S: remove old signature, write new one, fix __LINKEDIT
-          ldid -S W.thin.dylib
-          echo "after ldid: $(stat -f%z W.thin.dylib)"
-          codesign -dvv W.thin.dylib 2>&1 | head -10 || true
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+          file W.thin.dylib
+          echo "before sign: $(stat -f%z W.thin.dylib)"
 
-      - name: Wrap into fat
+      - name: Install ldid-procursus
+        run: |
+          set -euo pipefail
+          # ldid-procursus конфликтует с обычным ldid — удаляем его
+          brew uninstall ldid 2>/dev/null || true
+          brew install ldid-procursus
+          ldid -v 2>&1 | head -3 || true
+
+      - name: Resign with ldid-procursus
+        run: |
+          set -euo pipefail
+          ldid -S W.thin.dylib
+          echo "after sign: $(stat -f%z W.thin.dylib)"
+          ldid -h W.thin.dylib 2>&1 | head -20 || true
+
+      - name: Zero signature blob (for LiveContainer re-sign)
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import struct
+          with open("W.thin.dylib","rb") as f:
+              d = bytearray(f.read())
+          n = struct.unpack_from("<I", d, 16)[0]
+          o = 32
+          for _ in range(n):
+              c, s = struct.unpack_from("<II", d, o)
+              if c == 0x1d:
+                  off, sz = struct.unpack_from("<II", d, o + 8)
+                  print(f"LC_CODE_SIGNATURE: offset={off} size={sz}")
+                  for i in range(off, off + sz):
+                      d[i] = 0
+                  break
+              o += s
+          with open("W.thin.dylib","wb") as f:
+              f.write(d)
+          print(f"final thin size: {len(d)}")
+          PYEOF
+          tail -c 32 W.thin.dylib | od -An -tx1
+
+      - name: Wrap into fat binary
         run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           file W.dylib
+          lipo -info W.dylib || true
           echo "fat size: $(stat -f%z W.dylib)"
 
       - name: Compare with dev
         run: |
           set -euo pipefail
-          if [ -f W.dylib.zip ]; then
-            mkdir -p dev
-            unzip -o W.dylib.zip -d dev > /dev/null
-            DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-            cp "$DEV" W.dev.dylib
-            echo "dev:  $(stat -f%z W.dev.dylib)"
-            echo "ours: $(stat -f%z W.dylib)"
-            python3 - << 'PYEOF'
+          if [ ! -f W.dylib.zip ]; then
+            echo "W.dylib.zip not found, skipping comparison"
+            exit 0
+          fi
+          mkdir -p dev
+          unzip -o W.dylib.zip -d dev > /dev/null
+          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
+          cp "$DEV" W.dev.dylib
+          echo "=== sizes ==="
+          echo "dev:  $(stat -f%z W.dev.dylib)"
+          echo "ours: $(stat -f%z W.dylib)"
+          echo "diff: $(( $(stat -f%z W.dylib) - $(stat -f%z W.dev.dylib) ))"
+          echo ""
+          python3 - << 'PYEOF'
           with open("W.dev.dylib","rb") as f: dev = f.read()
           with open("W.dylib","rb") as f: ours = f.read()
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print(f"total differing bytes: {len(diffs)}")
-          for i in diffs[:20]:
-              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
+          if diffs:
+              print("first 20 offsets:")
+              for i in diffs[:20]:
+                  print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
+              print("last 10 offsets:")
+              for i in diffs[-10:]:
+                  print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
+          if len(dev) != len(ours):
+              print(f"length differs: dev={len(dev)} ours={len(ours)}")
           PYEOF
-          fi
 
-      - name: Assemble framework
+      - name: Assemble Frida.framework
         run: |
           set -euo pipefail
-          rm -rf "$FRAMEWORK_NAME"; mkdir -p "$FRAMEWORK_NAME"
+          rm -rf "$FRAMEWORK_NAME"
+          mkdir -p "$FRAMEWORK_NAME"
           cp W.dylib "$FRAMEWORK_NAME/W.dylib"
           cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -90,6 +150,90 @@ jobs:
           }
           CONFIG
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
+
+      - name: Create hints.md
+        run: |
+          set -euo pipefail
+          cat > hints.md << 'HINTS'
+          # Frida.framework: сборка под iOS 27 + LiveContainer
+
+          ## Ключевой факт
+
+          dev-W.dylib — это **сток Frida 17.2.11 + `lipo -thin arm64` + `ldid-procursus -S` + обнуление blob подписи + `lipo -create`**. Никакого gum-graft, никаких патчей кода.
+
+          Счётчики `brk`/`nop`/`ret` в dev, стоке и нашей сборке совпадают **до единицы**. Весь код байт-в-байт идентичен стоку.
+
+          ## Почему именно 17.2.11
+
+          - 17.2.11 — последний релиз до того, как Frida 17.2.15+ добавила `__FRIDA_TEXT*`/`__FRIDA_DATA*` сегменты для grafting. Эти сегменты не проходят code signing на iOS 27 → `CODESIGNING 2 Invalid Page`.
+          - 17.2.11 использует `LC_DYLD_INFO_ONLY`, не `LC_DYLD_CHAINED_FIXUPS`, поэтому сегменты корректно подписываются.
+          - Плюс 17.2.11 не имеет новых runtime-проверок, ломающихся на iOS 27.
+
+          ## Почему ldid-procursus, а не ldid
+
+          - Обычный `ldid` от Saurik пишет подпись ~238 КБ → файл становится на 17 КБ короче dev.
+          - `ldid-procursus` пишет подпись ~256 КБ, потому что добавляет **DER-encoded entitlements** — обязательное требование iOS 15.1+.
+          - Именно его использовал разработчик. `brew install ldid-procursus` (конфликтует с `ldid`, нужно удалить).
+
+          ## Порядок операций
+
+          ```
+          stock fat 17.2.11
+            ↓ lipo -thin arm64
+          thin arm64 (19006768)
+            ↓ ldid-procursus -S
+          thin подписанный (19006592)   ← ldid сам обновляет __LINKEDIT.filesize и обрезает файл
+            ↓ обнуление LC_CODE_SIGNATURE blob
+          thin с нулевой подписью
+            ↓ lipo -create -arch arm64
+          fat (19022976)                ← 16384 байт fat-заголовок + 19006592
+          ```
+
+          ## Ключевые цифры (все совпадают с dev)
+
+          | Параметр | Значение |
+          |---|---|
+          | fat size | 19022976 |
+          | arm64 slice size | 19006592 |
+          | `LC_CODE_SIGNATURE.offset` | 18750096 |
+          | `LC_CODE_SIGNATURE.size` | 256496 |
+          | `LC_UUID` | любой (lipo генерирует заново) |
+
+          ## Проверка на девайсе
+
+          ```sh
+          python3 an.py NULLS.dylib OUR.dylib
+          ```
+
+          Должно быть:
+          ```
+          slice size diff: 0
+          code_sig: {offset: 18750096, size: 256496}  у обоих
+          ```
+
+          ## Что НЕ работает
+
+          - **gum-graft** — создаёт `__FRIDA_TEXT*`/`__FRIDA_DATA*` сегменты, которые iOS 27 отвергает с `CODESIGNING 2 Invalid Page`.
+          - **Обрезка файла вручную** — `__LINKEDIT` вылезает за конец файла → `segment extends beyond end of file`. Нужно либо использовать `ldid`, либо обновлять `__LINKEDIT.filesize`.
+          - **`code_signing: "required"` без правильной подписи** — сам по себе не помогает, нужен валидный blob с DER entitlements.
+          - **Frida 17.2.15+** — падает с `brk #0x539` в инициализаторе dyld.
+
+          ## Что НЕ делать
+
+          - Не обрезать файл руками — `ldid` сделает это сам корректно.
+          - Не удалять `LC_CODE_SIGNATURE` — dyld откажется грузить dylib как неподписанный.
+          - Не ставить одновременно `ldid` и `ldid-procursus`.
+          - Не использовать `code_signing: "optional"` — gum-graft требует `"required"`, а без grafting (наш случай) `"required"` тоже работает и даёт правильный размер подписи.
+
+          ## Ссылки
+
+          - ldid-procursus: https://github.com/ProcursusTeam/ldid
+          - Frida releases: https://github.com/frida/frida/releases
+          HINTS
+
+      - name: Show hints
+        run: cat hints.md
 
       - name: Package
         run: |
@@ -99,8 +243,13 @@ jobs:
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
           ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
           ls -la Frida.framework.zip
+          shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: Frida.framework
-          path: Frida.framework.zip
+          path: |
+            Frida.framework.zip
+            hints.md
+          retention-days: 30
+          if-no-files-found: error
