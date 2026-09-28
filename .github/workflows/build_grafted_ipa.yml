@@ -1,187 +1,277 @@
-name: Build Clean Frida IPA
+import ObjC from "frida-objc-bridge";
 
-on:
-  workflow_dispatch:
+const LOG_NAME = "agent.log";
+const UPDATED = "updated";
+const TEST_NAME = ".__agent_write_test";
+const DOC_DIR = 9;
+const USER_MASK = 1;
 
-permissions:
-  contents: write
+let logPath = null;
+let docsPath = null;
+let updatedPath = null;
+let started = false;
 
-jobs:
-  build:
-    runs-on: macos-14
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
+function str(v) {
+  try {
+    return v === null || v === undefined ? null : v.toString();
+  } catch (e) {
+    return null;
+  }
+}
 
-      - name: Resolve agent script
-        id: agent
-        run: |
-          set -euo pipefail
-          for p in scripts/agents.js scripts/agent.js agent/agents.js agent/agent.js scripts/frida-scripts/agent.js; do
-            if [ -f "$p" ]; then echo "path=$p" >> "$GITHUB_OUTPUT"; echo "found: $p"; exit 0; fi
-          done
-          echo "::error::agent script not found"
-          find . -maxdepth 3 -name "*.js" -not -path "./node_modules/*" -not -path "./ghidra/*"
-          exit 1
+function log(line) {
+  let text = "";
+  try {
+    text = new Date().toISOString() + " " + line;
+  } catch (e) {
+    text = "log " + line;
+  }
+  try {
+    console.log(text);
+  } catch (e) {}
+  if (logPath === null) {
+    return;
+  }
+  let f = null;
+  try {
+    f = new File(logPath, "a");
+    f.write(text + "\n");
+    f.flush();
+    f.close();
+    f = null;
+  } catch (e) {
+    if (f !== null) {
+      try {
+        f.close();
+      } catch (e2) {}
+    }
+  }
+}
 
-      - uses: actions/cache@v4
-        id: cache-gadget
-        with:
-          path: gadget-cache
-          key: frida-gadget-17.9.7-ios-universal-v1
+function fileManager() {
+  return ObjC.classes.NSFileManager.defaultManager();
+}
 
-      - name: Download Frida Gadget
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p gadget-cache
-          META=$(curl -sL -H "Authorization: token $GH_TOKEN" "https://api.github.com/repos/frida/frida/releases/tags/17.9.7")
-          URL=$(echo "$META" | python3 -c "
-          import sys,json
-          d=json.load(sys.stdin)
-          for a in d.get('assets',[]):
-              n=a['name']
-              if 'gadget' in n and 'ios' in n and n.endswith('.dylib.xz'):
-                  print(a['browser_download_url']); break
-          ")
-          test -n "$URL"
-          curl -fL -o /tmp/frida.xz "$URL"
-          xz -d /tmp/frida.xz
-          mv /tmp/frida gadget-cache/FridaGadget.dylib
-          file gadget-cache/FridaGadget.dylib
+function mkdir(path) {
+  try {
+    fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(path, true, null, null);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
-      - uses: actions/cache@v4
-        id: cache-ipa
-        with:
-          path: ipa-cache
-          key: nulls-brawl-ipa-v1
+function exists(path) {
+  try {
+    return fileManager().fileExistsAtPath_(path) === true;
+  } catch (e) {
+    return false;
+  }
+}
 
-      - name: Download Nulls Brawl IPA
-        if: steps.cache-ipa.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p ipa-cache
-          curl -fL -A "Mozilla/5.0" -o ipa-cache/bs.ipa "https://dnull.xyz/latest_bs_i"
-          test -s ipa-cache/bs.ipa
+function readText(path) {
+  try {
+    const f = new File(path, "r");
+    const text = f.readText();
+    f.close();
+    return text;
+  } catch (e) {
+    return null;
+  }
+}
 
-      - name: Extract and Clean IPA
-        id: extract
-        run: |
-          set -euo pipefail
-          rm -rf build/extract
-          mkdir -p build/extract
-          unzip -q ipa-cache/bs.ipa -d build/extract
-          APP_DIR=$(find build/extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
-          test -n "$APP_DIR"
-          BIN="$APP_DIR/Nulls Brawl"
-          if [ ! -f "$BIN" ]; then
-            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
-          fi
-          test -f "$BIN"
-          rm -rf "$APP_DIR/Frameworks/Frida.framework"
-          rm -rf "$APP_DIR/Frameworks/Cephei.framework"
-          rm -rf "$APP_DIR/Frameworks/CepheiPrefs.framework"
-          rm -f "$APP_DIR/Frameworks/FridaGadget.dylib"
-          echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
-          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          file "$BIN"
+function writeText(path, text) {
+  try {
+    const f = new File(path, "w");
+    f.write(text);
+    f.flush();
+    f.close();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
-      - name: Build FridaGadget.framework
-        run: |
-          set -euo pipefail
-          APP_DIR="${{ steps.extract.outputs.app_dir }}"
-          FW="$APP_DIR/Frameworks/FridaGadget.framework"
-          mkdir -p "$FW"
-          cp gadget-cache/FridaGadget.dylib "$FW/FridaGadget"
-          chmod +x "$FW/FridaGadget"
-          cp "${{ steps.agent.outputs.path }}" "$FW/agent.js"
-          cat > "$FW/Info.plist" << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>FridaGadget</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
-              <key>CFBundleName</key>
-              <string>FridaGadget</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.9.7</string>
-              <key>CFBundleVersion</key>
-              <string>17.9.7</string>
-              <key>MinimumOSVersion</key>
-              <string>11.0</string>
-          </dict>
-          </plist>
-          EOF
-          cat > "$FW/FridaGadget.config" << 'EOF'
-          {
-            "interaction": {
-              "type": "script",
-              "path": "agent.js",
-              "on_change": "ignore"
-            },
-            "code_signing": "required"
-          }
-          EOF
-          ls -la "$FW"
+function writable(path) {
+  if (!path) {
+    return false;
+  }
+  const test = path + "/" + TEST_NAME;
+  const payload = "probe-" + Date.now();
+  if (!writeText(test, payload)) {
+    return false;
+  }
+  if (readText(test) !== payload) {
+    try {
+      fileManager().removeItemAtPath_error_(test, null);
+    } catch (e) {}
+    return false;
+  }
+  try {
+    fileManager().removeItemAtPath_error_(test, null);
+  } catch (e) {}
+  return true;
+}
 
-      - name: Install tools
-        run: |
-          set -euo pipefail
-          brew install ldid
-          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
-          sudo cp build/Release/insert_dylib /usr/local/bin/
-          sudo chmod +x /usr/local/bin/insert_dylib
-          which insert_dylib ldid
+function documentsDir() {
+  const candidates = [];
+  try {
+    const bundle = str(ObjC.classes.NSBundle.mainBundle().bundlePath());
+    if (bundle) {
+      const m = /^(.*)\/Applications\/[^\/]+\.app\/?$/.exec(bundle);
+      if (m) {
+        candidates.push(m[1]);
+      }
+      const parts = bundle.replace(/\/+$/, "").split("/");
+      if (parts.length >= 3) {
+        candidates.push(parts.slice(0, -2).join("/"));
+        candidates.push(parts.slice(0, -1).join("/"));
+      }
+    }
+  } catch (e) {}
+  try {
+    const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
+    if (urls !== null && urls.count() > 0) {
+      const p = str(urls.firstObject().path());
+      if (p) {
+        candidates.push(p);
+      }
+    }
+  } catch (e) {}
+  try {
+    const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
+    const home = fn().readUtf8String();
+    if (home) {
+      candidates.push(home + "/Documents");
+    }
+  } catch (e) {}
+  candidates.push("/tmp");
+  for (let i = 0; i < candidates.length; i++) {
+    if (writable(candidates[i])) {
+      return candidates[i];
+    }
+  }
+  return null;
+}
 
-      - name: Inject dylib
-        run: |
-          set -euo pipefail
-          BIN="${{ steps.extract.outputs.bin }}"
-          insert_dylib --weak --all-yes "@executable_path/Frameworks/FridaGadget.framework/FridaGadget" "$BIN" "$BIN.patched"
-          mv "$BIN.patched" "$BIN"
-          chmod +x "$BIN"
-          otool -L "$BIN" | grep -i frida || echo "no frida load command"
+function initPaths() {
+  docsPath = documentsDir();
+  updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
+  if (updatedPath !== null) {
+    mkdir(updatedPath);
+  }
 
-      - name: Sign
-        run: |
-          set -euo pipefail
-          APP_DIR="${{ steps.extract.outputs.app_dir }}"
-          BIN="${{ steps.extract.outputs.bin }}"
-          FW="$APP_DIR/Frameworks/FridaGadget.framework"
-          ldid -S "$FW/FridaGadget"
-          ldid -S "$BIN"
-          echo "signed"
+  const chain = [];
+  if (updatedPath !== null) {
+    chain.push(updatedPath + "/" + LOG_NAME);
+  }
+  if (docsPath !== null) {
+    chain.push(docsPath + "/" + LOG_NAME);
+  }
+  chain.push("/tmp/" + LOG_NAME);
 
-      - name: Repack IPA
-        run: |
-          set -euo pipefail
-          cd build/extract
-          rm -f ../bs_patched.ipa
-          zip -qry ../bs_patched.ipa Payload
-          cd ..
-          ls -la bs_patched.ipa
+  for (let i = 0; i < chain.length; i++) {
+    const candidate = chain[i];
+    const cut = candidate.lastIndexOf("/");
+    if (cut < 1) {
+      continue;
+    }
+    const dir = candidate.substring(0, cut);
+    if (!exists(dir)) {
+      mkdir(dir);
+    }
+    if (!writable(dir)) {
+      continue;
+    }
+    if (!writeText(candidate, "")) {
+      continue;
+    }
+    logPath = candidate;
+    break;
+  }
+  if (logPath === null) {
+    try {
+      console.log("[agent] no writable directory for log");
+    } catch (e) {}
+    return;
+  }
+  log("log opened at " + logPath);
+}
 
-      - name: Publish Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="brawl-clean-$(date +%Y%m%d)-r${{ github.run_number }}"
-          gh release create "$TAG" build/bs_patched.ipa --title "$TAG" --notes "Frida 17.9.7 clean build"
+function environment() {
+  try {
+    log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id);
+  } catch (e) {}
+  try {
+    log("bundle=" + str(ObjC.classes.NSBundle.mainBundle().bundlePath()));
+  } catch (e) {}
+  try {
+    log("mainModule=" + Process.mainModule.name + " base=" + Process.mainModule.base + " path=" + Process.mainModule.path);
+  } catch (e) {}
+  log("docsPath=" + str(docsPath));
+  log("updatedPath=" + str(updatedPath));
+  log("logPath=" + str(logPath));
+}
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: brawl-clean-ipa
-          path: build/bs_patched.ipa
-          retention-days: 7
+function showAlert(title, message) {
+  try {
+    const UIAlertController = ObjC.classes.UIAlertController;
+    const UIAlertAction = ObjC.classes.UIAlertAction;
+    const UIApplication = ObjC.classes.UIApplication;
+
+    const alert = UIAlertController.alertControllerWithTitle_message_preferredStyle_(title, message, 1);
+    const ok = UIAlertAction.actionWithTitle_style_handler_("OK", 0, null);
+    alert.addAction_(ok);
+
+    const windows = UIApplication.sharedApplication().windows();
+    let root = null;
+    for (let i = 0; i < windows.count(); i++) {
+      const w = windows.objectAtIndex_(i);
+      if (w.isKeyWindow()) {
+        root = w.rootViewController();
+        break;
+      }
+    }
+    if (root === null) {
+      log("alert skipped: no key window");
+      return false;
+    }
+    while (root.presentedViewController() !== null) {
+      root = root.presentedViewController();
+    }
+    root.presentViewController_animated_completion_(alert, true, null);
+    log("alert shown: " + title + " / " + message);
+    return true;
+  } catch (e) {
+    log("alert failed: " + e.message);
+    return false;
+  }
+}
+
+function start(stage, parameters) {
+  if (started) {
+    return;
+  }
+  started = true;
+  initPaths();
+  log("=== agent start ===");
+  log("stage=" + str(stage));
+  environment();
+  log("frida-agent loaded, user @eurogoth");
+  setTimeout(function () {
+    showAlert("Frida", "frida-agent loaded, user @eurogoth");
+  }, 4000);
+  log("=== agent armed ===");
+}
+
+rpc.exports = {
+  info: function () {
+    return {
+      log: logPath,
+      documents: docsPath,
+      updated: updatedPath
+    };
+  }
+};
+
+start("top-level", {});
