@@ -1,0 +1,78 @@
+name: Frida Compile
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/frida-scripts/**'
+      - '.github/workflows/frida-compile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install frida-compile
+        run: |
+          set -euo pipefail
+          npm install -g frida-compile@latest
+          which frida-compile
+
+      - name: Compile scripts
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          shopt -s nullglob
+          count=0
+          for f in scripts/frida-scripts/*.js; do
+            base=$(basename "$f" .js)
+            case "$base" in
+              _*|*.d) echo "skip $f"; continue ;;
+            esac
+            echo "=== compile $f -> build/${base}.js ==="
+            frida-compile "$f" -o "build/${base}.js" -c
+            ls -la "build/${base}.js"
+            count=$((count + 1))
+          done
+          shopt -u nullglob
+          echo "compiled: $count"
+          test "$count" -gt 0
+
+      - name: Verify output
+        run: |
+          set -euo pipefail
+          for f in build/*.js; do
+            echo "--- $f ---"
+            file "$f"
+            wc -c "$f"
+          done
+
+      - name: Report
+        if: always()
+        run: |
+          echo "=== build/ ==="
+          ls -la build/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frida-compiled
+          path: build/
+          retention-days: 30
+          if-no-files-found: warn
