@@ -1,11 +1,11 @@
 name: Build Patched Frida Framework
 
-# Собирает пропатченный Frida Gadget и упаковывает в готовый iOS .framework бандл.
+# Собирает пропатченный Frida Gadget в готовый iOS Frida.framework бандл.
 # Патчер (electrondefuser/frida-bin-patcher) вырезает сигнатуры, по которым
 # защита приложений и сам Frida Gadget детектируют факт инструментации.
 #
-# Выход: W.framework.zip, внутри:
-#   W.framework/
+# Выход: Frida.framework.zip, внутри:
+#   Frida.framework/
 #   ├── W.dylib          (пропатченный Frida Gadget)
 #   ├── Info.plist       (описание фреймворка)
 #   ├── W.config         (конфиг Gadget)
@@ -23,12 +23,6 @@ on:
         required: true
         default: '17.9.7'
         type: string
-      agent_script:
-        description:
- 'Содержимое agent.js (можно оставить пустым)'
-        required: false
-        default: ''
-        type: string
 
 permissions:
   contents: read
@@ -44,6 +38,7 @@ jobs:
     env:
       FRIDA_VERSION: ${{ inputs.frida_version || '17.9.7' }}
       PATCHER_DIR: frida-bin-patcher
+      FRAMEWORK_NAME: Frida.framework
 
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +77,8 @@ jobs:
           file W.patched.dylib
           file W.patched.dylib | grep -q arm64
 
-      - name: Verify patch        run: |
+      - name: Verify patch
+        run: |
           set -euo pipefail
           STOCK=$(stat -f%z W.stock.dylib)
           PATCHED=$(stat -f%z W.patched.dylib)
@@ -91,7 +87,6 @@ jobs:
           if [ "$STOCK" -eq "$PATCHED" ]; then
             echo "::warning::размер не изменился — патч, возможно, не применён"
           fi
-          # оригинальные маркеры Frida должны быть вычищены из строк
           if strings W.patched.dylib | grep -q "frida-gadget"; then
             echo "::error::строковый маркер 'frida-gadget' всё ещё в бинарнике"
             strings W.patched.dylib | grep "frida" | head -10
@@ -99,77 +94,77 @@ jobs:
           fi
           echo "строковые маркеры Frida вычищены"
 
-      - name: Assemble W.framework
+      - name: Assemble Frida.framework
         run: |
           set -euo pipefail
-          rm -rf W.framework
-          mkdir -p W.framework
+          rm -rf "$FRAMEWORK_NAME"
+          mkdir -p "$FRAMEWORK_NAME"
 
-          cp W.patched.dylib W.framework/W.dylib
+          cp W.patched.dylib "$FRAMEWORK_NAME/W.dylib"
 
-          cat > W.framework/Info.plist <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>W</string>
-              <key>CFBundleExecutable</key>
-              <string>W.dylib</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget.w</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>W</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleSignature</key>
-              <string>????</string>
-              <key>CFBundleSupportedPlatforms</key>
-              <array>
-                  <string>iPhoneOS</string>
-              </array>
-              <key>CFBundleVersion</key>
-              <string>17.9.7</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.9.7</string>
-              <key>DTPlatformName</key>
-              <string>iphoneos</string>
-              <key>MinimumOSVersion</key>
-              <string>12.0</string>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>arm64</string>
-              </array>
-          </dict>
-          </plist>
-          PLIST
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>CFBundleDevelopmentRegion</key>' \
+            '    <string>en</string>' \
+            '    <key>CFBundleDisplayName</key>' \
+            '    <string>Frida</string>' \
+            '    <key>CFBundleExecutable</key>' \
+            '    <string>W.dylib</string>' \
+            '    <key>CFBundleIdentifier</key>' \
+            '    <string>re.frida.gadget</string>' \
+            '    <key>CFBundleInfoDictionaryVersion</key>' \
+            '    <string>6.0</string>' \
+            '    <key>CFBundleName</key>' \
+            '    <string>Frida</string>' \
+            '    <key>CFBundlePackageType</key>' \
+            '    <string>FMWK</string>' \
+            '    <key>CFBundleSignature</key>' \
+            '    <string>????</string>' \
+            '    <key>CFBundleSupportedPlatforms</key>' \
+            '    <array>' \
+            '        <string>iPhoneOS</string>' \
+            '    </array>' \
+            '    <key>CFBundleVersion</key>' \
+            '    <string>17.9.7</string>' \
+            '    <key>CFBundleShortVersionString</key>' \
+            '    <string>17.9.7</string>' \
+            '    <key>DTPlatformName</key>' \
+            '    <string>iphoneos</string>' \
+            '    <key>MinimumOSVersion</key>' \
+            '    <string>12.0</string>' \
+            '    <key>UIRequiredDeviceCapabilities</key>' \
+            '    <array>' \
+            '        <string>arm64</string>' \
+            '    </array>' \
+            '</dict>' \
+            '</plist>' \
+            > "$FRAMEWORK_NAME/Info.plist"
 
-          cat > W.framework/W.config <<'CONFIG'
-          {
-            "interaction": {
-              "type": "script",
-              "path": "agent.js",
-              "on_change": "ignore"
-            },
-            "code_signing": "optional"
-          }
-          CONFIG
+          printf '%s\n' \
+            '{' \
+            '  "interaction": {' \
+            '    "type": "script",' \
+            '    "path": "agent.js",' \
+            '    "on_change": "ignore"' \
+            '  },' \
+            '  "code_signing": "optional"' \
+            '}' \
+            > "$FRAMEWORK_NAME/W.config"
 
-          printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > W.framework/agent.js
+          printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
 
-          plutil -lint W.framework/Info.plist
-          ls -la W.framework
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
+          ls -la "$FRAMEWORK_NAME"
 
       - name: Sign framework
         run: |
           set -euo pipefail
           brew install ldid || true
           if command -v ldid >/dev/null; then
-            ldid -S W.framework/W.dylib
+            ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
           else
             echo "::warning::ldid недоступен, оставляю неподписанный"
@@ -178,8 +173,8 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          zip -r W.framework.zip W.framework
-          shasum -a 256 W.framework.zip | tee W.framework.zip.sha256
+          zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
+          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
 
       - name: Summary
         run: |
@@ -192,15 +187,15 @@ jobs:
             echo "| frida | ${FRIDA_VERSION} |"
             echo "| patcher | electrondefuser/frida-bin-patcher |"
             echo "| arch | arm64 |"
-            echo "| размер dylib | $(stat -f%z W.framework/W.dylib) B |"
-            echo "| sha256 | \`$(shasum -a 256 W.framework.zip | cut -c1-16)\` |"
+            echo "| размер dylib | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
+            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: W.framework
+          name: Frida.framework
           path: |
-            W.framework.zip
-            W.framework.zip.sha256
+            Frida.framework.zip
+            Frida.framework.zip.sha256
           retention-days: 30
           if-no-files-found: error
