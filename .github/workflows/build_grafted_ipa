@@ -1,0 +1,58 @@
+name: Build Grafted IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download IPA
+        run: |
+          mkdir -p work
+          curl -fL -A "Mozilla/5.0" -o work/bs.ipa "https://dnull.xyz/latest_bs_i"
+
+      - name: Extract IPA and replace FridaGadget
+        run: |
+          set -euo pipefail
+          cd work
+          unzip -q bs.ipa -d extracted
+          APP_DIR=$(find extracted/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          GADGET_PATH="$APP_DIR/Frameworks/FridaGadget.dylib"
+
+          # 1. Скачиваем последний Frida Gadget для iOS (17.18.0)
+          echo "Downloading Frida Gadget 17.18.0..."
+          curl -fL -o frida-gadget.dylib.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
+          xz -d frida-gadget.dylib.xz
+          mv frida-gadget.dylib "$GADGET_PATH"
+          echo "Frida Gadget replaced with 17.18.0"
+
+          # 2. Скачиваем gum-graft (предполагаемый URL)
+          echo "Downloading gum-graft..."
+          curl -fL -o gum-graft.tar.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/gum-graft-17.18.0-macos-arm64.tar.xz"
+          tar xf gum-graft.tar.xz -C .
+
+          # 3. Применяем gum-graft к Gadget, указывая RVA функции SCIDConfig::getBool
+          echo "Applying gum-graft..."
+          ./gum-graft -i "$GADGET_PATH" -a 0xb24998
+          echo "gum-graft applied"
+
+      - name: Repack IPA
+        run: |
+          set -euo pipefail
+          cd work/extracted
+          zip -qry ../bs_grafted.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brawl-grafted-ipa
+          path: work/bs_grafted.ipa
+          retention-days: 7
