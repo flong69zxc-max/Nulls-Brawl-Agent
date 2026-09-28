@@ -1,16 +1,7 @@
-name: Build Frida.framework (byte-identical to dev)
+name: Build Frida.framework (ldid-resigned)
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -23,143 +14,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download stock
+      - name: Download and prepare stock
         run: |
           set -euo pipefail
           URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
           curl -fL --retry 3 -o gadget.xz "$URL"
           xz -d gadget.xz
           mv gadget W.fat.dylib
-          file W.fat.dylib
-          lipo -info W.fat.dylib
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+          echo "before ldid: $(stat -f%z W.thin.dylib)"
 
-      - name: Extract and adjust to match dev
+      - name: Resign with ldid (fixes segment size and blob)
         run: |
           set -euo pipefail
-          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "before adjust: $(stat -f%z W.thin.dylib)"
-
-          python3 - << 'PYEOF'
-          import struct, sys
-
-          TARGET_SIZE = 19006592
-          TARGET_SIG_SIZE = 256496
-
-          with open("W.thin.dylib", "rb") as f:
-              data = bytearray(f.read())
-
-          print(f"initial size: {len(data)}")
-
-          magic = struct.unpack_from("<I", data, 0)[0]
-          if magic != 0xFEEDFACF:
-              print(f"unexpected magic 0x{magic:x}")
-              sys.exit(1)
-
-          ncmds = struct.unpack_from("<I", data, 16)[0]
-          cmd_off = 32
-          sig_off = None
-          sig_size_off = None
-          for _ in range(ncmds):
-              cmd, cmdsize = struct.unpack_from("<II", data, cmd_off)
-              if cmd == 0x1d:
-                  off, size = struct.unpack_from("<II", data, cmd_off + 8)
-                  sig_off = off
-                  sig_size_off = cmd_off + 12
-                  print(f"LC_CODE_SIGNATURE: offset={off} size={size}")
-                  break
-              cmd_off += cmdsize
-
-          if sig_off is None:
-              print("::error::no LC_CODE_SIGNATURE")
-              sys.exit(1)
-
-          # 1. Zero out the ENTIRE blob (both dev and ours have zeroed blobs)
-          if sig_off + TARGET_SIG_SIZE <= len(data):
-              for i in range(sig_off, sig_off + TARGET_SIG_SIZE):
-                  data[i] = 0
-              print(f"zeroed {TARGET_SIG_SIZE} bytes at 0x{sig_off:x}")
-          else:
-              print(f"::error::sig_off + target > data ({sig_off + TARGET_SIG_SIZE} > {len(data)})")
-              sys.exit(1)
-
-          # 2. Truncate extra 176 bytes
-          if len(data) > TARGET_SIZE:
-              removed = len(data) - TARGET_SIZE
-              del data[TARGET_SIZE:]
-              print(f"truncated {removed} bytes from end")
-
-          # 3. Update LC_CODE_SIGNATURE.datasize
-          struct.pack_into("<I", data, sig_size_off, TARGET_SIG_SIZE)
-          print(f"updated LC_CODE_SIGNATURE.datasize -> {TARGET_SIG_SIZE}")
-
-          with open("W.thin.dylib", "wb") as f:
-              f.write(data)
-          print(f"final size: {len(data)}")
-          PYEOF
-
-          echo "after adjust: $(stat -f%z W.thin.dylib)"
-          echo "tail 32 bytes:"
-          tail -c 32 W.thin.dylib | od -An -tx1
+          brew install ldid || true
+          # ldid -S: remove old signature, write new one, fix __LINKEDIT
+          ldid -S W.thin.dylib
+          echo "after ldid: $(stat -f%z W.thin.dylib)"
+          codesign -dvv W.thin.dylib 2>&1 | head -10 || true
 
       - name: Wrap into fat
         run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           file W.dylib
-          lipo -info W.dylib
           echo "fat size: $(stat -f%z W.dylib)"
-          echo "head:"
-          head -c 32 W.dylib | od -An -tx1
-          echo "tail:"
-          tail -c 32 W.dylib | od -An -tx1
 
       - name: Compare with dev
         run: |
           set -euo pipefail
-          if [ ! -f W.dylib.zip ]; then
-            echo "no W.dylib.zip in repo, skipping comparison"
-            exit 0
-          fi
-          mkdir -p dev
-          unzip -o W.dylib.zip -d dev > /dev/null
-          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          cp "$DEV" W.dev.dylib
-
-          echo "=== sizes ==="
-          echo "dev:  $(stat -f%z W.dev.dylib)"
-          echo "ours: $(stat -f%z W.dylib)"
-          echo "diff: $(( $(stat -f%z W.dylib) - $(stat -f%z W.dev.dylib) ))"
-
-          echo ""
-          echo "=== byte-by-byte diff ==="
-          python3 - << 'PYEOF'
+          if [ -f W.dylib.zip ]; then
+            mkdir -p dev
+            unzip -o W.dylib.zip -d dev > /dev/null
+            DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
+            cp "$DEV" W.dev.dylib
+            echo "dev:  $(stat -f%z W.dev.dylib)"
+            echo "ours: $(stat -f%z W.dylib)"
+            python3 - << 'PYEOF'
           with open("W.dev.dylib","rb") as f: dev = f.read()
           with open("W.dylib","rb") as f: ours = f.read()
-
-          if len(dev) != len(ours):
-              print(f"::error::length mismatch: dev={len(dev)} ours={len(ours)}")
-
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print(f"total differing bytes: {len(diffs)}")
-          if diffs:
-              print("first 20 offsets:")
-              for i in diffs[:20]:
-                  print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
-              print("last 10 offsets:")
-              for i in diffs[-10:]:
-                  print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
-          else:
-              print("OK: byte-identical to dev")
+          for i in diffs[:20]:
+              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
           PYEOF
+          fi
 
-      - name: Assemble Frida.framework
+      - name: Assemble framework
         run: |
           set -euo pipefail
-          rm -rf "$FRAMEWORK_NAME"
-          mkdir -p "$FRAMEWORK_NAME"
+          rm -rf "$FRAMEWORK_NAME"; mkdir -p "$FRAMEWORK_NAME"
           cp W.dylib "$FRAMEWORK_NAME/W.dylib"
-
           cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -177,16 +83,13 @@ jobs:
           </dict>
           </plist>
           PLIST
-
           cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
           {
             "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
             "code_signing": "required"
           }
           CONFIG
-
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
@@ -196,14 +99,8 @@ jobs:
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
           ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
           ls -la Frida.framework.zip
-          unzip -l Frida.framework.zip
-          shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: Frida.framework
-          path: |
-            Frida.framework.zip
-            Frida.framework.zip.sha256
-          retention-days: 30
-          if-no-files-found: error
+          path: Frida.framework.zip
