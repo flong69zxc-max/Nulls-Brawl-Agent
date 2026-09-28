@@ -1,74 +1,129 @@
-name: Build Frida.framework 17.9.7
+name: Build Patched Frida Framework
+
+# Собирает пропатченный Frida Gadget и упаковывает в готовый iOS .framework бандл.
+# Патчер (electrondefuser/frida-bin-patcher) вырезает сигнатуры, по которым
+# защита приложений и сам Frida Gadget детектируют факт инструментации.
+#
+# Выход: W.framework.zip, внутри:
+#   W.framework/
+#   ├── W.dylib          (пропатченный Frida Gadget)
+#   ├── Info.plist       (описание фреймворка)
+#   ├── W.config         (конфиг Gadget)
+#   └── agent.js         (заглушка, заменишь своим скриптом)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
   workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'Версия Frida Gadget (например 17.9.7)'
+        required: true
+        default: '17.9.7'
+        type: string
+      agent_script:
+        description:
+ 'Содержимое agent.js (можно оставить пустым)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 20
+    env:
+      FRIDA_VERSION: ${{ inputs.frida_version || '17.9.7' }}
+      PATCHER_DIR: frida-bin-patcher
+
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Resolve agent script
-        id: agent
+      - name: Download patcher
         run: |
           set -euo pipefail
-          for p in scripts/agents.js scripts/agent.js agent/agents.js agent/agent.js scripts/frida-scripts/agent.js; do
-            if [ -f "$p" ]; then echo "path=$p" >> "$GITHUB_OUTPUT"; echo "found: $p"; exit 0; fi
-          done
-          echo "::error::agent script not found"
-          exit 1
+          git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
+          cd "$PATCHER_DIR"
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+          python3 -c "import lief; print('lief', lief.__version__)"
 
-      - uses: actions/cache@v4
-        id: cache-gadget
-        with:
-          path: gadget-cache
-          key: frida-gadget-17.9.7-ios-universal-v1
-
-      - name: Download Frida Gadget 17.9.7
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
+      - name: Download Frida Gadget
         run: |
           set -euo pipefail
-          mkdir -p gadget-cache
-          curl -fL -o /tmp/frida.xz \
-            "https://github.com/frida/frida/releases/download/17.9.7/frida-gadget-17.9.7-ios-universal.dylib.xz"
-          xz -d /tmp/frida.xz
-          mv /tmp/frida gadget-cache/FridaGadget.dylib
-          file gadget-cache/FridaGadget.dylib
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          echo "downloading $URL"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
+          xz -d gadget.dylib.xz
+          mv gadget.dylib W.stock.dylib
+          file W.stock.dylib
+          otool -l W.stock.dylib | grep -A4 LC_BUILD_VERSION | head -20
 
-      - name: Thin to arm64
+      - name: Patch binary
         run: |
           set -euo pipefail
-          lipo gadget-cache/FridaGadget.dylib -thin arm64 -output gadget-cache/FridaGadget-arm64
-          lipo -info gadget-cache/FridaGadget-arm64
-          ls -la gadget-cache/
+          cd "$PATCHER_DIR"
+          python3 main.py \
+            --binarypath "../W.stock.dylib" \
+            --output "../W.patched.dylib"
+          cd ..
+          ls -l W.patched.dylib
+          file W.patched.dylib
+          file W.patched.dylib | grep -q arm64
 
-      - name: Build Frida.framework
+      - name: Verify patch        run: |
+          set -euo pipefail
+          STOCK=$(stat -f%z W.stock.dylib)
+          PATCHED=$(stat -f%z W.patched.dylib)
+          echo "stock: $STOCK bytes"
+          echo "patched: $PATCHED bytes"
+          if [ "$STOCK" -eq "$PATCHED" ]; then
+            echo "::warning::размер не изменился — патч, возможно, не применён"
+          fi
+          # оригинальные маркеры Frida должны быть вычищены из строк
+          if strings W.patched.dylib | grep -q "frida-gadget"; then
+            echo "::error::строковый маркер 'frida-gadget' всё ещё в бинарнике"
+            strings W.patched.dylib | grep "frida" | head -10
+            exit 1
+          fi
+          echo "строковые маркеры Frida вычищены"
+
+      - name: Assemble W.framework
         run: |
           set -euo pipefail
-          mkdir -p Frida.framework
-          cp gadget-cache/FridaGadget-arm64 Frida.framework/W.dylib
-          chmod +x Frida.framework/W.dylib
-          cp "${{ steps.agent.outputs.path }}" Frida.framework/agent.js
-          cat > Frida.framework/Info.plist << 'EOF'
+          rm -rf W.framework
+          mkdir -p W.framework
+
+          cp W.patched.dylib W.framework/W.dylib
+
+          cat > W.framework/Info.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>W</string>
               <key>CFBundleExecutable</key>
               <string>W.dylib</string>
               <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
+              <string>re.frida.gadget.w</string>
               <key>CFBundleInfoDictionaryVersion</key>
               <string>6.0</string>
               <key>CFBundleName</key>
-              <string>Frida</string>
+              <string>W</string>
               <key>CFBundlePackageType</key>
               <string>FMWK</string>
               <key>CFBundleSignature</key>
@@ -84,41 +139,68 @@ jobs:
               <key>DTPlatformName</key>
               <string>iphoneos</string>
               <key>MinimumOSVersion</key>
-              <string>11.0</string>
+              <string>12.0</string>
               <key>UIRequiredDeviceCapabilities</key>
               <array>
                   <string>arm64</string>
               </array>
           </dict>
           </plist>
-          EOF
-          cat > Frida.framework/FridaGadget.config << 'EOF'
+          PLIST
+
+          cat > W.framework/W.config <<'CONFIG'
           {
             "interaction": {
               "type": "script",
               "path": "agent.js",
               "on_change": "ignore"
             },
-            "code_signing": "required"
+            "code_signing": "optional"
           }
-          EOF
-          ls -la Frida.framework/
+          CONFIG
 
-      - name: Publish Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > W.framework/agent.js
+
+          plutil -lint W.framework/Info.plist
+          ls -la W.framework
+
+      - name: Sign framework
         run: |
           set -euo pipefail
-          cd Frida.framework
-          zip -qry ../Frida.framework.zip .
-          cd ..
-          TAG="frida-framework-17.9.7-$(date +%Y%m%d)-r${{ github.run_number }}"
-          gh release create "$TAG" Frida.framework.zip \
-            --title "$TAG" \
-            --notes "Frida 17.9.7 arm64 thin, Interceptor fix for iOS 26+"
+          brew install ldid || true
+          if command -v ldid >/dev/null; then
+            ldid -S W.framework/W.dylib
+            echo "signed W.dylib"
+          else
+            echo "::warning::ldid недоступен, оставляю неподписанный"
+          fi
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          zip -r W.framework.zip W.framework
+          shasum -a 256 W.framework.zip | tee W.framework.zip.sha256
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### patched frida framework"
+            echo ""
+            echo "| параметр | значение |"
+            echo "|---|---|"
+            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| patcher | electrondefuser/frida-bin-patcher |"
+            echo "| arch | arm64 |"
+            echo "| размер dylib | $(stat -f%z W.framework/W.dylib) B |"
+            echo "| sha256 | \`$(shasum -a 256 W.framework.zip | cut -c1-16)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Frida.framework-17.9.7
-          path: Frida.framework/
-          retention-days: 7
+          name: W.framework
+          path: |
+            W.framework.zip
+            W.framework.zip.sha256
+          retention-days: 30
+          if-no-files-found: error
