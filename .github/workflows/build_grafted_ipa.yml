@@ -1,4 +1,4 @@
-name: Build Frida Framework
+name: Build Patched Frida Framework
 
 on:
   push:
@@ -17,45 +17,97 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
-      FRIDA_VERSION: '17.16.4'
+      FRIDA_VERSION: '17.9.7'
+      PATCHER_DIR: frida-bin-patcher
       FRAMEWORK_NAME: Frida.framework
-      GADGET_URL: https://github.com/frida/frida/releases/download/17.16.4/frida-gadget-17.16.4-ios-universal.dylib.xz
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      - name: Download patcher
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
+          cd "$PATCHER_DIR"
+          sed -i '' 's/^lief==.*/lief==1.0.0/' requirements.txt
+          python3 -m venv venv
+          source venv/bin/activate
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+          python3 -c "import lief; print('lief', lief.__version__)"
+
       - name: Download Frida Gadget
         run: |
           set -euo pipefail
-          echo "downloading ${GADGET_URL}"
-          curl -fL --retry 3 -o gadget.dylib.xz "${GADGET_URL}"
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
-          ls -l W.stock.dylib
           file W.stock.dylib
+          otool -l W.stock.dylib | grep -A4 LC_BUILD_VERSION | head -10 || true
 
-      - name: Verify platform
-        continue-on-error: true
+      - name: Patch Frida strings
         run: |
           set -euo pipefail
-          file W.stock.dylib | grep -q arm64 || {
-            echo "::error::not arm64"; exit 1
-          }
-          echo "--- platform info ---"
-          otool -l W.stock.dylib | grep -E 'LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS' | head -10 || true
-          echo "--- done ---"
+          cd "$PATCHER_DIR"
+          source venv/bin/activate
+          python main.py --binarypath "../W.stock.dylib" --output "../W.patched.dylib"
+          cd ..
+          ls -l W.patched.dylib
+          file W.patched.dylib
+
+      - name: Patch BRK #0x539
+        run: |
+          set -euo pipefail
+          cat > patch_brk.py <<'PYEOF'
+          import sys
+
+          def patch_brk(input_path, output_path):
+              with open(input_path, 'rb') as f:
+                  data = bytearray(f.read())
+              brk_pattern = bytes.fromhex('20 A7 20 D4')  # BRK #0x539 (little-endian)
+              nop = bytes.fromhex('1F 20 03 D5')          # NOP
+              count = 0
+              idx = 0
+              while True:
+                  idx = data.find(brk_pattern, idx)
+                  if idx == -1:
+                      break
+                  data[idx:idx+4] = nop
+                  count += 1
+                  idx += 4
+              with open(output_path, 'wb') as f:
+                  f.write(data)
+              print(f"Patched {count} BRK #0x539 instructions")
+
+          if __name__ == '__main__':
+              patch_brk(sys.argv[1], sys.argv[2])
+          PYEOF
+          python3 patch_brk.py W.patched.dylib W.brk-patched.dylib
+          file W.brk-patched.dylib
+
+      - name: Verify patch
+        run: |
+          set -euo pipefail
+          if strings W.brk-patched.dylib | grep -q "frida-gadget"; then
+            echo "::error::frida-gadget string still present"
+            exit 1
+          fi
+          if xxd W.brk-patched.dylib | grep -q "20a720d4"; then
+            echo "::warning::BRK #0x539 still present"
+          fi
+          echo "patch verification passed"
 
       - name: Assemble Frida.framework
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
-
-          cp W.stock.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.brk-patched.dylib "$FRAMEWORK_NAME/W.dylib"
 
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -83,9 +135,9 @@ jobs:
             '        <string>iPhoneOS</string>' \
             '    </array>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>17.16.4</string>' \
+            '    <string>17.9.7</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>17.16.4</string>' \
+            '    <string>17.9.7</string>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -135,11 +187,12 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### frida framework"
+            echo "### patched frida framework"
             echo ""
             echo "| param | value |"
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
+            echo "| patch | frida-bin-patcher + BRK #0x539 → NOP |"
             echo "| arch | arm64 |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
