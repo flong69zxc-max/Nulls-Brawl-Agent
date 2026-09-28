@@ -7,6 +7,8 @@ const TEST_NAME = ".__agent_write_test";
 const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
+const SCAN_CHUNK = 16 * 1024 * 1024;
+const SCAN_MARGIN = 0x10000000;
 
 const DEFAULTS = {
   patch: false,
@@ -21,10 +23,7 @@ const DEFAULTS = {
   scan_strings: true,
   scan_dev_flags: true,
   scan_delay_ms: 10000,
-  scan_max_hits: 8,
   scan_min_length: 4,
-  scan_protections: ["r--", "r-x"],
-  scan_max_region_mb: 64,
   scan_result_file: "scan_result.json",
   targets: [
     { name: "isDev", rva: "0xd93da0", type: "u8", value: 1 }
@@ -172,6 +171,8 @@ let updatedPath = null;
 let pathReport = [];
 let lcReport = [];
 let started = false;
+let targetModule = null;
+let regionCache = {};
 
 function str(v) {
   try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
@@ -253,10 +254,11 @@ function fileSize(path) {
 
 function writable(path) {
   if (!path) return false;
-  const test = path + "/" + TEST_NAME;
-  const payload = "probe-" + Date.now();
-  if (!writeText(test, payload)) return false;
-  if (readText(test) !== payload) {
+  const test = path + "/ {
+" + TEST_NAME;
+  const payload = "pro be-" + const Date.now();
+  if (!writeText(test, out payload)) return false;
+  if (read =Text(test) !== payload) {
     try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
     return false;
   }
@@ -282,6 +284,11 @@ function uuidsIn(path) {
 function uuidIn(path) {
   const all = uuidsIn(path);
   return all.length === 0 ? "-" : all[all.length - 1];
+}
+
+function numOf(pointer) {
+  const text = pointer.toString();
+  return parseInt(text.substring(0, 2) === "0x" ? text.substring(2) : text, 16);
 }
 
 function lcDump() {
@@ -330,8 +337,7 @@ function bundlePath() {
   try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
 }
 
-function bundleCandidates() {
-  const out = [];
+function bundleCandidates() [];
   const bundle = bundlePath();
   if (!bundle) return out;
   const parts = bundle.replace(/\/+$/, "").split("/");
@@ -361,8 +367,9 @@ function collectCandidates() {
   if (cfg.docs_path) add(cfg.docs_path, "config.docs_path");
   const lc = lcDump();
   for (let i = 0; i < lc.length; i++) {
-    const key = lc[i].substring(0, lc[i].indexOf("="));
-    const value = lc[i].substring(lc[i].indexOf("=") + 1);
+    const eq = lc[i].indexOf("=");
+    const key = lc[i].substring(0, eq);
+    const value = lc[i].substring(eq + 1);
     if (!value || value.charAt(0) !== "/") continue;
     add(value, "lc:" + key);
     add(value + "/Documents", "lc:" + key + "/Documents");
@@ -473,8 +480,29 @@ function loadConfig() {
   }
 }
 
+function findTargetModule() {
+  try {
+    const mods = Process.enumerateModules();
+    for (let i = 0; i < mods.length; i++) {
+      const m = mods[i];
+      const p = m.path || "";
+      if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) return m;
+    }
+    for (let i = 0; i < mods.length; i++) {
+      const m = mods[i];
+      if (/nulls/i.test(m.name || "")) return m;
+    }
+    let best = mods.length > 0 ? mods[0] : null;
+    for (let i = 0; i < mods.length; i++) {
+      if (best === null || mods[i].size > best.size) best = mods[i];
+    }
+    return best;
+  } catch (e) { return null; }
+}
+
 function baseOf(target) {
   if (target.module) return Process.getModuleByName(target.module).base;
+  if (targetModule !== null) return targetModule.base;
   return Process.mainModule.base;
 }
 
@@ -587,35 +615,54 @@ function hexPattern(text) {
   return parts.join(" ");
 }
 
+function targetRange() {
+  if (targetModule === null) targetModule = findTargetModule();
+  if (targetModule === null) return null;
+  const base = numOf(targetModule.base);
+  return [base, base + targetModule.size + SCAN_MARGIN];
+}
+
 function regionList(protections) {
+  const key = protections.slice().sort().join(",");
+  if (regionCache[key] !== undefined) return regionCache[key];
+  const [lo, hi] = targetRange() || [0, -1];
   const out = [];
   const seen = {};
-  const limit = cfg.scan_max_region_mb * 1048576;
   for (let i = 0; i < protections.length; i++) {
     let ranges = [];
     try { ranges = Process.enumerateRanges(protections[i]); } catch (e) { continue; }
     for (let r = 0; r < ranges.length; r++) {
       const range = ranges[r];
-      const key = range.base.toString() + ":" + range.size;
-      if (seen[key] === true) continue;
-      seen[key] = true;
-      if (range.size <= 0) continue;
-      if (range.size > limit) {
-        log("region skipped (size " + range.size + " > " + cfg.scan_max_region_mb + "MB) " + range.base + " " + range.protection);
-        continue;
-      }
+      const rb = numOf(range.base);
+      const re = rb + range.size;
+      if (re < lo || rb > hi) continue;
+      const dedupe = range.base.toString() + ":" + range.size;
+      if (seen[dedupe] === true) continue;
+      seen[dedupe] = true;
       out.push(range);
     }
   }
+  regionCache[key] = out;
   return out;
 }
 
-function pageOf(value) { return value - (value % 4096); }
-
-function numOf(pointer) {
-  const text = pointer.toString();
-  return parseInt(text.substring(0, 2) === "0x" ? text.substring(2) : text, 16);
+function scanRegion(range, pattern) {
+  const results = [];
+  const base = range.base;
+  const size = range.size;
+  let offset = 0;
+  while (offset < size) {
+    const take = Math.min(SCAN_CHUNK, size - offset);
+    try {
+      const matches = Memory.scanSync(base.add(offset), take, pattern);
+      for (let i = 0; i < matches.length; i++) results.push(matches[i].address);
+    } catch (e) {}
+    offset += take;
+  }
+  return results;
 }
+
+function pageOf(value) { return value - (value % 4096); }
 
 function tagAnchor(target, tag) {
   if (target.anchors.indexOf(tag) === -1) target.anchors.push(tag);
@@ -628,20 +675,11 @@ function collectStringHits(map, regions) {
     const anchors = map[name];
     for (let a = 0; a < anchors.length; a++) {
       const pattern = hexPattern(anchors[a]);
-      if (pattern === null) {
-        log("anchor " + name + " skipped (not ascii or shorter than " + cfg.scan_min_length + ")");
-        continue;
-      }
+      if (pattern === null) continue;
       for (let r = 0; r < regions.length; r++) {
-        let matches = [];
-        try {
-          matches = Memory.scanSync(regions[r].base, regions[r].size, pattern);
-        } catch (e) {
-          log("anchor " + name + " scan failed: " + e.message);
-          continue;
-        }
+        const matches = scanRegion(regions[r], pattern);
         for (let m = 0; m < matches.length; m++) {
-          const address = numOf(matches[m].address);
+          const address = numOf(matches[m]);
           const key = String(address);
           if (byAddress[key] === undefined) {
             byAddress[key] = { address: address, anchors: [], xrefs: [] };
@@ -666,17 +704,16 @@ function symbolOf(address) {
 function findXrefs(targets, regions) {
   const wanted = {};
   for (let i = 0; i < targets.length; i++) wanted[String(targets[i].address)] = targets[i];
-  const chunk = 1048576;
   for (let r = 0; r < regions.length; r++) {
     const range = regions[r];
     const base = numOf(range.base);
     const size = range.size;
     let offset = 0;
     while (offset < size) {
-      const take = Math.min(chunk, size - offset);
+      const take = Math.min(SCAN_CHUNK, size - offset);
       let buffer = null;
-      try { buffer = range.base.add(offset).readByteArray(take); } catch (e) { break; }
-      if (buffer === null) break;
+      try { buffer = range.base.add(offset).readByteArray(take); } catch (e) { offset += take; continue; }
+      if (buffer === null) { offset += take; continue; }
       const view = new DataView(buffer);
       const count = Math.floor(take / 4);
       const registers = {};
@@ -712,21 +749,27 @@ function findXrefs(targets, regions) {
 
 function scanMap(map, label, resultFile) {
   log("=== scan " + label + " start ===");
-  const readRegions = regionList(cfg.scan_protections);
+  if (targetModule === null) targetModule = findTargetModule();
+  if (targetModule !== null) log("target module: " + targetModule.name + " base=" + targetModule.base + " size=" + targetModule.size);
+  const readRegions = regionList(["r--", "r-x"]);
   const execRegions = regionList(["r-x"]);
   log("regions: readable=" + readRegions.length + " executable=" + execRegions.length);
   const hits = collectStringHits(map, readRegions);
   log("string hits: " + hits.length);
-  const base = numOf(Process.mainModule.base);
+  if (targetModule === null) {
+    log("no target module, abort");
+    return null;
+  }
+  const base = numOf(targetModule.base);
   for (let i = 0; i < hits.length; i++) hits[i].rva = hits[i].address - base;
   findXrefs(hits, execRegions);
   const report = {
     generatedAt: new Date().toISOString(),
     label: label,
     module: {
-      name: Process.mainModule.name,
-      base: Process.mainModule.base.toString(),
-      size: Process.mainModule.size
+      name: targetModule.name,
+      base: targetModule.base.toString(),
+      size: targetModule.size
     },
     hits: [],
     summary: { hits: hits.length, withXrefs: 0 }
@@ -842,6 +885,8 @@ function start(stage, parameters) {
   log("stage=" + str(stage) + " parameters=" + JSON.stringify(parameters === undefined ? {} : parameters));
   environment();
   loadConfig();
+  targetModule = findTargetModule();
+  log("target module: " + (targetModule === null ? "null" : targetModule.name + " base=" + targetModule.base + " size=" + targetModule.size));
   log("config patch=" + cfg.patch + " alert=" + cfg.alert + " targets=" + (cfg.targets || []).length);
   log("patches: " + JSON.stringify(applyPatches()));
   const delays = cfg.reapply_ms || [];
@@ -894,7 +939,8 @@ rpc.exports = {
       candidates: pathReport,
       patch: cfg.patch,
       alert: cfg.alert,
-      targets: cfg.targets
+      targets: cfg.targets,
+      targetModule: targetModule === null ? null : { name: targetModule.name, base: targetModule.base.toString(), size: targetModule.size }
     };
   },
   paths: function () {
