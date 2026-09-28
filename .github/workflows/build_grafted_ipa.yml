@@ -160,26 +160,19 @@ jobs:
         run: |
           set -euo pipefail
           brew install ldid
-          rm -rf /tmp/insert_dylib
           git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
           cd /tmp/insert_dylib
           xcodebuild -project insert_dylib.xcodeproj \
             -scheme insert_dylib \
             -configuration Release \
-            -derivedDataPath ./dd \
-            build \
+            SYMROOT="$PWD/build" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            build \
             2>&1 | tail -5
-          IDBIN=$(find /tmp/insert_dylib/dd -name insert_dylib -type f | head -n1)
-          if [ -z "$IDBIN" ]; then
-            echo "::error::insert_dylib not found in DerivedData"
-            find /tmp/insert_dylib -name "insert_dylib*" -type f
-            exit 1
-          fi
-          echo "built: $IDBIN"
-          sudo cp "$IDBIN" /usr/local/bin/insert_dylib
+          ls -la build/Release/
+          sudo cp build/Release/insert_dylib /usr/local/bin/
           sudo chmod +x /usr/local/bin/insert_dylib
           which insert_dylib ldid
           otool -hv /usr/local/bin/insert_dylib | head -5
