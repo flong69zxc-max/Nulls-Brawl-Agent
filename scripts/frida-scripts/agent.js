@@ -20,38 +20,67 @@ const DEFAULTS = {
 let cfg = {};
 let logPath = null;
 let docsPath = null;
-let updatedPath = nulllet;
+let updatedPath = null;
 let started = false;
 let targetModule = null;
 let callCount = 0;
 
 function str(v) {
-  try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
+  try {
+    return v === null || v === undefined ? null : v.toString();
+  } catch (e) {
+    return null;
+  }
 }
 
 function log(line) {
-  const text = new Date().toISOString() + " " + line;
-  try { console.log(text); } catch (e) {}
-  if (logPath === null) return;
+  let text = "";
   try {
-    const f = new File(logPath, "a");
+    text = new Date().toISOString() + " " + line;
+  } catch (e) {
+    text = "log " + line;
+  }
+  try {
+    console.log(text);
+  } catch (e) {}
+  if (logPath === null) {
+    return;
+  }
+  let f = null;
+  try {
+    f = new File(logPath, "a");
     f.write(text + "\n");
     f.flush();
     f.close();
-  } catch (e) {}
+    f = null;
+  } catch (e) {
+    if (f !== null) {
+      try {
+        f.close();
+      } catch (e2) {}
+    }
+  }
 }
 
-function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
+function fileManager() {
+  return ObjC.classes.NSFileManager.defaultManager();
+}
 
 function mkdir(path) {
   try {
     fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(path, true, null, null);
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    return false;
+  }
 }
 
 function exists(path) {
-  try { return fileManager().fileExistsAtPath_(path) === true; } catch (e) { return false; }
+  try {
+    return fileManager().fileExistsAtPath_(path) === true;
+  } catch (e) {
+    return false;
+  }
 }
 
 function readText(path) {
@@ -60,29 +89,41 @@ function readText(path) {
     const text = f.readText();
     f.close();
     return text;
-  } catch (e) { return null; }
+  } catch (e) {
+    return null;
+  }
 }
 
 function writeText(path, text) {
   try {
     const f = new File(path, "w");
     f.write(text);
-    i f.flush();
-    = f.close();
-    return  true;
-  } catch (e) { return false; }
+    f.flush();
+    f.close();
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 function writable(path) {
-  if (!path) return false;
-  const test = path + "/" + TEST_NAME;
-  const payload = "probe-" + Date.now();
-  if0 (!writeText(test, payload)) return false;
-  if (;readText(test) !== payload) {
-    try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
+  if (!path) {
     return false;
   }
-  try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
+  const test = path + "/" + TEST_NAME;
+  const payload = "probe-" + Date.now();
+  if (!writeText(test, payload)) {
+    return false;
+  }
+  if (readText(test) !== payload) {
+    try {
+      fileManager().removeItemAtPath_error_(test, null);
+    } catch (e) {}
+    return false;
+  }
+  try {
+    fileManager().removeItemAtPath_error_(test, null);
+  } catch (e) {}
   return true;
 }
 
@@ -92,7 +133,9 @@ function documentsDir() {
     const bundle = str(ObjC.classes.NSBundle.mainBundle().bundlePath());
     if (bundle) {
       const m = /^(.*)\/Applications\/[^\/]+\.app\/?$/.exec(bundle);
-      if (m) candidates.push(m[1]);
+      if (m) {
+        candidates.push(m[1]);
+      }
       const parts = bundle.replace(/\/+$/, "").split("/");
       if (parts.length >= 3) {
         candidates.push(parts.slice(0, -2).join("/"));
@@ -104,17 +147,23 @@ function documentsDir() {
     const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
     if (urls !== null && urls.count() > 0) {
       const p = str(urls.firstObject().path());
-      if (p) candidates.push(p);
+      if (p) {
+        candidates.push(p);
+      }
     }
   } catch (e) {}
   try {
     const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
     const home = fn().readUtf8String();
-    if (home) candidates.push(home + "/Documents");
+    if (home) {
+      candidates.push(home + "/Documents");
+    }
   } catch (e) {}
   candidates.push("/tmp");
-  for ( i < candidates.length; i++) {
-    if (writable(candidates[i])) return candidates[i];
+  for (let i = 0; i < candidates.length; i++) {
+    if (writable(candidates[i])) {
+      return candidates[i];
+    }
   }
   return null;
 }
@@ -122,29 +171,52 @@ function documentsDir() {
 function initPaths() {
   docsPath = documentsDir();
   updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
-  if (updatedPath !== null) mkdir(updatedPath);
+  if (updatedPath !== null) {
+    mkdir(updatedPath);
+  }
 
   const chain = [];
-  if (updatedPath !== null) chain.push(updatedPath + "/" + LOG_NAME);
-  if (docsPath !== null) chain.push(docsPath + "/" + LOG_NAME);
+  if (updatedPath !== null) {
+    chain.push(updatedPath + "/" + LOG_NAME);
+  }
+  if (docsPath !== null) {
+    chain.push(docsPath + "/" + LOG_NAME);
+  }
   chain.push("/tmp/" + LOG_NAME);
 
   for (let i = 0; i < chain.length; i++) {
     const candidate = chain[i];
     const cut = candidate.lastIndexOf("/");
-    const dir = cut < 1 ? null : candidate.substring(0, cut);
-    if (dir === null) continue;
-    if (!exists(dir)) mkdir(dir);
-    if (!writable(dir)) continue;
-    if (!writeText(candidate, "")) continue;
+    if (cut < 1) {
+      continue;
+    }
+    const dir = candidate.substring(0, cut);
+    if (!exists(dir)) {
+      mkdir(dir);
+    }
+    if (!writable(dir)) {
+      continue;
+    }
+    if (!writeText(candidate, "")) {
+      continue;
+    }
     logPath = candidate;
     break;
+  }
+  if (logPath === null) {
+    try {
+      console.log("[agent] no writable directory for log");
+    } catch (e) {}
+    return;
   }
   log("log opened at " + logPath);
 }
 
 function loadConfig() {
-  if (updatedPath === null) { cfg = JSON.parse(JSON.stringify(DEFAULTS)); return; }
+  if (updatedPath === null) {
+    cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    return;
+  }
   const path = updatedPath + "/" + CFG_NAME;
   const text = readText(path);
   if (text === null) {
@@ -169,58 +241,103 @@ function findTargetModule() {
     for (let i = 0; i < mods.length; i++) {
       const m = mods[i];
       const p = m.path || "";
-      if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) return m;
+      if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) {
+        log("target module matched NB.app: " + m.name + " " + m.base + " size=" + m.size);
+        return m;
+      }
     }
     for (let i = 0; i < mods.length; i++) {
-      if (/nulls/i.test(mods[i].name || "")) return mods[i];
+      const m = mods[i];
+      if (/nulls/i.test(m.name || "")) {
+        log("target module matched name: " + m.name + " " + m.base);
+        return m;
+      }
     }
     let best = mods.length > 0 ? mods[0] : null;
     for (let i = 0; i < mods.length; i++) {
-      if (best === null || mods[i].size > best.size) best = mods[i];
+      if (best === null || mods[i].size > best.size) {
+        best = mods[i];
+      }
+    }
+    if (best !== null) {
+      log("target module fallback largest: " + best.name + " " + best.base);
     }
     return best;
-  } catch (e) { return null; }
+  } catch (e) {
+    log("findTargetModule failed: " + e.message);
+    return null;
+  }
 }
 
 function readArgAsString(arg) {
-  if (arg.isNull()) return null;
-  let out = null;
+  if (arg === null || arg === undefined) {
+    return null;
+  }
+  if (arg.isNull()) {
+    return null;
+  }
   try {
     const obj = new ObjC.Object(arg);
     const cls = obj.$className;
-    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls)) {
-      out = obj.toString();
-      if (out !== null && out.length > 0) return out;
+    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls) || /^__NSCF/.test(cls)) {
+      const out = obj.toString();
+      if (out !== null && out.length > 0) {
+        return out;
+      }
     }
   } catch (e) {}
   try {
     const s = arg.readUtf8String();
-    if (s !== null && s.length > 0 && s.length < 200) return s;
+    if (s !== null && s.length > 0 && s.length < 200) {
+      return s;
+    }
   } catch (e) {}
   try {
     const p = arg.readPointer();
     if (!p.isNull()) {
       const s2 = p.readUtf8String();
-      if (s2 !== null && s2.length > 0 && s2.length < 200) return s2;
+      if (s2 !== null && s2.length > 0 && s2.length < 200) {
+        return s2;
+      }
     }
   } catch (e) {}
-  return out;
+  return null;
 }
 
 function shouldSkipName(name) {
-  if (!name) return false;
-  if (name.length < 2) return true;
-  if (name.length > 120) return true;
+  if (!name) {
+    return true;
+  }
+  if (name.length < 2) {
+    return true;
+  }
+  if (name.length > 120) {
+    return true;
+  }
   let printable = 0;
   for (let i = 0; i < name.length; i++) {
     const c = name.charCodeAt(i);
-    if (c >= 32 && c < 127) printable++;
+    if (c >= 32 && c < 127) {
+      printable++;
+    }
   }
   return printable / name.length < 0.7;
 }
 
+function matchesRule(name, rule) {
+  if (!rule || rule.length === 0) {
+    return false;
+  }
+  if (name === rule) {
+    return true;
+  }
+  return name.indexOf(rule) !== -1;
+}
+
 function setupGetBoolHook() {
-  if (targetModule === null) targetModule = findTargetModule();
+  if (targetModule === null) {
+    targetModule = findTargetModule();
+  }
   if (targetModule === null) {
     log("no target module, abort hook");
     return;
@@ -238,30 +355,31 @@ function setupGetBoolHook() {
     Interceptor.attach(addr, {
       onEnter: function (args) {
         this.name = readArgAsString(args[0]);
-        this.tid = Process.getCurrentThreadId();
         if (cfg.log_all_calls && this.name !== null && !shouldSkipName(this.name)) {
           callCount++;
           if (callCount <= cfg.log_limit) {
             log("getBool ENTER name=\"" + this.name + "\"");
           } else if (callCount === cfg.log_limit + 1) {
-            log("getBool ENTER ... (log limit reached, further calls not logged)");
+            log("getBool ENTER ... (log limit reached)");
           }
         }
       },
       onLeave: function (retval) {
         const name = this.name;
-        if (name === null) return;
+        if (name === null) {
+          return;
+        }
         const forceTrue = cfg.force_true || [];
         const forceFalse = cfg.force_false || [];
         for (let i = 0; i < forceTrue.length; i++) {
-          if (name === forceTrue[i] || (forceTrue[i].length > 0 && name.indexOf(forceTrue[i]) !== -1)) {
+          if (matchesRule(name, forceTrue[i])) {
             log("getBool FORCE-TRUE \"" + name + "\" was=" + retval.toInt32());
             retval.replace(ptr(1));
             return;
           }
         }
         for (let i = 0; i < forceFalse.length; i++) {
-          if (name === forceFalse[i] || (forceFalse[i].length > 0 && name.indexOf(forceFalse[i]) !== -1)) {
+          if (matchesRule(name, forceFalse[i])) {
             log("getBool FORCE-FALSE \"" + name + "\" was=" + retval.toInt32());
             retval.replace(ptr(0));
             return;
@@ -276,23 +394,32 @@ function setupGetBoolHook() {
 }
 
 function environment() {
-  try { log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id); } catch (e) {}
-  try { log("bundle=" + str(ObjC.classes.NSBundle.mainBundle().bundlePath())); } catch (e) {}
-  try { log("mainModule=" + Process.mainModule.name + " base=" + Process.mainModule.base + " path=" + Process.mainModule.path); } catch (e) {}
+  try {
+    log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id);
+  } catch (e) {}
+  try {
+    log("bundle=" + str(ObjC.classes.NSBundle.mainBundle().bundlePath()));
+  } catch (e) {}
+  try {
+    log("mainModule=" + Process.mainModule.name + " base=" + Process.mainModule.base + " path=" + Process.mainModule.path);
+  } catch (e) {}
   log("docsPath=" + str(docsPath));
   log("updatedPath=" + str(updatedPath));
   log("logPath=" + str(logPath));
 }
 
 function start(stage, parameters) {
-  if (started) return;
+  if (started) {
+    return;
+  }
   started = true;
   initPaths();
   log("=== agent start ===");
   log("stage=" + str(stage));
   environment();
   loadConfig();
-  log("config: hook_get_bool=" + cfg.hook_get_bool + " log_all_calls=" + cfg.log_all_calls + " force_true=[" + (cfg.force_true || []).join(",") + "] force_false=[" + (cfg.force_false || []).join(",") + "]");
+  log("config: hook_get_bool=" + cfg.hook_get_bool + " log_all_calls=" + cfg.log_all_calls + " log_limit=" + cfg.log_limit);
+  log("config force_true=[" + (cfg.force_true || []).join(",") + "] force_false=[" + (cfg.force_false || []).join(",") + "]");
   if (cfg.hook_get_bool) {
     setTimeout(setupGetBoolHook, 2000);
   }
@@ -301,17 +428,26 @@ function start(stage, parameters) {
 
 rpc.exports = {
   rehook: function () {
-    if (targetModule === null) targetModule = findTargetModule();
+    if (targetModule === null) {
+      targetModule = findTargetModule();
+    }
     setupGetBoolHook();
     return "ok";
   },
-  reload: function () { loadConfig(); return "ok"; },
+  reload: function () {
+    loadConfig();
+    return "ok";
+  },
   info: function () {
     return {
       log: logPath,
       documents: docsPath,
       updated: updatedPath,
-      module: targetModule === null ? null : { name: targetModule.name, base: targetModule.base.toString(), size: targetModule.size },
+      module: targetModule === null ? null : {
+        name: targetModule.name,
+        base: targetModule.base.toString(),
+        size: targetModule.size
+      },
       hook_rva: "0x" + HOOK_RVA.toString(16),
       calls: callCount,
       config: cfg
