@@ -1,14 +1,32 @@
 name: Frida Compile
 
+# Собирает scripts/frida-scripts/*.js в ОДИН плоский скрипт (без 📦-манифеста и путей
+# node_modules, которые frida-compile@17 пихает в начало файла) и гарантирует, что
+# в артефакт не попадает ничего, кроме самого агента + frida-objc-bridge.
+#
+# Почему бридж остаётся внутри: с Frida 17 рантайм больше не содержит встроенного ObjC
+# (см. frida.re/docs/javascript-api -> ObjC -> "Moved"), поэтому agent.js без бриджа
+# падает с ReferenceError: ObjC is not defined. Гейт 4 запрещает выпустить такой файл.
+#
+# Почему --banner:js='"use strict";': бридж вызывает eval("var m = ...") внутри функции,
+# в которой уже есть const m. В ЭС-модуле (строгий режим) это отдельная область видимости,
+# а в обычном "sloppy" скрипте - SyntaxError "Identifier 'm' has already been declared",
+# из-за чего молча ломаются bundlePath() и UIAlertController. Проверено симуляцией рантайма.
+
 on:
   push:
     branches: [main]
     paths:
       - 'scripts/frida-scripts/**'
       - 'package.json'
-      - 'tsconfig.json'
       - '.github/workflows/frida-compile.yml'
   workflow_dispatch:
+    inputs:
+      scripts:
+        description: 'entry-скрипты через пробел, без .js (пусто = agent)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +34,16 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  ESBUILD_VERSION: '0.28.2'
+  # нижняя граница = защита от "чистого" agent.js без бриджа (он нерабочий на Frida 17)
+  MIN_BYTES: '20480'
+  MAX_BYTES: '131072'
+  # маркеры, по которым видно, что код frida-objc-bridge реально внутри
+  BRIDGE_MARKERS: 'ClassRegistry ProtocolRegistry libobjc.A.dylib libdispatch.dylib NSGlobalBlock'
+  # что вообще имеет право попасть внутрь agent.js
+  ALLOWED_PATHS: '^scripts/frida-scripts/[A-Za-z0-9_.-]+\.js$|^node_modules/frida-objc-bridge/.*\.js$'
 
 jobs:
   compile:
@@ -30,46 +58,168 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
+      - name: Install toolchain
         run: |
           set -euo pipefail
-          npm install
-          npm install -g frida-compile@17
-          NPM_BIN="$(npm prefix -g)/bin"
-          echo "$NPM_BIN" >> "$GITHUB_PATH"
+          npm install --no-package-lock --no-audit --no-fund --ignore-scripts
+          npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts "esbuild@${ESBUILD_VERSION}"
+          ./node_modules/.bin/esbuild --version
+          node -e "console.log('frida-objc-bridge ' + require('./node_modules/frida-objc-bridge/package.json').version)"
 
-      - name: Verify
+      - name: Resolve entries
         run: |
           set -euo pipefail
-          which frida-compile
-          ROOT=$(npm root -g)
-          node -e "console.log('frida-compile: ' + require('$ROOT/frida-compile/package.json').version)"
-          node -e "console.log('frida-objc-bridge: ' + require('./node_modules/frida-objc-bridge/package.json').version)"
-
-      - name: Compile scripts
-        run: |
-          set -euo pipefail
-          mkdir -p build
-          shopt -s nullglob
-          count=0
-          for f in scripts/frida-scripts/*.js; do
-            base=$(basename "$f" .js)
-            case "$base" in
-              _*|*.d) continue ;;
+          raw="${{ inputs.scripts }}"
+          [ -n "$raw" ] || raw="agent"
+          : > .entries
+          for name in $raw; do
+            case "$name" in
+              */*|*..*|*' '*) echo "::error::недопустимое имя entry: $name"; exit 1 ;;
             esac
-            echo "=== compile $f ==="
-            frida-compile "$f" -o "build/${base}.js" -S -c
-            rm -f "build/${base}.js.map"
-            ls -la "build/${base}.js"
-            count=$((count + 1))
+            src="scripts/frida-scripts/$name.js"
+            test -f "$src" || { echo "::error::нет такого entry: $src"; exit 1; }
+            grep -qxF "$name" .entries || echo "$name" >> .entries
           done
-          shopt -u nullglob
-          echo "compiled: $count"
-          test "$count" -gt 0
+          echo "ENTRIES=$(tr '\n' ' ' < .entries)" >> "$GITHUB_ENV"
+          echo "entries: $(tr '\n' ' ' < .entries)"
+
+      - name: Build flat artifacts
+        run: |
+          set -euo pipefail
+          rm -rf dist .meta
+          mkdir -p dist .meta
+          for name in $ENTRIES; do
+            echo "=== esbuild $name ==="
+            ./node_modules/.bin/esbuild "scripts/frida-scripts/$name.js" \
+              --bundle --format=esm --target=es2020 --minify \
+              --legal-comments=none \
+              --banner:js='"use strict";' \
+              --metafile=".meta/$name.meta.json" \
+              --outfile="dist/$name.js"
+          done
+
+      - name: Gate 1 - in dist only the expected files
+        run: |
+          set -euo pipefail
+          expected=$(for n in $ENTRIES; do echo "$n.js"; done | sort)
+          actual=$(cd dist && find . -type f -printf '%P\n' | sort)
+          printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual"
+          test "$expected" = "$actual" || {
+            echo "::error::в dist не то, что ожидалось (лишние файлы/карты/папки)"
+            diff <(echo "$expected") <(echo "$actual") || true
+            exit 1
+          }
+          if find dist -type f ! -name '*.js' | grep -q .; then
+            echo "::error::в dist есть не-js файлы"
+            find dist -type f ! -name '*.js'
+            exit 1
+          fi
+
+      - name: Gate 2 - no manifest, no paths, no external imports
+        run: |
+          set -euo pipefail
+          for n in $ENTRIES; do
+            f="dist/$n.js"
+            if grep -qE '📦|✄|node_modules|sourceMappingURL' "$f"; then
+              echo "::error::$f содержит служебный мусор (манифест бандла / пути / source map)"
+              grep -nE '📦|✄|node_modules|sourceMappingURL' "$f" | head -5
+              exit 1
+            fi
+            F="$f" node --no-warnings --experimental-vm-modules -e '
+              const vm = require("vm"), fs = require("fs");
+              const src = fs.readFileSync(process.env.F, "utf8");
+              const mod = new vm.SourceTextModule(src);
+              const bare = [];
+              mod.link((specifier) => {
+                bare.push(specifier);
+                throw new Error("external import: " + specifier);
+              }).then(
+                () => console.log(process.env.F + ": self-contained, external imports: " + bare.length),
+                (e) => { console.error("::error::" + process.env.F + ": " + e.message); process.exit(1); }
+              );
+            '
+          done
+
+      - name: Gate 3 - inside exactly your script plus the bridge
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const allowed = new RegExp(process.env.ALLOWED_PATHS);
+            const entries = process.env.ENTRIES.trim().split(/\s+/);
+            const bad = [];
+            for (const n of entries) {
+              const meta = JSON.parse(fs.readFileSync(".meta/" + n + ".meta.json", "utf8"));
+              const inputs = Object.keys(meta.inputs);
+              const outKey = Object.keys(meta.outputs).find((k) => k.endsWith(n + ".js"));
+              const own = inputs.find((p) => p.endsWith("scripts/frida-scripts/" + n + ".js"));
+              const perInput = ((meta.outputs[outKey] || {}).inputs) || {};
+              const total = ((meta.outputs[outKey] || {}).bytes) || 0;
+              const ownBytes = perInput[own] ? perInput[own].bytesInOutput : 0;
+              if (!own) bad.push(n + ": entry-файла нет среди inputs");
+              if (!ownBytes) bad.push(n + ": код entry не попал в output");
+              for (const p of inputs) if (!allowed.test(p)) bad.push(n + ": " + p);
+              console.log(n + ": inputs=" + inputs.length + ", свой код=" + ownBytes + "B, всего=" +
+                total + "B, бридж=" + (total ? (100 * (total - ownBytes) / total).toFixed(1) : 0) + "%");
+              for (const p of inputs) console.log("    " + p);
+            }
+            if (bad.length) {
+              console.error("::error::в agent.js влезли посторонние модули:\n" + bad.join("\n"));
+              process.exit(1);
+            }
+          '
+
+      - name: Gate 4 - bridge present, size sane
+        run: |
+          set -euo pipefail
+          for n in $ENTRIES; do
+            f="dist/$n.js"
+            bytes=$(stat -c %s "$f")
+            test "$bytes" -ge "$MIN_BYTES" || {
+              echo "::error::$f = $bytes B < $MIN_BYTES: бридж ObjC не собран, на Frida 17 агент упадёт с ReferenceError: ObjC is not defined"
+              exit 1
+            }
+            test "$bytes" -le "$MAX_BYTES" || {
+              echo "::error::$f = $bytes B > $MAX_BYTES: в сборку утекло лишнее"
+              exit 1
+            }
+            for m in $BRIDGE_MARKERS; do
+              grep -qF -- "$m" "$f" || { echo "::error::$f: нет маркера бриджа '$m'"; exit 1; }
+            done
+            grep -qF -- 'rpc' "$f" || { echo "::error::$f: не похоже на агент (нет rpc)"; exit 1; }
+            echo "$f: $bytes B, bridge ok"
+          done
+
+      - name: Gate 5 - sources untouched
+        run: |
+          set -euo pipefail
+          git rev-parse --is-inside-work-tree > /dev/null
+          git status --porcelain -uno > .dirty
+          if [ -s .dirty ]; then
+            echo "::error::сборка изменила файлы в репозитории"
+            cat .dirty
+            rm -f .dirty
+            exit 1
+          fi
+          rm -f .dirty
+
+      - name: Report
+        run: |
+          set -euo pipefail
+          {
+            echo "### frida-compiled"
+            echo ""
+            echo "| файл | байт | sha256 |"
+            echo "|---|---|---|"
+            for n in $ENTRIES; do
+              f="dist/$n.js"
+              echo "| \`$n.js\` | $(stat -c %s "$f") | \`$(sha256sum "$f" | cut -c1-16)\` |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
           name: frida-compiled
-          path: build/
+          path: dist/
           retention-days: 30
           if-no-files-found: error
