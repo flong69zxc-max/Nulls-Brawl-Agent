@@ -1,62 +1,220 @@
-name: Build FridaGadget Framework 17.16.4 (arm64 thin)
+name: Build FridaGadget Framework (17.18.0 + gum-graft)
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
-      - name: Download Frida Gadget 17.16.4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Resolve agent script
+        id: agent
         run: |
           set -euo pipefail
-          mkdir -p work
-          curl -fL -o work/gadget.dylib.xz \
-            "https://github.com/frida/frida/releases/download/17.16.4/frida-gadget-17.16.4-ios-universal.dylib.xz"
-          xz -d work/gadget.dylib.xz
-          mv work/gadget.dylib work/FridaGadget-universal
-          lipo -info work/FridaGadget-universal
+          for p in scripts/agents.js scripts/agent.js agent/agents.js agent/agent.js scripts/frida-scripts/agent.js; do
+            if [ -f "$p" ]; then echo "path=$p" >> "$GITHUB_OUTPUT"; echo "found: $p"; exit 0; fi
+          done
+          echo "::error::agent script not found"
+          find . -maxdepth 3 -name "*.js" -not -path "./node_modules/*" -not -path "./ghidra/*"
+          exit 1
+
+      - uses: actions/cache@v4
+        id: cache-gadget
+        with:
+          path: gadget-cache
+          key: frida-gadget-17.18.0-ios-universal-v1
+
+      - name: Download Frida Gadget 17.18.0
+        if: steps.cache-gadget.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p gadget-cache
+          curl -fL -o /tmp/frida.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
+          xz -d /tmp/frida.xz
+          mv /tmp/frida gadget-cache/FridaGadget.dylib
+          file gadget-cache/FridaGadget.dylib
+
+      - uses: actions/cache@v4
+        id: cache-gum-graft
+        with:
+          path: gum-graft-bin
+          key: gum-graft-17.18.0-macos-arm64-v1
+
+      - name: Download gum-graft
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p gum-graft-bin
+          curl -fL -o /tmp/gum-graft.tar.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/gum-graft-17.18.0-macos-arm64.tar.xz"
+          tar xf /tmp/gum-graft.tar.xz -C gum-graft-bin
+          chmod +x gum-graft-bin/gum-graft
+          file gum-graft-bin/gum-graft
 
       - name: Thin to arm64
         run: |
           set -euo pipefail
-          lipo work/FridaGadget-universal -thin arm64 -output work/FridaGadget
-          lipo -info work/FridaGadget
-          ls -la work/
+          lipo gadget-cache/FridaGadget.dylib -thin arm64 -output gadget-cache/FridaGadget-arm64
+          lipo -info gadget-cache/FridaGadget-arm64
+          ls -la gadget-cache/
 
-      - name: Build FridaGadget.framework
+      - name: Apply gum-graft
         run: |
           set -euo pipefail
-          mkdir -p FridaGadget.framework
-          cp work/FridaGadget FridaGadget.framework/FridaGadget
-          chmod +x FridaGadget.framework/FridaGadget
-          cat > FridaGadget.framework/Info.plist << 'EOF'
+          cp gadget-cache/FridaGadget-arm64 gadget-cache/FridaGadget-grafted
+          chmod +x gum-graft-bin/gum-graft
+          gum-graft-bin/gum-graft -i gadget-cache/FridaGadget-grafted
+          file gadget-cache/FridaGadget-grafted
+          ls -la gadget-cache/
+
+      - name: Download Nulls Brawl IPA
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          curl -fL -A "Mozilla/5.0" -o build/bs.ipa "https://dnull.xyz/latest_bs_i"
+          test -s build/bs.ipa
+          file build/bs.ipa
+
+      - name: Extract IPA
+        id: extract
+        run: |
+          set -euo pipefail
+          rm -rf build/extract
+          mkdir -p build/extract
+          unzip -q build/bs.ipa -d build/extract
+          APP_DIR=$(find build/extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          test -n "$APP_DIR"
+          BIN="$APP_DIR/Nulls Brawl"
+          if [ ! -f "$BIN" ]; then
+            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
+          fi
+          test -f "$BIN"
+          echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          file "$BIN"
+
+      - name: Build Frida.framework
+        run: |
+          set -euo pipefail
+          APP_DIR="${{ steps.extract.outputs.app_dir }}"
+          FW="$APP_DIR/Frameworks/Frida.framework"
+          mkdir -p "$FW"
+          cp gadget-cache/FridaGadget-grafted "$FW/W.dylib"
+          chmod +x "$FW/W.dylib"
+          cp "${{ steps.agent.outputs.path }}" "$FW/agent.js"
+          cat > "$FW/Info.plist" << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
               <key>CFBundleExecutable</key>
-              <string>FridaGadget</string>
+              <string>W.dylib</string>
               <key>CFBundleIdentifier</key>
               <string>re.frida.gadget</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
               <key>CFBundleName</key>
-              <string>FridaGadget</string>
+              <string>Frida</string>
               <key>CFBundlePackageType</key>
               <string>FMWK</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.16.4</string>
+              <key>CFBundleSignature</key>
+              <string>????</string>
+              <key>CFBundleSupportedPlatforms</key>
+              <array>
+                  <string>iPhoneOS</string>
+              </array>
               <key>CFBundleVersion</key>
-              <string>17.16.4</string>
+              <string>17.18.0</string>
+              <key>CFBundleShortVersionString</key>
+              <string>17.18.0</string>
+              <key>DTPlatformName</key>
+              <string>iphoneos</string>
               <key>MinimumOSVersion</key>
               <string>11.0</string>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
           </dict>
           </plist>
           EOF
-          ls -la FridaGadget.framework/
+          cat > "$FW/FridaGadget.config" << 'EOF'
+          {
+            "interaction": {
+              "type": "script",
+              "path": "agent.js",
+              "on_change": "ignore"
+            },
+            "code_signing": "required"
+          }
+          EOF
+          ls -la "$FW"
+
+      - name: Install tools
+        run: |
+          set -euo pipefail
+          brew install ldid
+          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
+          sudo cp build/Release/insert_dylib /usr/local/bin/
+          sudo chmod +x /usr/local/bin/insert_dylib
+          which insert_dylib ldid
+
+      - name: Inject dylib
+        run: |
+          set -euo pipefail
+          BIN="${{ steps.extract.outputs.bin }}"
+          insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "$BIN" "$BIN.patched"
+          mv "$BIN.patched" "$BIN"
+          chmod +x "$BIN"
+          otool -L "$BIN" | grep -i frida || echo "no frida load command"
+
+      - name: Sign
+        run: |
+          set -euo pipefail
+          APP_DIR="${{ steps.extract.outputs.app_dir }}"
+          BIN="${{ steps.extract.outputs.bin }}"
+          FW="$APP_DIR/Frameworks/Frida.framework"
+          ldid -S "$FW/W.dylib"
+          ldid -S "$BIN"
+          echo "signed"
+
+      - name: Repack IPA
+        run: |
+          set -euo pipefail
+          cd build/extract
+          rm -f ../bs_patched.ipa
+          zip -qry ../bs_patched.ipa Payload
+          cd ..
+          ls -la bs_patched.ipa
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="brawl-frida-$(date +%Y%m%d)-r${{ github.run_number }}"
+          gh release create "$TAG" build/bs_patched.ipa \
+            --title "$TAG" \
+            --notes "Frida 17.18.0 + gum-graft, agent ${{ steps.agent.outputs.path }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FridaGadget.framework-17.16.4-arm64
-          path: FridaGadget.framework/
+          name: brawl-frida-ipa
+          path: build/bs_patched.ipa
           retention-days: 7
