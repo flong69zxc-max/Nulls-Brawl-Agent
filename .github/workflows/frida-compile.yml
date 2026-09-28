@@ -55,9 +55,7 @@ jobs:
               _*|*.d) continue ;;
             esac
             echo "=== compile $f ==="
-            frida-compile "$f" -o "build/${base}.js"
-            rm -f "build/${base}.js.map"
-            rm -f "scripts/frida-scripts/${base}.js.map"
+            frida-compile "$f" -o "build/${base}.js" -b -S
             ls -la "build/${base}.js"
             count=$((count + 1))
           done
