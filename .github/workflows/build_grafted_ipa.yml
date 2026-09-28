@@ -47,6 +47,7 @@ jobs:
         if: steps.cache-gum.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
+          rm -rf frida-gum
           git clone --depth 1 --branch ${FRIDA_VERSION} \
             https://github.com/frida/frida-gum.git frida-gum
           cd frida-gum
@@ -178,7 +179,7 @@ jobs:
             'def w(l): out.write(l + "\n")' \
             '' \
             'w("=== sizes ===")' \
-            'w("dev: " + str(os.path.getsize(DEV)))' \
+            'w("dev:  " + str(os.path.getsize(DEV)))' \
             'w("ours: " + str(os.path.getsize(OUR)))' \
             'w("")' \
             'w("=== counts ===")' \
@@ -187,10 +188,8 @@ jobs:
             '    w(k + ": dev=" + str(wc[k]) + " ours=" + str(oc[k]))' \
             'w("")' \
             '' \
-            'sd = {("x",): None}' \
             'secs_dev = sections(DEV)' \
             'secs_our = sections(OUR)' \
-            '' \
             'dev_map = {(s["seg"],s["sect"]): s for s in secs_dev}' \
             'our_map = {(s["seg"],s["sect"]): s for s in secs_our}' \
             '' \
