@@ -21,6 +21,10 @@ jobs:
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
+      MACOS_CERTID: 'frida-cert'
+      IOS_CERTID: 'frida-cert'
+      WATCHOS_CERTID: 'frida-cert'
+      TVOS_CERTID: 'frida-cert'
 
     steps:
       - uses: actions/checkout@v4
@@ -43,16 +47,16 @@ jobs:
           meson --version
           ninja --version
 
-      - name: Cache Frida build
+      - name: Cache Frida source and build
         id: cache-frida
         uses: actions/cache@v4
         with:
           path: |
-            frida-src/build
-            frida-src/subprojects/packagecache
-          key: frida-${{ env.FRIDA_VERSION }}-${{ runner.os }}-${{ hashFiles('.github/workflows/build_grafted_ipa.yml') }}
+            frida-src
+            ~/.cache/pip
+          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v1
           restore-keys: |
-            frida-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
+            frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
 
       - name: Clone Frida source
         if: steps.cache-frida.outputs.cache-hit != 'true'
@@ -77,12 +81,12 @@ jobs:
           ./configure --enable-graft-tool --enable-frida-tools --host=macos-arm64
           echo "=== configure done ==="
 
-      - name: Build gum and tools
+      - name: Build Frida
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
-          make 2>&1 | tail -100
+          make 2>&1 | tail -120
           echo "=== build done ==="
 
       - name: Locate gum-graft
