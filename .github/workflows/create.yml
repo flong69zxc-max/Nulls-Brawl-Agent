@@ -32,8 +32,15 @@ jobs:
           #import <dlfcn.h>
           #import <objc/runtime.h>
           #import <mach/mach.h>
+          #import <mach/thread_info.h>
           #import <unistd.h>
           #import <fcntl.h>
+          #import <sys/types.h>
+          #import <stddef.h>
+
+          #define CS_OPS_STATUS 0
+
+          extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 
           static void redirectLogs(void) {
               NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -81,7 +88,7 @@ jobs:
                   if (val) NSLog(@"[Inspector]   %@ = %s", key, val);
               }
               uint32_t flags = 0;
-              csops(getpid(), 0, &flags, sizeof(flags));
+              csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
               NSLog(@"[Inspector] csops flags: 0x%x", flags);
               BOOL getTaskAllow = (flags & 0x1000000) != 0;
               NSLog(@"[Inspector] get-task-allow: %@", getTaskAllow ? @"YES" : @"NO");
