@@ -1,4 +1,4 @@
-name: Build Grafted IPA (Frida 17.2.17)
+name: Build Grafted IPA (Florida-iOS)
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 25
     env:
-      FRIDA_VERSION: '17.2.17'
+      FLORIDA_URL: https://github.com/Mac-XK/Florida-iOS/releases/download/Florida/frida-gadget.dylib
       FRAMEWORK_NAME: Frida.framework
 
     steps:
@@ -27,17 +27,12 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Download Frida Gadget
+      - name: Download Florida Frida Gadget
         run: |
           set -euo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          echo "downloading $URL"
-          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
-          xz -d gadget.dylib.xz
-          mv gadget.dylib W.stock.dylib
-          echo "=== file ==="
+          echo "downloading ${FLORIDA_URL}"
+          curl -fL --retry 3 -o W.stock.dylib "${FLORIDA_URL}"
           file W.stock.dylib
-          echo "=== lipo ==="
           lipo -info W.stock.dylib
 
       - name: Extract arm64e slice
@@ -45,17 +40,17 @@ jobs:
           set -euo pipefail
           lipo -thin arm64e -output W.thin.dylib W.stock.dylib
           file W.thin.dylib
-          echo "thin slice ready"
+          echo "arm64e slice extracted"
 
-      - name: Show segment layout (diagnostic)
+      - name: Verify no frida strings
         run: |
           set -euo pipefail
-          echo "=== segments ==="
-          otool -l W.thin.dylib | grep -E 'segname|sectname|addr |size |offset ' | head -80
-          echo "=== __DATA_CONST ==="
-          otool -l W.thin.dylib | grep -A5 '__DATA_CONST' || true
-          echo "=== __FRIDA sections ==="
-          otool -l W.thin.dylib | grep -B1 -A5 '__FRIDA' || true
+          echo "=== checking for frida strings ==="
+          if strings W.thin.dylib | grep -E "frida-gadget|FridaScriptEngine|gum-js-loop|frida:rpc"; then
+            echo "::warning::Frida strings still present"
+          else
+            echo "OK: no frida strings found"
+          fi
 
       - name: Assemble Frida.framework
         run: |
@@ -90,9 +85,9 @@ jobs:
             '        <string>iPhoneOS</string>' \
             '    </array>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>17.2.17</string>' \
+            '    <string>17.16.4</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>17.2.17</string>' \
+            '    <string>17.16.4</string>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -148,13 +143,14 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### frida framework 17.2.17"
+            echo "### florida frida framework"
             echo ""
             echo "| param | value |"
             echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| source | Mac-XK/Florida-iOS |"
+            echo "| frida version | 17.16.4 |"
             echo "| arch | arm64e |"
-            echo "| patches | none |"
+            echo "| patches | already removed in source |"
             echo "| code_signing | optional |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
