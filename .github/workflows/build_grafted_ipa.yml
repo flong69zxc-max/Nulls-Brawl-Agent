@@ -1,4 +1,4 @@
-name: Build Grafted IPA
+name: Build Grafted IPA (Frida 17.2.17)
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 25
     env:
-      FRIDA_VERSION: '17.9.7'
+      FRIDA_VERSION: '17.2.17'
       FRAMEWORK_NAME: Frida.framework
 
     steps:
@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          echo "downloading $URL"
           curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
@@ -44,120 +45,24 @@ jobs:
           set -euo pipefail
           lipo -thin arm64e -output W.thin.dylib W.stock.dylib
           file W.thin.dylib
-          lipo -info W.thin.dylib
+          echo "thin slice ready"
 
-      - name: Install LIEF
+      - name: Show segment layout (diagnostic)
         run: |
           set -euo pipefail
-          python3 -m venv venv
-          source venv/bin/activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install lief==0.17.5
-          python3 -c "import lief; print('lief', lief.__version__)"
-
-      - name: Analyze and patch arm64e slice
-        run: |
-          set -euo pipefail
-          source venv/bin/activate
-          python3 - <<'PYEOF'
-          import lief, sys
-
-          BRK539 = bytes.fromhex("20A720D4")
-          BRK1   = bytes.fromhex("200020D4")
-          NOP    = bytes.fromhex("1F2003D5")
-          RET    = bytes.fromhex("C0035FD6")
-
-          with open("W.thin.dylib", "rb") as f:
-              data = bytearray(f.read())
-
-          stock_brk539 = bytes(data).count(BRK539)
-          stock_brk1   = bytes(data).count(BRK1)
-          stock_nop    = bytes(data).count(NOP)
-          stock_ret    = bytes(data).count(RET)
-          print(f"[stock] BRK539={stock_brk539} BRK1={stock_brk1} NOP={stock_nop} RET={stock_ret}")
-
-          p539 = 0
-          i = 0
-          while True:
-              i = data.find(BRK539, i)
-              if i == -1: break
-              data[i:i+4] = NOP
-              p539 += 1
-              i += 4
-
-          p1 = 0
-          i = 0
-          while True:
-              i = data.find(BRK1, i)
-              if i == -1: break
-              data[i:i+4] = NOP
-              p1 += 1
-              i += 4
-
-          print(f"[patch] BRK539->NOP: {p539}, BRK1->NOP: {p1}")
-
-          bin = lief.MachO.parse("W.thin.dylib")
-          m = bin.at(0)
-          print(f"[macho] arch={m.header.cpu_type}")
-
-          for seg in m.segments:
-              print(f"[seg] {seg.name} fileoff={seg.file_offset} "
-                    f"vmaddr=0x{seg.virtual_address:x} filesize=0x{seg.file_size:x}")
-              for sec in seg.sections:
-                  flags = sec.flags.value if hasattr(sec.flags, 'value') else 0
-                  if "stub" in sec.name.lower() or (flags & 0xFF) == 0x08:
-                      print(f"  [SEC] {sec.name} offset={sec.offset} size=0x{sec.size:x} "
-                            f"reserved2={sec.reserved2} flags=0x{flags:x}")
-
-          patched_stubs = 0
-          for seg in m.segments:
-              for sec in seg.sections:
-                  flags = sec.flags.value if hasattr(sec.flags, 'value') else 0
-                  is_stub = "stub" in sec.name.lower() or (flags & 0xFF) == 0x08
-                  if not is_stub:
-                      continue
-                  if not sec.reserved2:
-                      print(f"[skip] {sec.name}: reserved2=0")
-                      continue
-                  cnt = sec.size // sec.reserved2
-                  print(f"[stubs] {sec.name}: patching {cnt} stubs")
-                  for k in range(cnt):
-                      off = sec.offset + k * sec.reserved2
-                      if off + 4 > len(data):
-                          break
-                      if data[off:off+4] != RET:
-                          data[off:off+4] = RET
-                          patched_stubs += 1
-
-          print(f"[patch] stubs->RET: {patched_stubs}")
-
-          with open("W.thin-patched.dylib", "wb") as f:
-              f.write(data)
-
-          final_brk539 = bytes(data).count(BRK539)
-          final_brk1   = bytes(data).count(BRK1)
-          final_nop    = bytes(data).count(NOP)
-          final_ret    = bytes(data).count(RET)
-          print(f"[final] BRK539={final_brk539} BRK1={final_brk1} "
-                f"NOP={final_nop} RET={final_ret}")
-
-          errors = []
-          if final_brk539: errors.append(f"BRK539={final_brk539}")
-          if final_brk1: errors.append(f"BRK1={final_brk1}")
-          if patched_stubs == 0: errors.append("no stubs patched")
-          if errors:
-              for e in errors: print(f"::error::{e}")
-              sys.exit(1)
-          print("OK: patches applied")
-          PYEOF
-          file W.thin-patched.dylib
+          echo "=== segments ==="
+          otool -l W.thin.dylib | grep -E 'segname|sectname|addr |size |offset ' | head -80
+          echo "=== __DATA_CONST ==="
+          otool -l W.thin.dylib | grep -A5 '__DATA_CONST' || true
+          echo "=== __FRIDA sections ==="
+          otool -l W.thin.dylib | grep -B1 -A5 '__FRIDA' || true
 
       - name: Assemble Frida.framework
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
-          cp W.thin-patched.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.thin.dylib "$FRAMEWORK_NAME/W.dylib"
 
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -185,9 +90,9 @@ jobs:
             '        <string>iPhoneOS</string>' \
             '    </array>' \
             '    <key>CFBundleVersion</key>' \
-            '    <string>17.9.7</string>' \
+            '    <string>17.2.17</string>' \
             '    <key>CFBundleShortVersionString</key>' \
-            '    <string>17.9.7</string>' \
+            '    <string>17.2.17</string>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -222,29 +127,38 @@ jobs:
           brew install ldid || true
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
-            echo "signed"
+            echo "signed W.dylib"
+            codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
           fi
 
       - name: Final verification
         run: |
           set -euo pipefail
-          python3 - <<'PYEOF'
-          with open("Frida.framework/W.dylib", "rb") as f:
-              data = f.read()
-          brk539 = data.count(bytes.fromhex("20A720D4"))
-          brk1   = data.count(bytes.fromhex("200020D4"))
-          ret    = data.count(bytes.fromhex("C0035FD6"))
-          print(f"final BRK539={brk539} BRK1={brk1} RET={ret}")
-          if brk539 or brk1:
-              raise SystemExit("patches missing")
-          print("OK")
-          PYEOF
+          file "$FRAMEWORK_NAME/W.dylib"
+          echo "=== final framework ==="
+          find "$FRAMEWORK_NAME" -type f | sort
 
       - name: Package
         run: |
           set -euo pipefail
           zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
-          shasum -a 256 "$FRAMEWORK_NAME.zip"
+          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
+
+      - name: Summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### frida framework 17.2.17"
+            echo ""
+            echo "| param | value |"
+            echo "|---|---|"
+            echo "| frida | ${FRIDA_VERSION} |"
+            echo "| arch | arm64e |"
+            echo "| patches | none |"
+            echo "| code_signing | optional |"
+            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
+            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
