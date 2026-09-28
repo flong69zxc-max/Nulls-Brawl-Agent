@@ -25,18 +25,42 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Unpack and identify dev dylib
+      - name: Inspect zip
         run: |
           set -euo pipefail
-          mkdir -p dev_unpacked
-          unzip -o W.dylib.zip -d dev_unpacked
-          echo "=== unpacked contents ==="
-          find dev_unpacked -type f
+          echo "=== zip listing ==="
+          unzip -l W.dylib.zip
 
-          DEV=$(find dev_unpacked -type f -name "*.dylib" | head -1)
+      - name: Unpack dev dylib
+        run: |
+          set -euo pipefail
+          rm -rf dev_unpacked
+          mkdir -p dev_unpacked
+          # -o overwrite, -q quiet. НЕ используем -X, чтобы видеть что есть.
+          unzip -o W.dylib.zip -d dev_unpacked
+          echo "=== all extracted files ==="
+          find dev_unpacked -type f | sort
+
+          # Явно исключаем __MACOSX и ._* файлы
+          DEV=$(find dev_unpacked -type f -name "*.dylib" \
+                  ! -path "*__MACOSX*" \
+                  ! -name "._*" \
+                  | head -1)
+
           if [ -z "$DEV" ]; then
-            DEV=$(find dev_unpacked -type f | head -1)
+            # fallback: любой не-AppleDouble файл
+            DEV=$(find dev_unpacked -type f \
+                    ! -path "*__MACOSX*" \
+                    ! -name "._*" \
+                    ! -name ".DS_Store" \
+                    | head -1)
           fi
+
+          if [ -z "$DEV" ]; then
+            echo "::error::no dylib found in zip"
+            exit 1
+          fi
+
           echo "using dev file: $DEV"
           cp "$DEV" W.dev.raw.dylib
 
@@ -47,26 +71,36 @@ jobs:
           echo "=== size ==="
           stat -f%z W.dev.raw.dylib
 
-      - name: Extract dev thin slice (if needed)
+      - name: Strip xattrs
         run: |
           set -euo pipefail
-          # Проверяем, является ли файл Mach-O
-          if ! file W.dev.raw.dylib | grep -q "Mach-O"; then
-            echo "::error::W.dev.raw.dylib is not a Mach-O file"
-            echo "file type: $(file W.dev.raw.dylib)"
+          xattr -c W.dev.raw.dylib 2>/dev/null || true
+
+      - name: Extract dev thin slice
+        run: |
+          set -euo pipefail
+          FILE_INFO=$(file -b W.dev.raw.dylib)
+          echo "file info: $FILE_INFO"
+
+          if echo "$FILE_INFO" | grep -q "Mach-O"; then
+            if echo "$FILE_INFO" | grep -q "universal"; then
+              echo "fat binary, extracting arm64e"
+              lipo -thin arm64e -output W.dev.dylib W.dev.raw.dylib || \
+              lipo -thin arm64  -output W.dev.dylib W.dev.raw.dylib
+            else
+              echo "already thin"
+              cp W.dev.raw.dylib W.dev.dylib
+            fi
+          elif echo "$FILE_INFO" | grep -q "Zip archive"; then
+            echo "nested zip, extracting"
+            unzip -o W.dev.raw.dylib -d nested
+            NESTED=$(find nested -type f -name "*.dylib" ! -name "._*" ! -path "*__MACOSX*" | head -1)
+            cp "$NESTED" W.dev.dylib
+          else
+            echo "::error::unknown file type: $FILE_INFO"
             exit 1
           fi
 
-          if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.dev.raw.dylib W.dev.dylib
-            echo "already thin"
-          else
-            if lipo -info W.dev.raw.dylib | grep -q "arm64e"; then
-              lipo -thin arm64e -output W.dev.dylib W.dev.raw.dylib
-            else
-              lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
-            fi
-          fi
           file W.dev.dylib
           echo "dev size: $(stat -f%z W.dev.dylib) bytes"
 
@@ -104,7 +138,7 @@ jobs:
           set -euo pipefail
           source venv/bin/activate
           python3 - <<'PYEOF'
-          import lief, os
+          import lief
 
           def section_map(path):
               m = lief.MachO.parse(path).at(0)
@@ -112,10 +146,10 @@ jobs:
               for seg in m.segments:
                   for sec in seg.sections:
                       r[(seg.name, sec.name)] = sec
-              return r, m
+              return r
 
-          secs_dev, m_dev = section_map('W.dev.dylib')
-          secs_stock, m_stock = section_map('stock/17.2.11.thin.dylib')
+          secs_dev = section_map('W.dev.dylib')
+          secs_stock = section_map('stock/17.2.11.thin.dylib')
 
           with open('W.dev.dylib', 'rb') as f:
               data_dev = f.read()
@@ -128,27 +162,35 @@ jobs:
               report.write(line + '\n')
 
           w(f'=== dev vs stock 17.2.11 ===')
-          w(f'dev size: {len(data_dev)}')
+          w(f'dev size:   {len(data_dev)}')
           w(f'stock size: {len(data_stock)}')
+          w(f'diff:       {len(data_dev) - len(data_stock)}')
           w('')
 
-          w(f'=== dev sections: {len(secs_dev)} ===')
-          for k in sorted(secs_dev.keys()):
-              w(f'  {k[0]},{k[1]} size=0x{secs_dev[k].size:x}')
-          w('')
-          w(f'=== stock sections: {len(secs_stock)} ===')
-          for k in sorted(secs_stock.keys()):
-              w(f'  {k[0]},{k[1]} size=0x{secs_stock[k].size:x}')
+          w(f'=== sections ===')
+          w(f'  dev:   {len(secs_dev)}')
+          w(f'  stock: {len(secs_stock)}')
           w('')
 
           common = sorted(secs_dev.keys() & secs_stock.keys())
-          w(f'=== common sections: {len(common)} ===')
+          only_dev = sorted(set(secs_dev.keys()) - set(secs_stock.keys()))
+          only_stock = sorted(set(secs_stock.keys()) - set(secs_dev.keys()))
+
+          if only_dev:
+              w('=== sections only in DEV ===')
+              for x in only_dev: w(f'  {x}')
+          if only_stock:
+              w('=== sections only in STOCK ===')
+              for x in only_stock: w(f'  {x}')
+          w('')
+
+          w(f'=== byte diffs in {len(common)} common sections ===')
           total_diffs = 0
           for k in common:
               sd = secs_dev[k]
               ss = secs_stock[k]
               if sd.size != ss.size:
-                  w(f'[{k[0]},{k[1]}] SIZE DIFFERS: dev=0x{sd.size:x} stock=0x{ss.size:x}')
+                  w(f'[{k[0]},{k[1]}] SIZE: dev=0x{sd.size:x} stock=0x{ss.size:x}')
                   continue
               if sd.offset == 0 or ss.offset == 0:
                   continue
@@ -166,16 +208,6 @@ jobs:
 
           w('')
           w(f'=== total diff bytes: {total_diffs} ===')
-
-          only_dev = sorted(set(secs_dev.keys()) - set(secs_stock.keys()))
-          only_stock = sorted(set(secs_stock.keys()) - set(secs_dev.keys()))
-          if only_dev:
-              w('=== sections only in DEV ===')
-              for x in only_dev: w(f'  {x}')
-          if only_stock:
-              w('=== sections only in STOCK ===')
-              for x in only_stock: w(f'  {x}')
-
           report.close()
           PYEOF
 
@@ -210,11 +242,16 @@ jobs:
       - name: Version strings from dev
         run: |
           set -euo pipefail
-          echo "=== version-like strings in dev ===" > version-strings.txt
-          strings W.dev.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 >> version-strings.txt || true
-          echo "" >> version-strings.txt
-          echo "=== interesting strings (frida, brk, abort) ===" >> version-strings.txt
-          strings W.dev.dylib | grep -iE 'frida|abort|brk|gadget|gum|detect' | head -40 >> version-strings.txt || true
+          {
+            echo "=== version-like strings in dev ==="
+            strings W.dev.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 || true
+            echo ""
+            echo "=== frida/gadget/gum strings in dev ==="
+            strings W.dev.dylib | grep -iE 'frida|gadget|gum|gadget' | head -40 || true
+            echo ""
+            echo "=== version-like strings in stock ==="
+            strings stock/17.2.11.thin.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 || true
+          } > version-strings.txt
           cat version-strings.txt
 
       - name: Summary
