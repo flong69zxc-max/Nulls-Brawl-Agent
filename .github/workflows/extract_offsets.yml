@@ -12,10 +12,16 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   offsets:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
+    env:
+      JAVA_TOOL_OPTIONS: "-XX:+UseParallelGC -XX:ParallelGCThreads=4"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -25,6 +31,7 @@ jobs:
         with:
           java-version: "21"
           distribution: temurin
+          cache: maven
 
       - name: Install helper tools
         run: |
@@ -38,12 +45,15 @@ jobs:
         with:
           path: ghidra
           key: ghidra-12.1.2-jython-v1
+          restore-keys: |
+            ghidra-12.1.2-
+            ghidra-
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260205.zip
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
           unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
           mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
@@ -78,6 +88,8 @@ jobs:
         with:
           path: ipa_cache
           key: ipa-nulls-brawl-${{ steps.resolve.outputs.VER }}
+          restore-keys: |
+            ipa-nulls-brawl-
 
       - name: Download ipa
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -141,10 +153,12 @@ jobs:
         with:
           path: ghidra_project
           key: ghidra-brawl-project-${{ steps.resolve.outputs.VER }}
+          restore-keys: |
+            ghidra-brawl-project-
 
       - name: Run Ghidra
         env:
-          _JAVA_OPTIONS: "-Xmx12g -Djava.awt.headless=true"
+          _JAVA_OPTIONS: "-Xmx14g -Djava.awt.headless=true"
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
