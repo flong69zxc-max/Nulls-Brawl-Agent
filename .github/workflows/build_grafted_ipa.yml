@@ -31,12 +31,20 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          echo "downloading $URL"
           curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
+          echo "=== file ==="
           file W.stock.dylib
+          echo "=== lipo ==="
           lipo -info W.stock.dylib
+
+      - name: Extract arm64e slice
+        run: |
+          set -euo pipefail
+          lipo -thin arm64e -output W.thin.dylib W.stock.dylib
+          file W.thin.dylib
+          lipo -info W.thin.dylib
 
       - name: Install LIEF
         run: |
@@ -47,185 +55,109 @@ jobs:
           python3 -m pip install lief==0.17.5
           python3 -c "import lief; print('lief', lief.__version__)"
 
-      - name: Analyze and patch
+      - name: Analyze and patch arm64e slice
         run: |
           set -euo pipefail
           source venv/bin/activate
           python3 - <<'PYEOF'
           import lief, sys
 
-          PATTERN_BRK539 = bytes.fromhex("20A720D4")
-          PATTERN_BRK1   = bytes.fromhex("200020D4")
-          NOP            = bytes.fromhex("1F2003D5")
-          RET            = bytes.fromhex("C0035FD6")
+          BRK539 = bytes.fromhex("20A720D4")
+          BRK1   = bytes.fromhex("200020D4")
+          NOP    = bytes.fromhex("1F2003D5")
+          RET    = bytes.fromhex("C0035FD6")
 
-          with open("W.stock.dylib", "rb") as f:
+          with open("W.thin.dylib", "rb") as f:
               data = bytearray(f.read())
 
-          stock_brk539 = bytes(data).count(PATTERN_BRK539)
-          stock_brk1   = bytes(data).count(PATTERN_BRK1)
+          stock_brk539 = bytes(data).count(BRK539)
+          stock_brk1   = bytes(data).count(BRK1)
           stock_nop    = bytes(data).count(NOP)
           stock_ret    = bytes(data).count(RET)
-          print(f"[stock] BRK #0x539={stock_brk539} BRK #1={stock_brk1} "
-                f"NOP={stock_nop} RET={stock_ret}")
+          print(f"[stock] BRK539={stock_brk539} BRK1={stock_brk1} NOP={stock_nop} RET={stock_ret}")
 
-          # --- BRK patches ---
-          patched_brk539 = 0
-          idx = 0
+          p539 = 0
+          i = 0
           while True:
-              idx = data.find(PATTERN_BRK539, idx)
-              if idx == -1: break
-              data[idx:idx+4] = NOP
-              patched_brk539 += 1
-              idx += 4
+              i = data.find(BRK539, i)
+              if i == -1: break
+              data[i:i+4] = NOP
+              p539 += 1
+              i += 4
 
-          patched_brk1 = 0
-          idx = 0
+          p1 = 0
+          i = 0
           while True:
-              idx = data.find(PATTERN_BRK1, idx)
-              if idx == -1: break
-              data[idx:idx+4] = NOP
-              patched_brk1 += 1
-              idx += 4
+              i = data.find(BRK1, i)
+              if i == -1: break
+              data[i:i+4] = NOP
+              p1 += 1
+              i += 4
 
-          print(f"[patch] BRK #0x539 -> NOP: {patched_brk539}")
-          print(f"[patch] BRK #1 -> NOP: {patched_brk1}")
+          print(f"[patch] BRK539->NOP: {p539}, BRK1->NOP: {p1}")
 
-          # --- LIEF: find abort symbol ---
-          bin = lief.MachO.parse("W.stock.dylib")
+          bin = lief.MachO.parse("W.thin.dylib")
           m = bin.at(0)
+          print(f"[macho] arch={m.header.cpu_type}")
 
-          abort_addr = None
-          for sym in m.symbols:
-              if sym.name == "_abort":
-                  abort_addr = sym.value
-                  print(f"[symbol] _abort at 0x{abort_addr:x}")
-                  break
-
-          if abort_addr is None:
-              print("[symbol] _abort not found in symbol table")
-
-          # --- patch direct BL abort calls in __TEXT ---
-          patched_abort_calls = 0
-          if abort_addr is not None:
-              for seg in m.segments:
-                  if seg.name != "__TEXT":
-                      continue
-                  text_fileoff = seg.file_offset
-                  text_vmaddr = seg.virtual_address
-                  text_size = seg.file_size
-                  print(f"[text] fileoff={text_fileoff} vmaddr=0x{text_vmaddr:x} "
-                        f"size=0x{text_size:x}")
-
-                  for i in range(0, text_size - 4, 4):
-                      file_off = text_fileoff + i
-                      vm_addr = text_vmaddr + i
-                      instr = int.from_bytes(data[file_off:file_off+4], "little")
-                      if (instr & 0xFC000000) == 0x94000000:  # BL
-                          imm26 = instr & 0x03FFFFFF
-                          if imm26 & 0x02000000:
-                              imm26 -= 0x04000000
-                          target = vm_addr + imm26 * 4
-                          if target == abort_addr:
-                              data[file_off:file_off+4] = NOP
-                              patched_abort_calls += 1
-                              print(f"[patch] BL abort at file 0x{file_off:x} "
-                                    f"(vm 0x{vm_addr:x}) -> NOP")
-
-          print(f"[patch] direct BL abort calls patched: {patched_abort_calls}")
-
-          # --- patch all stub sections to RET ---
-          stub_sections = []
           for seg in m.segments:
+              print(f"[seg] {seg.name} fileoff={seg.file_offset} "
+                    f"vmaddr=0x{seg.virtual_address:x} filesize=0x{seg.file_size:x}")
               for sec in seg.sections:
-                  name_lower = sec.name.lower()
-                  is_stub = False
-                  if hasattr(sec.flags, 'value') and (sec.flags.value & 0xFF) == 0x08:
-                      is_stub = True
-                  if "stub" in name_lower or is_stub:
-                      stub_sections.append(sec)
-                      print(f"[stubs] found: {sec.name} offset={sec.offset} "
-                            f"size=0x{sec.size:x} reserved2={sec.reserved2}")
+                  flags = sec.flags.value if hasattr(sec.flags, 'value') else 0
+                  if "stub" in sec.name.lower() or (flags & 0xFF) == 0x08:
+                      print(f"  [SEC] {sec.name} offset={sec.offset} size=0x{sec.size:x} "
+                            f"reserved2={sec.reserved2} flags=0x{flags:x}")
 
           patched_stubs = 0
-          for sec in stub_sections:
-              stub_size = sec.reserved2
-              if not stub_size:
-                  continue
-              stub_count = sec.size // stub_size
-              for i in range(stub_count):
-                  off = sec.offset + i * stub_size
-                  if off + 4 > len(data):
-                      break
-                  if data[off:off+4] != RET:
-                      data[off:off+4] = RET
-                      patched_stubs += 1
+          for seg in m.segments:
+              for sec in seg.sections:
+                  flags = sec.flags.value if hasattr(sec.flags, 'value') else 0
+                  is_stub = "stub" in sec.name.lower() or (flags & 0xFF) == 0x08
+                  if not is_stub:
+                      continue
+                  if not sec.reserved2:
+                      print(f"[skip] {sec.name}: reserved2=0")
+                      continue
+                  cnt = sec.size // sec.reserved2
+                  print(f"[stubs] {sec.name}: patching {cnt} stubs")
+                  for k in range(cnt):
+                      off = sec.offset + k * sec.reserved2
+                      if off + 4 > len(data):
+                          break
+                      if data[off:off+4] != RET:
+                          data[off:off+4] = RET
+                          patched_stubs += 1
 
-          print(f"[patch] stubs -> RET: {patched_stubs}")
+          print(f"[patch] stubs->RET: {patched_stubs}")
 
-          # --- write patched binary ---
-          with open("W.full-patched.dylib", "wb") as f:
+          with open("W.thin-patched.dylib", "wb") as f:
               f.write(data)
 
-          final_data = bytes(data)
-          final_brk539 = final_data.count(PATTERN_BRK539)
-          final_brk1   = final_data.count(PATTERN_BRK1)
-          final_nop    = final_data.count(NOP)
-          final_ret    = final_data.count(RET)
-          print(f"\n[final] BRK #0x539={final_brk539} BRK #1={final_brk1} "
+          final_brk539 = bytes(data).count(BRK539)
+          final_brk1   = bytes(data).count(BRK1)
+          final_nop    = bytes(data).count(NOP)
+          final_ret    = bytes(data).count(RET)
+          print(f"[final] BRK539={final_brk539} BRK1={final_brk1} "
                 f"NOP={final_nop} RET={final_ret}")
 
           errors = []
-          if final_brk539 != 0:
-              errors.append(f"BRK #0x539 still present: {final_brk539}")
-          if final_brk1 != 0:
-              errors.append(f"BRK #1 still present: {final_brk1}")
-          if stock_brk539 == 0 and stock_brk1 == 0:
-              errors.append("no BRKs found in stock binary")
-          expected_nop_min = stock_nop + stock_brk539 + stock_brk1
-          if final_nop < expected_nop_min:
-              errors.append(f"NOP count {final_nop} < expected {expected_nop_min}")
-          if patched_abort_calls == 0 and patched_stubs == 0:
-              errors.append("no abort calls or stubs patched")
-
-          with open("patch-report.txt", "w") as f:
-              f.write(f"stock_brk539={stock_brk539}\n")
-              f.write(f"stock_brk1={stock_brk1}\n")
-              f.write(f"stock_nop={stock_nop}\n")
-              f.write(f"stock_ret={stock_ret}\n")
-              f.write(f"patched_brk539={patched_brk539}\n")
-              f.write(f"patched_brk1={patched_brk1}\n")
-              f.write(f"patched_abort_calls={patched_abort_calls}\n")
-              f.write(f"patched_stubs={patched_stubs}\n")
-              f.write(f"final_brk539={final_brk539}\n")
-              f.write(f"final_brk1={final_brk1}\n")
-              f.write(f"final_nop={final_nop}\n")
-              f.write(f"final_ret={final_ret}\n")
-
+          if final_brk539: errors.append(f"BRK539={final_brk539}")
+          if final_brk1: errors.append(f"BRK1={final_brk1}")
+          if patched_stubs == 0: errors.append("no stubs patched")
           if errors:
-              for e in errors:
-                  print(f"::error::{e}")
+              for e in errors: print(f"::error::{e}")
               sys.exit(1)
-
-          print("\nOK: all patches verified")
+          print("OK: patches applied")
           PYEOF
-          file W.full-patched.dylib
-
-      - name: Show patch report
-        run: |
-          set -euo pipefail
-          echo "=== patch report ==="
-          cat patch-report.txt
-          echo "=== final binary ==="
-          file W.full-patched.dylib | grep -q arm64
-          echo "arm64 OK"
+          file W.thin-patched.dylib
 
       - name: Assemble Frida.framework
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
-          cp W.full-patched.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.thin-patched.dylib "$FRAMEWORK_NAME/W.dylib"
 
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -290,8 +222,7 @@ jobs:
           brew install ldid || true
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
-            echo "signed W.dylib"
-            codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
+            echo "signed"
           fi
 
       - name: Final verification
@@ -303,36 +234,17 @@ jobs:
           brk539 = data.count(bytes.fromhex("20A720D4"))
           brk1   = data.count(bytes.fromhex("200020D4"))
           ret    = data.count(bytes.fromhex("C0035FD6"))
-          print(f"final BRK #0x539={brk539} BRK #1={brk1} RET={ret}")
+          print(f"final BRK539={brk539} BRK1={brk1} RET={ret}")
           if brk539 or brk1:
-              raise SystemExit("patches missing in final W.dylib")
-          print("OK: final W.dylib verified")
+              raise SystemExit("patches missing")
+          print("OK")
           PYEOF
 
       - name: Package
         run: |
           set -euo pipefail
           zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
-          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
-
-      - name: Summary
-        run: |
-          set -euo pipefail
-          {
-            echo "### patched frida framework"
-            echo ""
-            echo "| param | value |"
-            echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION} |"
-            echo "| patches | BRK #0x539, BRK #1, BL abort -> NOP, stubs -> RET |"
-            echo "| arch | arm64 |"
-            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
-            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
-            echo ""
-            echo '```'
-            cat patch-report.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          shasum -a 256 "$FRAMEWORK_NAME.zip"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -340,6 +252,5 @@ jobs:
           path: |
             Frida.framework.zip
             Frida.framework.zip.sha256
-            patch-report.txt
           retention-days: 30
           if-no-files-found: error
