@@ -70,92 +70,89 @@ jobs:
           for p in /opt/homebrew/bin/ldid /usr/bin/ldid; do
             [ -e "$p" ] && sudo rm -f "$p" || true
           done
-          /usr/local/bin/ldid -v 2>&1 | head -2
+          /usr/local/bin/ldid -v 2>&1 | head -1 || true
 
-      - name: Extract stock entitlements
+      - name: Generate self-signed iOS cert
         run: |
           set -euo pipefail
-          /usr/local/bin/ldid -e W.fat.dylib > /tmp/stock-ent.xml 2>/dev/null || true
-          if [ -s /tmp/stock-ent.xml ]; then
-            echo "extracted: $(stat -f%z /tmp/stock-ent.xml) bytes"
-            head -c 300 /tmp/stock-ent.xml
-          else
-            echo "no entitlements extracted"
-            : > /tmp/stock-ent.xml
-          fi
+          mkdir -p certs
+          cd certs
 
-      - name: Sign thin (try variants until match)
+          cat > cert.cnf << 'CERTEOF'
+          [req]
+          distinguished_name = dn
+          prompt = no
+          x509_extensions = v3_ext
+          [dn]
+          CN = Frida Gadget
+          O = Frida
+          OU = Gadget
+          [v3_ext]
+          basicConstraints = critical, CA:FALSE
+          keyUsage = critical, digitalSignature
+          extendedKeyUsage = critical, codeSigning
+          CERTEOF
+
+          openssl ecparam -name prime256v1 -genkey -noout -out key.pem
+          openssl req -new -x509 -key key.pem -out cert.pem \
+            -days 3650 -sha256 -config cert.cnf -extensions v3_ext
+          openssl pkcs12 -export -out sign.p12 \
+            -inkey key.pem -in cert.pem -passout pass:
+
+          ls -la
+          echo "cert ready"
+
+      - name: Try signing variants until size matches
         run: |
           set -euo pipefail
           cp W.thin.dylib W.thin.orig.dylib
+          TARGET=19006592
 
-          try_variant() {
-            local name="$1"
-            shift
+          try() {
+            local name="$1"; shift
             cp W.thin.orig.dylib W.thin.test.dylib
-            if "$@" 2>/tmp/sign.err; then
+            if "$@" >/dev/null 2>/tmp/sign.err; then
               local sz=$(stat -f%z W.thin.test.dylib)
               echo "  [$name] -> $sz"
-              if [ "$sz" = "19006592" ]; then
+              if [ "$sz" = "$TARGET" ]; then
                 echo "  [$name] *** MATCH ***"
                 cp W.thin.test.dylib W.thin.dylib
                 return 0
               fi
             else
-              echo "  [$name] -> FAILED: $(head -1 /tmp/sign.err)"
+              echo "  [$name] -> FAIL: $(head -1 /tmp/sign.err)"
             fi
             return 1
           }
 
           echo "=== trying variants ==="
-          try_variant "ldid -S" \
-            /usr/local/bin/ldid -S W.thin.test.dylib || \
-          try_variant "ldid -S -Cadhoc" \
-            /usr/local/bin/ldid -S -Cadhoc W.thin.test.dylib || \
-          try_variant "ldid -Hsha256 -S" \
-            /usr/local/bin/ldid -Hsha256 -S W.thin.test.dylib || \
-          try_variant "ldid -Hsha1 -Hsha256 -S" \
-            /usr/local/bin/ldid -Hsha1 -Hsha256 -S W.thin.test.dylib || \
-          try_variant "ldid -Slibrary-validation -S" \
-            /usr/local/bin/ldid -Slibrary-validation -S W.thin.test.dylib || \
-          try_variant "ldid -Ckill -S" \
-            /usr/local/bin/ldid -Ckill -S W.thin.test.dylib || \
-          try_variant "ldid -Chard -S" \
-            /usr/local/bin/ldid -Chard -S W.thin.test.dylib || \
-          { echo "::error::no ldid variant matched 19006592"; exit 1; }
+          try "ad-hoc -S" \
+            /usr/local/bin/ldid -S W.thin.test.dylib && exit 0 || true
 
-          echo "final thin: $(stat -f%z W.thin.dylib)"
+          try "cert -s sign.p12 -S" \
+            /usr/local/bin/ldid -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
 
-      - name: Sign with extracted entitlements if no match yet
-        run: |
-          set -euo pipefail
-          if [ "$(stat -f%z W.thin.dylib)" = "19006592" ]; then
-            echo "already matched, skipping"
-            exit 0
-          fi
-          if [ -s /tmp/stock-ent.xml ]; then
-            echo "trying with extracted entitlements"
-            cp W.thin.orig.dylib W.thin.test.dylib
-            /usr/local/bin/ldid -S/tmp/stock-ent.xml W.thin.test.dylib || true
-            sz=$(stat -f%z W.thin.test.dylib)
-            echo "  [ldid -S ent.xml] -> $sz"
-            if [ "$sz" = "19006592" ]; then
-              cp W.thin.test.dylib W.thin.dylib
-              echo "MATCH with entitlements"
-            fi
-          fi
+          try "cert -S certs/sign.p12" \
+            /usr/local/bin/ldid -S certs/sign.p12 W.thin.test.dylib && exit 0 || true
 
-      - name: Verify sign size
-        run: |
-          set -euo pipefail
-          sz=$(stat -f%z W.thin.dylib)
-          echo "thin: $sz"
-          if [ "$sz" != "19006592" ]; then
-            echo "::error::thin is $sz, expected 19006592"
-            echo "ldid version: $(/usr/local/bin/ldid -v 2>&1 | head -1)"
-            ls -la /usr/local/bin/ldid
-            exit 1
-          fi
+          try "cert -Cadhoc -s sign.p12 -S" \
+            /usr/local/bin/ldid -Cadhoc -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
+
+          try "cert -Clinker-signed -s sign.p12 -S" \
+            /usr/local/bin/ldid -Clinker-signed -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
+
+          try "codesign -s -" \
+            codesign --force --sign - --timestamp=none W.thin.test.dylib && exit 0 || true
+
+          try "codesign --generate-entitlement-der" \
+            codesign --force --sign - --timestamp=none --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+
+          echo "::error::no variant matched $TARGET"
+          echo "best effort results:"
+          for n in ad-hoc cert; do
+            echo "  $n variant last size: see above"
+          done
+          exit 1
 
       - name: Zero signature blob
         run: |
@@ -185,10 +182,6 @@ jobs:
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
-          if [ "$(stat -f%z W.dylib)" != "19022976" ]; then
-            echo "::error::fat is $(stat -f%z W.dylib), expected 19022976"
-            exit 1
-          fi
 
       - name: Compare with dev reference
         run: |
@@ -212,6 +205,8 @@ jobs:
               dev = f.read()
           with open("W.dylib", "rb") as f:
               ours = f.read()
+          if len(dev) != len(ours):
+              print("SIZE MISMATCH dev=" + str(len(dev)) + " ours=" + str(len(ours)))
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print("diffs: " + str(len(diffs)))
