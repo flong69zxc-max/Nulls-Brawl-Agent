@@ -27,12 +27,30 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Install dependencies
+      - name: Install build dependencies
         run: |
           set -euo pipefail
-          brew install node meson ninja pkg-config glib || true
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+
+          # Node 22 — Frida 17.2.x не собирается с Node 26
+          brew install node@22 meson ninja pkg-config glib || true
+          brew link --overwrite --force node@22
+          echo "/opt/homebrew/opt/node@22/bin" >> "$GITHUB_PATH"
+
+          # venv для setuptools (обходит PEP 668)
+          python3 -m venv "$HOME/pyenv"
+          source "$HOME/pyenv/bin/activate"
           python3 -m pip install --upgrade pip
           python3 -m pip install setuptools
+
+          echo "=== tool versions ==="
+          node --version
+          meson --version || true
+          ninja --version
+          pkg-config --version
+          python3 --version
+          git --version
 
       - name: Clone Frida source
         run: |
@@ -45,12 +63,20 @@ jobs:
           echo "=== source ready ==="
           ls -la
 
-      - name: Configure and build gum-graft
+      - name: Configure Frida
         run: |
           set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
           cd frida-src
-          ./configure --enable-graft-tool --enable-frida-tools
-          make gum-macos 2>&1 | tail -50
+          ./configure --enable-graft-tool --enable-frida-tools --host=macos-arm64
+          echo "=== configure done ==="
+
+      - name: Build gum + tools
+        run: |
+          set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
+          cd frida-src
+          make gum-macos 2>&1 | tail -80
           echo "=== build done ==="
 
       - name: Locate gum-graft
@@ -58,14 +84,20 @@ jobs:
           set -euo pipefail
           GUM_GRAFT=$(find frida-src/build -type f -name "gum-graft" | head -1)
           if [ -z "$GUM_GRAFT" ]; then
-            echo "::error::gum-graft not found"
-            find frida-src/build -type f -name "*graft*" || true
+            echo "::error::gum-graft not found in build tree"
+            echo "=== all graft-related files ==="
+            find frida-src/build -type f -iname "*graft*" || true
+            echo "=== bin dirs ==="
+            find frida-src/build -type d -name bin || true
+            echo "=== contents of first bin ==="
+            BINDIR=$(find frida-src/build -type d -name bin | head -1)
+            [ -n "$BINDIR" ] && ls -la "$BINDIR" || true
             exit 1
           fi
           chmod +x "$GUM_GRAFT"
           echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
           echo "found: $(realpath $GUM_GRAFT)"
-          "$GUM_GRAFT" --help || true
+          "$GUM_GRAFT" --help 2>&1 | head -20 || true
 
       - name: Download Frida Gadget
         run: |
