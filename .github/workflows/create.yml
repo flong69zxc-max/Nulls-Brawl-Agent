@@ -1,4 +1,4 @@
-name: Build Locator
+name: Build RuntimeInspector
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  locator:
+  inspector:
     runs-on: macos-14
     timeout-minutes: 15
     steps:
@@ -26,21 +26,20 @@ jobs:
       - name: Write source
         run: |
           set -euo pipefail
-          cat > locator.m <<'OBJC_EOF'
+          cat > inspector.m <<'OBJC_EOF'
           #import <Foundation/Foundation.h>
           #import <mach-o/dyld.h>
           #import <dlfcn.h>
           #import <objc/runtime.h>
+          #import <mach/mach.h>
           #import <unistd.h>
           #import <fcntl.h>
 
           static void redirectLogs(void) {
               NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
               NSString *docs = paths.count > 0 ? paths[0] : nil;
-              if (!docs) {
-                  docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-              }
-              NSString *logPath = [docs stringByAppendingPathComponent:@"locator.log"];
+              if (!docs) docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+              NSString *logPath = [docs stringByAppendingPathComponent:@"inspector.log"];
               int fd = open([logPath fileSystemRepresentation], O_CREAT | O_WRONLY | O_APPEND, 0666);
               if (fd >= 0) {
                   dup2(fd, STDERR_FILENO);
@@ -49,81 +48,116 @@ jobs:
                   setvbuf(stderr, NULL, _IONBF, 0);
                   setvbuf(stdout, NULL, _IONBF, 0);
               }
-              NSLog(@"[Locator] log: %@", logPath);
+              NSLog(@"[Inspector] log: %@", logPath);
           }
 
-          static void checkFile(NSString *dir, NSString *name) {
-              NSString *full = [dir stringByAppendingPathComponent:name];
-              BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:full];
-              NSLog(@"[Locator]   %@/%@ -> %@", dir, name, exists ? @"FOUND" : @"missing");
-          }
-
-          static void scanDir(NSString *dir) {
+          static void logFile(NSString *path) {
               NSFileManager *fm = [NSFileManager defaultManager];
               BOOL isDir = NO;
-              if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) {
-                  NSLog(@"[Locator] %@ -> not a directory", dir);
+              if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
+                  NSLog(@"[Inspector] %@ -> missing", path);
                   return;
               }
-              NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
-              NSLog(@"[Locator] %@ contents (%lu): %@", dir, (unsigned long)items.count, items);
+              if (isDir) {
+                  NSArray *items = [fm contentsOfDirectoryAtPath:path error:nil];
+                  NSLog(@"[Inspector] %@ contents (%lu):", path, (unsigned long)items.count);
+                  for (NSString *item in items) {
+                      NSString *full = [path stringByAppendingPathComponent:item];
+                      NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+                      NSNumber *size = attrs[NSFileSize];
+                      NSLog(@"[Inspector]   %@ (%@ B)", item, size ?: @"?");
+                  }
+              } else {
+                  NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
+                  NSNumber *size = attrs[NSFileSize];
+                  NSLog(@"[Inspector] %@ FOUND (%@ B)", path, size ?: @"?");
+              }
           }
 
-          static void runLocator(void) {
-              @autoreleasepool {
-                  NSLog(@"[Locator] ========================================");
-                  NSLog(@"[Locator] Locator loaded pid=%d", getpid());
-                  NSLog(@"[Locator] Bundle: %@", [[NSBundle mainBundle] bundlePath]);
-                  NSLog(@"[Locator] Executable: %@", [[NSBundle mainBundle] executablePath]);
-                  NSLog(@"[Locator] Container: %@", NSHomeDirectory());
-                  NSLog(@"[Locator] Bundle ID: %@", [[NSBundle mainBundle] bundleIdentifier]);
+          static void dumpEnv(void) {
+              NSLog(@"[Inspector] --- environment ---");
+              for (NSString *key in @[@"DYLD_INSERT_LIBRARIES", @"DYLD_LIBRARY_PATH", @"DYLD_FRAMEWORK_PATH", @"HOME", @"TMPDIR", @"MallocNanoZone"]) {
+                  char *val = getenv([key UTF8String]);
+                  if (val) NSLog(@"[Inspector]   %@ = %s", key, val);
+              }
+              uint32_t flags = 0;
+              csops(getpid(), 0, &flags, sizeof(flags));
+              NSLog(@"[Inspector] csops flags: 0x%x", flags);
+              BOOL getTaskAllow = (flags & 0x1000000) != 0;
+              NSLog(@"[Inspector] get-task-allow: %@", getTaskAllow ? @"YES" : @"NO");
+          }
 
-                  NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-                  NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
-                  NSString *container = NSHomeDirectory();
-                  NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
-                  NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
-                  NSString *appsDir = [docs stringByAppendingPathComponent:@"Applications"];
+          static void dumpModules(void) {
+              NSLog(@"[Inspector] --- loaded modules (filtered) ---");
+              uint32_t count = _dyld_image_count();
+              for (uint32_t i = 0; i < count; i++) {
+                  const char *name = _dyld_get_image_name(i);
+                  if (!name) continue;
+                  NSString *n = [NSString stringWithUTF8String:name];
+                  if ([n containsString:@"W.dylib"] || [n containsString:@"Frida"] ||
+                      [n containsString:@"frida"] || [n containsString:@"TweakLoader"] ||
+                      [n containsString:@"Inspector"] || [n containsString:@"Locator"] ||
+                      [n containsString:@".app/"]) {
+                      NSLog(@"[Inspector]   [%u] %@", i, n);
+                  }
+              }
+          }
 
-                  NSLog(@"[Locator] --- checking W files ---");
-                  checkFile(bundlePath, @"W.dylib");
-                  checkFile(bundlePath, @"W.config");
-                  checkFile(bundlePath, @"agent.js");
-                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"W.dylib");
-                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"W.config");
-                  checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"agent.js");
-                  checkFile(appDir, @"W.dylib");
-                  checkFile(docs, @"W.dylib");
-                  checkFile(docs, @"W.config");
-                  checkFile(docs, @"agent.js");
-                  checkFile(tweaks, @"W.dylib");
-                  checkFile(tweaks, @"W.config");
-                  checkFile(tweaks, @"agent.js");
-
-                  NSLog(@"[Locator] --- scanning directories ---");
-                  scanDir(bundlePath);
-                  scanDir([bundlePath stringByAppendingPathComponent:@"Frameworks"]);
-                  scanDir(tweaks);
-                  scanDir(appsDir);
-                  scanDir(docs);
-
-                  NSLog(@"[Locator] --- loaded modules ---");
-                  uint32_t count = _dyld_image_count();
-                  for (uint32_t i = 0; i < count; i++) {
-                      const char *name = _dyld_get_image_name(i);
-                      if (!name) continue;
-                      NSString *n = [NSString stringWithUTF8String:name];
-                      if ([n containsString:@"W.dylib"] || [n containsString:@"Frida"] ||
-                          [n containsString:@"TweakLoader"] || [n containsString:@"Locator"]) {
-                          NSLog(@"[Locator]   [%u] %@", i, n);
+          static void dumpThreads(void) {
+              NSLog(@"[Inspector] --- threads ---");
+              thread_act_array_t threads;
+              mach_msg_type_number_t threadCount = 0;
+              if (task_threads(mach_task_self(), &threads, &threadCount) == KERN_SUCCESS) {
+                  for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
+                      thread_t t = threads[i];
+                      thread_extended_info_data_t info;
+                      mach_msg_type_number_t infoCount = THREAD_EXTENDED_INFO_COUNT;
+                      if (thread_info(t, THREAD_EXTENDED_INFO, (thread_info_t)&info, &infoCount) == KERN_SUCCESS) {
+                          NSString *name = [NSString stringWithUTF8String:info.pth_name];
+                          if (name.length > 0 && ([name containsString:@"frida"] || [name containsString:@"gadget"])) {
+                              NSLog(@"[Inspector]   thread %u: %@", i, name);
+                          }
                       }
                   }
+                  vm_deallocate(mach_task_self(), (vm_address_t)threads, threadCount * sizeof(thread_t));
+              }
+          }
 
-                  Dl_info info;
-                  if (dladdr((void *)&runLocator, &info) && info.dli_fname) {
-                      NSLog(@"[Locator] Loaded from: %s", info.dli_fname);
-                  }
-                  NSLog(@"[Locator] ========================================");
+          static void dumpConfig(void) {
+              NSLog(@"[Inspector] --- config / agent files ---");
+              NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+              NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
+              NSString *fwDir = [bundlePath stringByAppendingPathComponent:@"Frameworks"];
+              NSString *container = NSHomeDirectory();
+              NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
+              NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
+
+              NSArray *candidates = @[
+                  [bundlePath stringByAppendingPathComponent:@"W.config"],
+                  [bundlePath stringByAppendingPathComponent:@"agent.js"],
+                  [fwDir stringByAppendingPathComponent:@"W.config"],
+                  [fwDir stringByAppendingPathComponent:@"agent.js"],
+                  [appDir stringByAppendingPathComponent:@"W.config"],
+                  [appDir stringByAppendingPathComponent:@"agent.js"],
+                  [docs stringByAppendingPathComponent:@"W.config"],
+                  [tweaks stringByAppendingPathComponent:@"W.config"],
+                  [tweaks stringByAppendingPathComponent:@"agent.js"],
+              ];
+              for (NSString *p in candidates) logFile(p);
+          }
+
+          static void runInspector(void) {
+              @autoreleasepool {
+                  NSLog(@"[Inspector] ========================================");
+                  NSLog(@"[Inspector] pid=%d", getpid());
+                  NSLog(@"[Inspector] Bundle: %@", [[NSBundle mainBundle] bundlePath]);
+                  NSLog(@"[Inspector] Executable: %@", [[NSBundle mainBundle] executablePath]);
+                  NSLog(@"[Inspector] Container: %@", NSHomeDirectory());
+                  dumpEnv();
+                  dumpConfig();
+                  dumpModules();
+                  dumpThreads();
+                  NSLog(@"[Inspector] ========================================");
               }
           }
 
@@ -131,14 +165,12 @@ jobs:
           __attribute__((used))
           static void onLoad(void) {
               redirectLogs();
-              runLocator();
+              runInspector();
           }
 
-          @interface LocatorLoader : NSObject @end
-          @implementation LocatorLoader
-          + (void)load {
-              onLoad();
-          }
+          @interface InspectorLoader : NSObject @end
+          @implementation InspectorLoader
+          + (void)load { onLoad(); }
           @end
           OBJC_EOF
 
@@ -147,8 +179,8 @@ jobs:
           set -euo pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           clang -dynamiclib \
-            -o Locator.dylib \
-            locator.m \
+            -o Inspector.dylib \
+            inspector.m \
             -framework Foundation \
             -arch arm64 \
             -miphoneos-version-min=12.0 \
@@ -156,29 +188,29 @@ jobs:
             -fobjc-arc \
             -O2 \
             -Wall -Wextra \
-            -install_name "@executable_path/Frameworks/Locator.dylib"
-          ls -l Locator.dylib
+            -install_name "@executable_path/Frameworks/Inspector.dylib"
+          ls -l Inspector.dylib
 
       - name: Verify
         run: |
           set -euo pipefail
-          file Locator.dylib | grep -q arm64
-          otool -l Locator.dylib | grep -A3 -i 'init_array' || echo "WARNING: no init_array"
+          file Inspector.dylib | grep -q arm64
+          otool -l Inspector.dylib | grep -A3 -i 'init_array' || echo "WARNING: no init_array"
 
       - name: Sign
         run: |
           set -euo pipefail
           brew install ldid || true
           if command -v ldid >/dev/null; then
-            cp Locator.dylib Locator.signed.dylib
-            ldid -S Locator.signed.dylib
+            cp Inspector.dylib Inspector.signed.dylib
+            ldid -S Inspector.signed.dylib
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: locator
+          name: inspector
           path: |
-            Locator.dylib
-            Locator.signed.dylib
+            Inspector.dylib
+            Inspector.signed.dylib
           retention-days: 30
           if-no-files-found: error
