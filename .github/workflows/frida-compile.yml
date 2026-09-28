@@ -28,10 +28,11 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install frida-compile and frida
+      - name: Install frida-compile and dependencies
         run: |
           set -euo pipefail
-          npm install -g frida-compile@17 frida
+          npm install -g frida-compile@17
+          npm install frida-objc-bridge
           NPM_BIN="$(npm prefix -g)/bin"
           echo "$NPM_BIN" >> "$GITHUB_PATH"
           ls -la "$NPM_BIN" | grep frida || true
@@ -55,7 +56,7 @@ jobs:
               _*|*.d) continue ;;
             esac
             echo "=== compile $f ==="
-            frida-compile "$f" -o "build/${base}.js" -b -S
+            frida-compile "$f" -o "build/${base}.js" -S -c
             ls -la "build/${base}.js"
             count=$((count + 1))
           done
