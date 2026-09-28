@@ -3,8 +3,6 @@ name: Build Frida.framework with gum-graft
 on:
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/build_grafted_ipa.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,8 +22,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: Install build deps
         run: |
@@ -53,12 +49,11 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch ${FRIDA_VERSION} \
-            https://github.com/frida/frida-gum.git frida-gum || \
-          git clone --depth 1 https://github.com/frida/frida-gum.git frida-gum
+            https://github.com/frida/frida-gum.git frida-gum
           cd frida-gum
           git submodule update --init --recursive --depth 1
 
-      - name: Configure frida-gum with graft tool
+      - name: Configure with graft tool
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
@@ -73,31 +68,21 @@ jobs:
           cd frida-gum/build
           ninja -t targets all 2>/dev/null | grep -iE "graft" | head -20 || true
 
-      - name: Build gum-graft
+      - name: Build all
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-gum/build
-          if ninja -t targets all 2>/dev/null | grep -q "gum-graft"; then
-            ninja gum-graft 2>&1 | tail -60
-          elif ninja -t targets all 2>/dev/null | grep -q "graft"; then
-            TARGET=$(ninja -t targets all | grep -i graft | head -1 | cut -d: -f1)
-            echo "building target: $TARGET"
-            ninja "$TARGET" 2>&1 | tail -60
-          else
-            echo "::error::no graft target found"
-            ninja -t targets all | grep -i gum | head -30
-            exit 1
-          fi
+          ninja 2>&1 | tail -60
 
       - name: Locate gum-graft
         run: |
           set -euo pipefail
           GUM_GRAFT=$(find frida-gum -type f -name "gum-graft" -perm +111 | head -1)
           if [ -z "$GUM_GRAFT" ]; then
-            echo "::error::gum-graft binary not found"
+            echo "::error::gum-graft not found"
             find frida-gum -type f -iname "*graft*" || true
-            find frida-gum/build -type f -perm +111 | head -20 || true
+            find frida-gum/build -type f -perm +111 | head -30 || true
             exit 1
           fi
           chmod +x "$GUM_GRAFT"
@@ -112,18 +97,14 @@ jobs:
           curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
-          file W.stock.dylib
           lipo -thin arm64 -output W.thin.dylib W.stock.dylib
           file W.thin.dylib
-          echo "thin size: $(stat -f%z W.thin.dylib) bytes"
 
       - name: Run gum-graft
         run: |
           set -euo pipefail
           "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
-          echo "=== after grafting ==="
           file W.thin.dylib
-          echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
           otool -l W.thin.dylib | grep -i graft || echo "no graft sections found"
 
       - name: Assemble Frida.framework
