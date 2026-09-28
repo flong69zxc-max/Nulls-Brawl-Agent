@@ -190,9 +190,7 @@ function log(line) {
   } catch (e) {}
 }
 
-function sep(label) {
-  log("---- " + label + " ----");
-}
+function sep(label) { log("---- " + label + " ----"); }
 
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
@@ -247,15 +245,6 @@ function writeText(path, text) {
   } catch (e) { return false; }
 }
 
-function fileSize(path) {
-  try {
-    const f = new File(path, "r");
-    const bytes = f.readAllBytes();
-    f.close();
-    return bytes.length;
-  } catch (e) { return -1; }
-}
-
 function writable(path) {
   if (!path) return false;
   const test = path + "/" + TEST_NAME;
@@ -294,9 +283,7 @@ function numOf(pointer) {
   return parseInt(text.substring(0, 2) === "0x" ? text.substring(2) : text, 16);
 }
 
-function hex(pointer) {
-  return "0x" + numOf(pointer).toString(16);
-}
+function hexOf(pointer) { return "0x" + numOf(pointer).toString(16); }
 
 function lcDump() {
   const out = [];
@@ -554,6 +541,18 @@ function writeAt(p, value, type) {
   else p.writeU8(value);
 }
 
+function tryProtect(addr, size) {
+  try {
+    Memory.protect(addr, size, "rwx");
+    return true;
+  } catch (e) {}
+  try {
+    Memory.protect(addr, size, "rw-");
+    return true;
+  } catch (e) {}
+  return false;
+}
+
 function applyTarget(target) {
   const type = target.type || "u8";
   const name = target.name || "target";
@@ -593,11 +592,23 @@ function applyTarget(target) {
     log("target " + name + " @" + addr + ": probe: before=" + str(before) + " want=" + str(want) + " (" + range.protection + ")");
     return "probe";
   }
+  let patched = false;
   try {
     Memory.patchCode(addr, size, function (code) { writeAt(code, want, type); });
+    patched = true;
   } catch (e) {
-    log("target " + name + " @" + addr + ": patchCode failed: " + e.message);
-    return "patch-error";
+    log("target " + name + " @" + addr + ": patchCode failed: " + e.message + ", trying Memory.protect");
+  }
+  if (!patched) {
+    if (!tryProtect(addr, size)) {
+      log("target " + name + " @" + addr + ": Memory.protect failed");
+      return "protect-error";
+    }
+    try { writeAt(addr, want, type); patched = true; }
+    catch (e) {
+      log("target " + name + " @" + addr + ": write failed: " + e.message);
+      return "write-error";
+    }
   }
   let after = null;
   try { after = readAt(addr, type); } catch (e) {}
@@ -652,7 +663,7 @@ function regionList(protections) {
   }
   const lo = tr[0];
   const hi = tr[1];
-  log("region filter: lo=" + "0x" + lo.toString(16) + " hi=" + "0x" + hi.toString(16));
+  log("region filter: lo=0x" + lo.toString(16) + " hi=0x" + hi.toString(16));
   const out = [];
   const seen = {};
   for (let i = 0; i < protections.length; i++) {
@@ -685,7 +696,7 @@ function scanRegion(range, pattern) {
       const matches = Memory.scanSync(base.add(offset), take, pattern);
       for (let i = 0; i < matches.length; i++) results.push(matches[i].address);
     } catch (e) {
-      log("scan chunk fail at " + hex(base.add(offset)) + " size=" + take + ": " + e.message);
+      log("scan chunk fail at " + hexOf(base.add(offset)) + " size=" + take + ": " + e.message);
     }
     offset += take;
   }
@@ -701,9 +712,7 @@ function tagAnchor(target, tag) {
 function collectStringHits(map, regions) {
   const hits = [];
   const byAddress = {};
-  let anchorsTotal = 0;
   let anchorsScanned = 0;
-  for (const name in map) anchorsTotal += map[name].length;
   for (const name in map) {
     const anchors = map[name];
     for (let a = 0; a < anchors.length; a++) {
@@ -728,7 +737,7 @@ function collectStringHits(map, regions) {
       }
     }
   }
-  log("anchors scanned " + anchorsScanned + "/" + anchorsTotal + ", unique addresses=" + hits.length);
+  log("anchors scanned " + anchorsScanned + ", unique addresses=" + hits.length);
   return hits;
 }
 
