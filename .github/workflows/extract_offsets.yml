@@ -65,16 +65,26 @@ jobs:
         id: cache-ipa
         with:
           path: ipa_cache
-          key: ipa-nulls-brawl-v1
+          key: ipa-nulls-brawl-v3
 
       - name: Download ipa
         if: steps.cache-ipa.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ipa_cache
-          curl -fL --retry 3 -A "Mozilla/5.0" -o ipa_cache/bs.ipa "https://nulls.ee/bs_latest_i"
+          curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
+            -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1" \
+            -e "https://nulls.ee/" \
+            -o ipa_cache/bs.ipa \
+            "https://cdn.r2storage-88c.workers.dev/nb_ipa"
           test -s ipa_cache/bs.ipa
           file ipa_cache/bs.ipa
+          if ! file ipa_cache/bs.ipa | grep -qi "zip"; then
+            echo "ERROR: downloaded file is not a zip/ipa"
+            echo "--- first bytes ---"
+            head -c 512 ipa_cache/bs.ipa | strings | head -20 || true
+            exit 1
+          fi
           ls -la ipa_cache/
 
       - name: Extract executable
