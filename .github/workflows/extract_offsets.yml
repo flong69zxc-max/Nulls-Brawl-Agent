@@ -107,23 +107,28 @@ jobs:
           unzip -q ipa_cache/bs.ipa -d extract
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           test -n "$APP_DIR"
-          BIN=""
-          for f in "$APP_DIR"/*; do
-            [ -f "$f" ] || continue
-            [ -x "$f" ] || continue
-            case "$f" in
-              *.dylib|*.png|*.jpg|*.plist|*.car|*.ttf) continue ;;
-            esac
-            if file "$f" | grep -qi "Mach-O"; then
-              BIN="$f"
-              break
-            fi
-          done
+          echo "--- APP_DIR contents ---"
+          ls -la "$APP_DIR" | head -40
+          BIN="$APP_DIR/Nulls Brawl"
+          if [ ! -f "$BIN" ]; then
+            BIN=""
+            for f in "$APP_DIR"/*; do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.dylib|*.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.xml|*.txt|*.html) continue ;;
+              esac
+              if file "$f" | grep -qi "Mach-O"; then
+                BIN="$f"
+                break
+              fi
+            done
+          fi
           test -n "$BIN"
+          test -f "$BIN"
+          file "$BIN"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
           echo "BIN_NAME=$(basename "$BIN")" >> "$GITHUB_ENV"
-          file "$BIN"
 
       - name: Validate scripts
         run: |
