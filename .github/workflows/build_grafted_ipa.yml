@@ -32,27 +32,30 @@ jobs:
           set -euo pipefail
           export HOMEBREW_NO_AUTO_UPDATE=1
           export HOMEBREW_NO_INSTALL_CLEANUP=1
-
-          # Node 22 — Frida 17.2.x не собирается с Node 26
           brew install node@22 meson ninja pkg-config glib || true
           brew link --overwrite --force node@22
           echo "/opt/homebrew/opt/node@22/bin" >> "$GITHUB_PATH"
-
-          # venv для setuptools (обходит PEP 668)
           python3 -m venv "$HOME/pyenv"
           source "$HOME/pyenv/bin/activate"
           python3 -m pip install --upgrade pip
           python3 -m pip install setuptools
-
-          echo "=== tool versions ==="
           node --version
-          meson --version || true
+          meson --version
           ninja --version
-          pkg-config --version
-          python3 --version
-          git --version
+
+      - name: Cache Frida build
+        id: cache-frida
+        uses: actions/cache@v4
+        with:
+          path: |
+            frida-src/build
+            frida-src/subprojects/packagecache
+          key: frida-${{ env.FRIDA_VERSION }}-${{ runner.os }}-${{ hashFiles('.github/workflows/build_grafted_ipa.yml') }}
+          restore-keys: |
+            frida-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
 
       - name: Clone Frida source
+        if: steps.cache-frida.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           git clone --depth 1 --branch ${FRIDA_VERSION} \
@@ -61,22 +64,25 @@ jobs:
           cd frida-src
           git submodule update --init --recursive --depth 1
           echo "=== source ready ==="
-          ls -la
 
       - name: Configure Frida
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
+          if [ -f build/build.ninja ]; then
+            echo "build already configured, skipping configure"
+            exit 0
+          fi
           ./configure --enable-graft-tool --enable-frida-tools --host=macos-arm64
           echo "=== configure done ==="
 
-      - name: Build gum + tools
+      - name: Build gum and tools
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
-          make gum-macos 2>&1 | tail -80
+          make 2>&1 | tail -100
           echo "=== build done ==="
 
       - name: Locate gum-graft
@@ -85,13 +91,10 @@ jobs:
           GUM_GRAFT=$(find frida-src/build -type f -name "gum-graft" | head -1)
           if [ -z "$GUM_GRAFT" ]; then
             echo "::error::gum-graft not found in build tree"
-            echo "=== all graft-related files ==="
+            echo "=== graft-related files ==="
             find frida-src/build -type f -iname "*graft*" || true
             echo "=== bin dirs ==="
-            find frida-src/build -type d -name bin || true
-            echo "=== contents of first bin ==="
-            BINDIR=$(find frida-src/build -type d -name bin | head -1)
-            [ -n "$BINDIR" ] && ls -la "$BINDIR" || true
+            find frida-src/build -type d -name bin -exec ls -la {} \; || true
             exit 1
           fi
           chmod +x "$GUM_GRAFT"
@@ -200,7 +203,6 @@ jobs:
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
-            codesign -dvv "$FRAMEWORK_NAME/W.dylib" 2>&1 | head -5 || true
           fi
 
       - name: Package
@@ -214,22 +216,6 @@ jobs:
             -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
           unzip -l "$FRAMEWORK_NAME.zip"
           shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
-
-      - name: Summary
-        run: |
-          set -euo pipefail
-          {
-            echo "### frida framework with gum-graft"
-            echo ""
-            echo "| param | value |"
-            echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION} |"
-            echo "| tool | gum-graft (built from source) |"
-            echo "| arch | arm64 |"
-            echo "| code_signing | required |"
-            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
-            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
