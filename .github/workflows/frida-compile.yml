@@ -6,6 +6,7 @@ on:
     paths:
       - 'scripts/frida-scripts/**'
       - 'package.json'
+      - 'tsconfig.json'
       - '.github/workflows/frida-compile.yml'
   workflow_dispatch:
 
@@ -32,19 +33,19 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
-          npm install -g frida-compile@17
           npm install
+          npm install -g frida-compile@17
           NPM_BIN="$(npm prefix -g)/bin"
           echo "$NPM_BIN" >> "$GITHUB_PATH"
-          ls -la "$NPM_BIN" | grep frida || true
 
       - name: Verify
         run: |
           set -euo pipefail
-          which frida-compile || { echo "NOT IN PATH"; exit 1; }
+          which frida-compile
           ROOT=$(npm root -g)
           node -e "console.log('frida-compile: ' + require('$ROOT/frida-compile/package.json').version)"
           node -e "console.log('frida-objc-bridge: ' + require('./node_modules/frida-objc-bridge/package.json').version)"
+          node -e "console.log('@types/frida-gum: ' + require('./node_modules/@types/frida-gum/package.json').version)"
 
       - name: Compile scripts
         run: |
