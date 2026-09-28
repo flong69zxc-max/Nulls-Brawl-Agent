@@ -40,23 +40,13 @@ jobs:
           sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid 2>/dev/null || true
           brew uninstall ldid 2>/dev/null || true
           brew install cmake pkg-config libplist openssl@3
-
           rm -rf ldid-src
           git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
-
           OPENSSL_PREFIX=$(brew --prefix openssl@3)
           LIBPLIST_PREFIX=$(brew --prefix libplist)
-
           cd ldid-src
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" \
-            -DCMAKE_PREFIX_PATH="$OPENSSL_PREFIX;$LIBPLIST_PREFIX" \
-            -DCMAKE_CXX_FLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DOPENSSL_ROOT_DIR="$OPENSSL_PREFIX" -DCMAKE_PREFIX_PATH="$OPENSSL_PREFIX;$LIBPLIST_PREFIX"
           cmake --build build -j$(sysctl -n hw.ncpu)
-
           sudo cp build/ldid /usr/local/bin/ldid
           sudo chmod +x /usr/local/bin/ldid
           hash -r
@@ -67,18 +57,17 @@ jobs:
           set -euo pipefail
           ldid -S W.thin.dylib
           echo "thin after sign: $(stat -f%z W.thin.dylib)"
-
           if [ "$(stat -f%z W.thin.dylib)" != "19006592" ]; then
             echo "::error::thin size is $(stat -f%z W.thin.dylib), expected 19006592"
             exit 1
           fi
 
-      - name: Zero signature blob
+      - name: Write zero-sig script
         run: |
-          set -euo pipefail
-          python3 - << 'PYEOF'
+          cat > /tmp/zero_sig.py << 'PYEOF'
           import struct
-          with open("W.thin.dylib", "rb") as f:
+          path = "W.thin.dylib"
+          with open(path, "rb") as f:
               d = bytearray(f.read())
           n = struct.unpack_from("<I", d, 16)[0]
           o = 32
@@ -86,28 +75,53 @@ jobs:
               c, s = struct.unpack_from("<II", d, o)
               if c == 0x1d:
                   off, sz = struct.unpack_from("<II", d, o + 8)
-                  print(f"LC_CODE_SIGNATURE: offset={off} size={sz}")
-                  if sz != 256496:
-                      print(f"::warning::signature size {sz}, expected 256496")
+                  print("LC_CODE_SIGNATURE: offset=" + str(off) + " size=" + str(sz))
                   for i in range(off, off + sz):
                       d[i] = 0
                   break
               o += s
-          with open("W.thin.dylib", "wb") as f:
+          with open(path, "wb") as f:
               f.write(d)
-          print(f"thin final: {len(d)}")
+          print("final size: " + str(len(d)))
           PYEOF
+          echo "script written"
+
+      - name: Run zero-sig
+        run: |
+          set -euo pipefail
+          python3 /tmp/zero_sig.py
 
       - name: Wrap into fat binary
         run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
-
           if [ "$(stat -f%z W.dylib)" != "19022976" ]; then
             echo "::error::fat size is $(stat -f%z W.dylib), expected 19022976"
             exit 1
           fi
+
+      - name: Write compare script
+        run: |
+          cat > /tmp/compare.py << 'PYEOF'
+          with open("W.dev.dylib", "rb") as f:
+              dev = f.read()
+          with open("W.dylib", "rb") as f:
+              ours = f.read()
+          if len(dev) != len(ours):
+              print("length mismatch: dev=" + str(len(dev)) + " ours=" + str(len(ours)))
+          n = min(len(dev), len(ours))
+          diffs = []
+          for i in range(n):
+              if dev[i] != ours[i]:
+                  diffs.append(i)
+          print("diffs: " + str(len(diffs)))
+          for i in diffs[:32]:
+              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
+          if not diffs:
+              print("PERFECT: byte-identical to dev")
+          PYEOF
+          echo "script written"
 
       - name: Compare with dev reference
         run: |
@@ -116,35 +130,18 @@ jobs:
           for p in Frida/W.dylib.zip W.dylib.zip frida/W.dylib.zip; do
             if [ -f "$p" ]; then REF="$p"; break; fi
           done
-
           if [ -z "$REF" ]; then
-            echo "::warning::dev reference not found, skipping comparison"
+            echo "::warning::dev reference not found, skipping"
             exit 0
           fi
-
           echo "using reference: $REF"
           mkdir -p dev
           unzip -o "$REF" -d dev > /dev/null
           DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
           cp "$DEV" W.dev.dylib
-
-          echo "=== sizes ==="
           echo "dev:  $(stat -f%z W.dev.dylib)"
           echo "ours: $(stat -f%z W.dylib)"
-
-          python3 - << 'PYEOF'
-          with open("W.dev.dylib","rb") as f: dev = f.read()
-          with open("W.dylib","rb") as f: ours = f.read()
-          if len(dev) != len(ours):
-              print(f"::error::length mismatch: dev={len(dev)} ours={len(ours)}")
-          n = min(len(dev), len(ours))
-          diffs = [i for i in range(n) if dev[i] != ours[i]]
-          print(f"total differing bytes: {len(diffs)}")
-          for i in diffs[:32]:
-              print(f"  off 0x{i:x}: dev={dev[i]:02x} ours={ours[i]:02x}")
-          if not diffs:
-              print("PERFECT: byte-identical to dev")
-          PYEOF
+          python3 /tmp/compare.py
 
       - name: Assemble Frida.framework
         run: |
@@ -152,7 +149,6 @@ jobs:
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
           cp W.dylib "$FRAMEWORK_NAME/W.dylib"
-
           cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -170,16 +166,13 @@ jobs:
           </dict>
           </plist>
           PLIST
-
           cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
           {
             "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
             "code_signing": "required"
           }
           CONFIG
-
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
