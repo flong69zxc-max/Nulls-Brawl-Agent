@@ -98,7 +98,6 @@ jobs:
                   DLOG(@"Documents writable: %@",
                        [[NSFileManager defaultManager] isWritableFileAtPath:docs] ? @"YES" : @"NO");
 
-                  DLOG(@"Code signing policy: %d", (int)Process.codeSigningPolicy);
                   DLOG(@"========================================");
               }
           }
