@@ -28,11 +28,35 @@ jobs:
         with:
           node-version: '20'
 
+      - uses: actions/cache@v4
+        id: cache-npm
+        with:
+          path: ~/.npm
+          key: npm-frida-compile-17-${{ runner.os }}-v1
+          restore-keys: |
+            npm-frida-compile-17-
+            npm-frida-compile-
+
+      - uses: actions/cache@v4
+        id: cache-frida-compile
+        with:
+          path: /usr/local/lib/node_modules/frida-compile
+          key: frida-compile-17-${{ runner.os }}-v1
+
       - name: Install frida-compile
+        if: steps.cache-frida-compile.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          npm install -g frida-compile@latest
-          frida-compile --version || true
+          npm install -g frida-compile@17
+          frida-compile --version
+
+      - name: Verify frida-compile
+        run: |
+          set -euo pipefail
+          which frida-compile
+          frida-compile --version
+          echo "--- help ---"
+          frida-compile --help || true
 
       - name: Compile scripts
         run: |
@@ -45,9 +69,11 @@ jobs:
             case "$base" in
               _*|*.d) echo "skip $f"; continue ;;
             esac
-            echo "=== compile $f -> build/${base}.js ==="
-            frida-compile "$f" -o "build/${base}.js" -c -S
+            echo "=== compile $f ==="
+            frida-compile "$f" -o "build/${base}.js"
             ls -la "build/${base}.js"
+            echo "--- first 64 bytes ---"
+            xxd -l 64 "build/${base}.js" || true
             count=$((count + 1))
           done
           shopt -u nullglob
@@ -61,14 +87,20 @@ jobs:
             echo "--- $f ---"
             file "$f"
             wc -c "$f"
-            head -c 16 "$f" | xxd
+            wc -l "$f"
           done
 
-      - name: Report
+      - name: Report head
         if: always()
         run: |
-          echo "=== build/ ==="
-          ls -la build/ 2>/dev/null || true
+          for f in build/*.js; do
+            echo "=== HEAD $f ==="
+            head -c 2000 "$f" || true
+            echo
+            echo "=== TAIL $f ==="
+            tail -c 500 "$f" || true
+            echo
+          done
 
       - uses: actions/upload-artifact@v4
         if: always()
