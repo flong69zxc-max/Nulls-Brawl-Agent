@@ -1,4 +1,4 @@
-name: Build FridaGadget Framework (17.18.0 + gum-graft)
+name: Build Frida.framework
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -24,7 +24,6 @@ jobs:
             if [ -f "$p" ]; then echo "path=$p" >> "$GITHUB_OUTPUT"; echo "found: $p"; exit 0; fi
           done
           echo "::error::agent script not found"
-          find . -maxdepth 3 -name "*.js" -not -path "./node_modules/*" -not -path "./ghidra/*"
           exit 1
 
       - uses: actions/cache@v4
@@ -35,8 +34,6 @@ jobs:
 
       - name: Download Frida Gadget 17.18.0
         if: steps.cache-gadget.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p gadget-cache
@@ -54,8 +51,6 @@ jobs:
 
       - name: Download gum-graft
         if: steps.cache-gum-graft.outputs.cache-hit != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p gum-graft-bin
@@ -79,44 +74,15 @@ jobs:
           chmod +x gum-graft-bin/gum-graft
           gum-graft-bin/gum-graft -i gadget-cache/FridaGadget-grafted
           file gadget-cache/FridaGadget-grafted
-          ls -la gadget-cache/
-
-      - name: Download Nulls Brawl IPA
-        run: |
-          set -euo pipefail
-          mkdir -p build
-          curl -fL -A "Mozilla/5.0" -o build/bs.ipa "https://dnull.xyz/latest_bs_i"
-          test -s build/bs.ipa
-          file build/bs.ipa
-
-      - name: Extract IPA
-        id: extract
-        run: |
-          set -euo pipefail
-          rm -rf build/extract
-          mkdir -p build/extract
-          unzip -q build/bs.ipa -d build/extract
-          APP_DIR=$(find build/extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
-          test -n "$APP_DIR"
-          BIN="$APP_DIR/Nulls Brawl"
-          if [ ! -f "$BIN" ]; then
-            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
-          fi
-          test -f "$BIN"
-          echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
-          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
-          file "$BIN"
 
       - name: Build Frida.framework
         run: |
           set -euo pipefail
-          APP_DIR="${{ steps.extract.outputs.app_dir }}"
-          FW="$APP_DIR/Frameworks/Frida.framework"
-          mkdir -p "$FW"
-          cp gadget-cache/FridaGadget-grafted "$FW/W.dylib"
-          chmod +x "$FW/W.dylib"
-          cp "${{ steps.agent.outputs.path }}" "$FW/agent.js"
-          cat > "$FW/Info.plist" << 'EOF'
+          mkdir -p Frida.framework
+          cp gadget-cache/FridaGadget-grafted Frida.framework/W.dylib
+          chmod +x Frida.framework/W.dylib
+          cp "${{ steps.agent.outputs.path }}" Frida.framework/agent.js
+          cat > Frida.framework/Info.plist << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -152,7 +118,7 @@ jobs:
           </dict>
           </plist>
           EOF
-          cat > "$FW/FridaGadget.config" << 'EOF'
+          cat > Frida.framework/FridaGadget.config << 'EOF'
           {
             "interaction": {
               "type": "script",
@@ -162,59 +128,23 @@ jobs:
             "code_signing": "required"
           }
           EOF
-          ls -la "$FW"
-
-      - name: Install tools
-        run: |
-          set -euo pipefail
-          brew install ldid
-          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
-          sudo cp build/Release/insert_dylib /usr/local/bin/
-          sudo chmod +x /usr/local/bin/insert_dylib
-          which insert_dylib ldid
-
-      - name: Inject dylib
-        run: |
-          set -euo pipefail
-          BIN="${{ steps.extract.outputs.bin }}"
-          insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "$BIN" "$BIN.patched"
-          mv "$BIN.patched" "$BIN"
-          chmod +x "$BIN"
-          otool -L "$BIN" | grep -i frida || echo "no frida load command"
-
-      - name: Sign
-        run: |
-          set -euo pipefail
-          APP_DIR="${{ steps.extract.outputs.app_dir }}"
-          BIN="${{ steps.extract.outputs.bin }}"
-          FW="$APP_DIR/Frameworks/Frida.framework"
-          ldid -S "$FW/W.dylib"
-          ldid -S "$BIN"
-          echo "signed"
-
-      - name: Repack IPA
-        run: |
-          set -euo pipefail
-          cd build/extract
-          rm -f ../bs_patched.ipa
-          zip -qry ../bs_patched.ipa Payload
-          cd ..
-          ls -la bs_patched.ipa
+          ls -la Frida.framework/
 
       - name: Publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="brawl-frida-$(date +%Y%m%d)-r${{ github.run_number }}"
-          gh release create "$TAG" build/bs_patched.ipa \
+          cd Frida.framework
+          zip -qry ../Frida.framework.zip .
+          cd ..
+          TAG="frida-framework-$(date +%Y%m%d)-r${{ github.run_number }}"
+          gh release create "$TAG" Frida.framework.zip \
             --title "$TAG" \
-            --notes "Frida 17.18.0 + gum-graft, agent ${{ steps.agent.outputs.path }}"
+            --notes "Frida 17.18.0 + gum-graft, arm64 thin"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: brawl-frida-ipa
-          path: build/bs_patched.ipa
+          name: Frida.framework
+          path: Frida.framework/
           retention-days: 7
