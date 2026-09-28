@@ -21,15 +21,55 @@ jobs:
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
-      MACOS_CERTID: 'frida-cert'
-      IOS_CERTID: 'frida-cert'
-      WATCHOS_CERTID: 'frida-cert'
-      TVOS_CERTID: 'frida-cert'
+      CERT_CN: 'frida-cert'
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Create self-signed code-signing certificate
+        run: |
+          set -euo pipefail
+          WORKDIR=$(mktemp -d)
+          KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+
+          cat > "$WORKDIR/cert.cnf" << 'CERTEOF'
+          [req]
+          distinguished_name = dn
+          prompt = no
+          x509_extensions = v3_ext
+          [dn]
+          CN = frida-cert
+          O = Frida Local Build
+          [v3_ext]
+          basicConstraints = critical, CA:false
+          keyUsage = critical, digitalSignature
+          extendedKeyUsage = critical, codeSigning
+          subjectKeyIdentifier = hash
+          CERTEOF
+
+          openssl ecparam -name prime256v1 -genkey -noout -out "$WORKDIR/key.pem"
+          openssl req -new -x509 -key "$WORKDIR/key.pem" -out "$WORKDIR/cert.pem" \
+            -days 3650 -sha256 -config "$WORKDIR/cert.cnf" -extensions v3_ext
+
+          openssl pkcs8 -topk8 -inform PEM -outform PEM \
+            -in "$WORKDIR/key.pem" -out "$WORKDIR/key.p8.pem" \
+            -v1 PBE-SHA1-3DES -passout pass:"frida-bootstrap"
+
+          security import "$WORKDIR/key.p8.pem" -k "$KEYCHAIN" \
+            -P "frida-bootstrap" -T /usr/bin/codesign -T /usr/bin/security -A
+          security import "$WORKDIR/cert.pem" -k "$KEYCHAIN" \
+            -T /usr/bin/codesign -T /usr/bin/security -A
+          security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$WORKDIR/cert.pem" \
+            >/dev/null 2>&1 || true
+
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -i frida-cert || {
+            echo "::error::certificate not found in keychain"
+            exit 1
+          }
+          echo "CERT_READY=1" >> "$GITHUB_ENV"
+          rm -rf "$WORKDIR"
 
       - name: Install build dependencies
         run: |
@@ -54,7 +94,7 @@ jobs:
           path: |
             frida-src
             ~/.cache/pip
-          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v1
+          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v3
           restore-keys: |
             frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
 
@@ -86,7 +126,7 @@ jobs:
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
-          make 2>&1 | tail -120
+          make 2>&1 | tail -150
           echo "=== build done ==="
 
       - name: Locate gum-graft
@@ -104,7 +144,7 @@ jobs:
           chmod +x "$GUM_GRAFT"
           echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
           echo "found: $(realpath $GUM_GRAFT)"
-          "$GUM_GRAFT" --help 2>&1 | head -20 || true
+          "$GUM_GRAFT" --help 2>&1 | head -30 || true
 
       - name: Download Frida Gadget
         run: |
