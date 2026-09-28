@@ -1,152 +1,104 @@
-name: Build FridaGadget Framework
+name: Build Frida Gadget & Repack IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      frida_version:
+        description: 'Frida version (e.g. 17.5.0 or latest)'
+        required: true
+        default: 'latest'
 
-permissions:
-  contents: write
+env:
+  FRIDA_VERSION: ${{ github.event.inputs.frida_version }}
+  IPA_PATH: ./input/target.ipa
+  OUTPUT_IPA: ./output/target_modded.ipa
+  GADGET_NAME: FridaGadget.dylib
+  SCRIPT_NAME: agent.js
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: macos-15
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: actions/cache@v4
-        id: cache-gum-graft
-        with:
-          path: gum-graft-bin
-          key: gum-graft-17.18.0-macos-arm64-v3
-
-      - name: Checkout frida-gum
-        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: frida/frida-gum
-          ref: 17.18.0
-          submodules: recursive
-          path: frida-gum
-
-      - uses: actions/setup-python@v5
-        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
+      - name: Setup Python & pip
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install build dependencies
-        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
+      - name: Install dependencies
         run: |
-          brew install meson ninja pkg-config libffi glib
-          pip install setuptools
+          brew install ldid xz
+          pip install lief requests
 
-      - name: Build gum-graft
-        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
+      - name: Resolve Frida version
+        id: frida_ver
         run: |
-          set -euo pipefail
-          cd frida-gum
-          meson setup build --prefix=/tmp/frida-build -Dgraft_tool=enabled
-          ninja -C build tools/gum-graft
-          mkdir -p ../gum-graft-bin
-          cp build/tools/gum-graft ../gum-graft-bin/gum-graft
-          cp build/gum/libfrida-gum-1.0.dylib ../gum-graft-bin/libfrida-gum-1.0.dylib
-          chmod +x ../gum-graft-bin/gum-graft
-          install_name_tool -change "@rpath/libfrida-gum-1.0.dylib" "@executable_path/libfrida-gum-1.0.dylib" ../gum-graft-bin/gum-graft || true
-          install_name_tool -change "@rpath/libfrida-gum-1.0.dylib" "@executable_path/libfrida-gum-1.0.dylib" ../gum-graft-bin/libfrida-gum-1.0.dylib || true
-          otool -L ../gum-graft-bin/gum-graft
-          ls -la ../gum-graft-bin/
-
-      - name: Verify gum-graft
-        run: |
-          set -euo pipefail
-          ls -la gum-graft-bin/
-          otool -L gum-graft-bin/gum-graft
-          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft --help || true
-
-      - uses: actions/cache@v4
-        id: cache-gadget
-        with:
-          path: gadget-cache
-          key: frida-gadget-17.18.0-ios-universal-v1
+          if [ "$FRIDA_VERSION" = "latest" ]; then
+            VER=$(curl -s https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json;print(json.load(sys.stdin)['tag_name'])")
+          else
+            VER="$FRIDA_VERSION"
+          fi
+          echo "version=$VER" >> $GITHUB_OUTPUT
 
       - name: Download Frida Gadget
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
-          set -euo pipefail
-          mkdir -p gadget-cache
-          curl -fL -o /tmp/frida-gadget.dylib.xz \
-            "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
-          xz -d /tmp/frida-gadget.dylib.xz
-          mv /tmp/frida-gadget.dylib gadget-cache/FridaGadget.dylib
-          file gadget-cache/FridaGadget.dylib
+          VER=${{ steps.frida_ver.outputs.version }}
+          URL="https://github.com/frida/frida/releases/download/${VER}/frida-gadget-${VER}-ios-universal.dylib.xz"
+          curl -L -o gadget.xz "$URL"
+          xz -d gadget.xz
+          mv gadget "${{ env.GADGET_NAME }}"
 
-      - name: Apply gum-graft (ingest function starts)
+      - name: Prepare gadget config
         run: |
-          set -euo pipefail
-          mkdir -p work
-          cp gadget-cache/FridaGadget.dylib work/FridaGadget.dylib
-          chmod +x gum-graft-bin/gum-graft
-          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft --ingest-function-starts work/FridaGadget.dylib
-          file work/FridaGadget.dylib
-
-      - name: Create Framework structure
-        run: |
-          set -euo pipefail
-          mkdir -p FridaGadget.framework
-          cp work/FridaGadget.dylib FridaGadget.framework/FridaGadget
-          cat > FridaGadget.framework/Info.plist << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>FridaGadget</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
-              <key>CFBundleName</key>
-              <string>FridaGadget</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.18.0</string>
-              <key>CFBundleVersion</key>
-              <string>17.18.0</string>
-              <key>MinimumOSVersion</key>
-              <string>11.0</string>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Create FridaGadget.config
-        run: |
-          set -euo pipefail
-          cat > FridaGadget.framework/FridaGadget.config << 'EOF'
+          cat > gadget.config <<'EOF'
           {
             "interaction": {
               "type": "script",
-              "path": "updated/script_69_252.js",
-              "on_change": "ignore"
+              "path": "Frameworks/agent.js"
             },
-            "runtime": "qjs",
             "code_signing": "required"
           }
           EOF
 
-      - name: Commit and push framework
+      - name: Prepare agent script
         run: |
-          set -euo pipefail
-          git config user.name github-actions[bot]
-          git config user.email github-actions[bot]@users.noreply.github.com
-          git add -f FridaGadget.framework
-          if git diff --cached --quiet; then
-            echo "no changes"
-            exit 0
-          fi
-          git commit -m "build: FridaGadget.framework 17.18.0 [skip ci]"
-          git push
+          cp ./scripts/agent.js ./agent.js
 
-      - uses: actions/upload-artifact@v4
+      - name: Extract IPA
+        run: |
+          rm -rf ./Payload
+          unzip -q "${{ env.IPA_PATH }}" -d ./extracted
+          APP_DIR=$(find ./extracted/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+
+      - name: Inject Frida Gadget into IPA
+        run: |
+          BINARY=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" | head -n1)
+          echo "BINARY=$BINARY" >> $GITHUB_ENV
+
+          mkdir -p "$APP_DIR/Frameworks"
+          cp "${{ env.GADGET_NAME }}" "$APP_DIR/Frameworks/"
+          cp gadget.config "$APP_DIR/Frameworks/${GADGET_NAME%.dylib}.config"
+          cp agent.js "$APP_DIR/Frameworks/agent.js"
+
+          ldid -S"$APP_DIR/Frameworks/${{ env.GADGET_NAME }}"
+          ldid -S"$BINARY"
+
+          insert_dylib --inplace --strip-codesig "@executable_path/Frameworks/${{ env.GADGET_NAME }}" "$BINARY"
+
+          ldid -S"$BINARY"
+
+      - name: Repack IPA
+        run: |
+          cd ./extracted
+          zip -qr ../output.ipa Payload
+          cd ..
+          mv output.ipa "${{ env.OUTPUT_IPA }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: FridaGadget.framework
-          path: FridaGadget.framework/
-          retention-days: 7
+          name: modded-ipa
+          path: ${{ env.OUTPUT_IPA }}
