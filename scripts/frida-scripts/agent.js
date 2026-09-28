@@ -7,8 +7,6 @@ const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
 
-const FIXED_DOCS = "/var/mobile/Containers/Data/Application/D03CD892-0A7F-4466-AC5C-BD38936C54BD/Documents";
-
 const DEFAULTS = {
   patch: true,
   alert: true,
@@ -92,38 +90,63 @@ function fileSize(path) {
   } catch (e) { return -1; }
 }
 
-function filesystemDir() {
-  const candidates = [
-    FIXED_DOCS,
-    (function() {
-      try {
-        const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
-        if (urls !== null && urls.count() > 0) {
-          const p = str(urls.firstObject().path());
-          if (p !== null && p.length > 0) return p;
-        }
-      } catch (e) {}
-      return null;
-    })(),
-    (function() {
-      try {
-        const fn = new NativeFunction(Module.getGlobalExportByName("NSTemporaryDirectory"), "pointer", []);
-        return fn().readUtf8String();
-      } catch (e) { return null; }
-    })()
-  ];
+function writable(path) {
+  try {
+    const testPath = path + "/.__agent_test";
+    const f = new File(testPath, "w");
+    f.write("t");
+    f.flush();
+    f.close();
+    try { fileManager().removeItemAtPath_error_(testPath, null); } catch (e) {}
+    return true;
+  } catch (e) { return false; }
+}
+
+function documentsDir() {
+  const candidates = [];
+
+  try {
+    const bundle = str(ObjC.classes.NSBundle.mainBundle().bundlePath());
+    if (bundle) {
+      const m = /^(.*)\/Applications\/[^\/]+\.app\/?$/.exec(bundle);
+      if (m) candidates.push(m[1]);
+      const m2 = /^(.*)\/Documents\/[^\/]+\.app\/?$/.exec(bundle);
+      if (m2) candidates.push(m2[1] + "/Documents");
+      const parts = bundle.replace(/\/+$/, "").split("/");
+      if (parts.length >= 3) {
+        candidates.push(parts.slice(0, -2).join("/"));
+        candidates.push(parts.slice(0, -1).join("/"));
+      }
+    }
+  } catch (e) {}
+
+  try {
+    const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
+    if (urls !== null && urls.count() > 0) {
+      const p = str(urls.firstObject().path());
+      if (p) candidates.push(p);
+    }
+  } catch (e) {}
+
+  try {
+    const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
+    const home = fn().readUtf8String();
+    if (home) candidates.push(home + "/Documents");
+  } catch (e) {}
+
+  try {
+    const fn = new NativeFunction(Module.getGlobalExportByName("NSTemporaryDirectory"), "pointer", []);
+    const tmp = fn().readUtf8String();
+    if (tmp) candidates.push(tmp);
+  } catch (e) {}
+
+  candidates.push("/tmp");
+
   for (let i = 0; i < candidates.length; i++) {
     const p = candidates[i];
     if (!p) continue;
-    try {
-      const testPath = p + "/.__agent_test";
-      const f = new File(testPath, "w");
-      f.write("t");
-      f.flush();
-      f.close();
-      try { fileManager().removeItemAtPath_error_(testPath, null); } catch (e) {}
-      return p;
-    } catch (e) {}
+    if (!writable(p)) continue;
+    return p;
   }
   return null;
 }
@@ -131,8 +154,11 @@ function filesystemDir() {
 function tempDir() {
   try {
     const fn = new NativeFunction(Module.getGlobalExportByName("NSTemporaryDirectory"), "pointer", []);
-    return fn().readUtf8String();
-  } catch (e) { return null; }
+    const p = fn().readUtf8String();
+    if (p && writable(p)) return p;
+  } catch (e) {}
+  if (writable("/tmp")) return "/tmp";
+  return null;
 }
 
 function uuidIn(path) {
@@ -141,18 +167,21 @@ function uuidIn(path) {
 }
 
 function initPaths() {
-  docsPath = filesystemDir();
+  docsPath = documentsDir();
   updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
+
   const candidates = [];
   if (updatedPath !== null) {
     mkdir(updatedPath);
-    candidates.push(updatedPath + "/" + LOG_NAME);
+    if (writable(updatedPath)) candidates.push(updatedPath + "/" + LOG_NAME);
   }
   const tmp = tempDir();
-  if (tmp !== null && tmp.length > 0) candidates.push(tmp + "/" + LOG_NAME);
+  if (tmp !== null) candidates.push(tmp + "/" + LOG_NAME);
   candidates.push("/tmp/" + LOG_NAME);
+
   for (let i = 0; i < candidates.length; i++) {
     const p = candidates[i];
+    if (!writable(p.substring(0, p.lastIndexOf("/")) || "/tmp")) continue;
     try {
       const f = new File(p, "a");
       f.write("");
