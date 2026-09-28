@@ -5,52 +5,38 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 90
+    runs-on: macos-14 file
+    timeout-minutes: 30
     steps:
-      - name: Checkout frida-gum
-        uses: actions/checkout@v4
-        with:
-          repository: frida/frida-gum
-          ref: 17.18.0
-          submodules: recursive
-          path: frida-gum
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install build dependencies
+      - name: Download gum-graft
         run: |
-          brew install meson ninja pkg-config libffi glib
-          pip install setuptools
-
-      - name: Build gum-graft
-        run: |
-          cd frida-gum
-          meson setup build --prefix=/tmp/frida-build -Dgraft_tool=enabled
-          ninja -C build gum-graft
-          cp build/gum-graft /tmp/frida-build/gum-graft
-          ls -la /tmp/frida-build/gum-graft
+          set -euo pipefail
+          mkdir -p work
+          curl -fL -o work/gum-graft.tar.xz \
+            "https://github.com/frida/frida/releases/download/17.18.0/gum-graft-17.18.0-macos-arm64.tar.xz"
+          tar xf work/gum-graft.tar.xz -C work
+          chmod +x work/gum-graft
+          file work/gum-graft
+          work/gum-graft --help || true
 
       - name: Download Frida Gadget 17.18.0
         run: |
-          mkdir -p work
+          set -euo pipefail
           curl -fL -o work/frida-gadget.dylib.xz \
             "https://github.com/frida/frida/releases/download/17.18.0/frida-gadget-17.18.0-ios-universal.dylib.xz"
           xz -d work/frida-gadget.dylib.xz
           mv work/frida-gadget.dylib work/FridaGadget.dylib
-          file work/FridaGadget.dylib
+          work/FridaGadget.dylib
 
       - name: Apply gum-graft (bypass code signing)
         run: |
-          chmod +x /tmp/frida-build/gum-graft
-          /tmp/frida-build/gum-graft -i work/FridaGadget.dylib -a 0xb24998
+          set -euo pipefail
+          work/gum-graft -i work/FridaGadget.dylib -a 0xb24998
           file work/FridaGadget.dylib
 
-      - name: Create Framework structure with Info.plist
+      - name: Create Framework structure
         run: |
+          set -euo pipefail
           mkdir -p FridaGadget.framework
           cp work/FridaGadget.dylib FridaGadget.framework/FridaGadget
           cat > FridaGadget.framework/Info.plist << 'EOF'
@@ -78,6 +64,7 @@ jobs:
 
       - name: Create FridaGadget.config
         run: |
+          set -euo pipefail
           cat > FridaGadget.framework/FridaGadget.config << 'EOF'
           {
             "interaction": {
