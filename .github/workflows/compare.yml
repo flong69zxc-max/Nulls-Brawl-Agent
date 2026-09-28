@@ -36,7 +36,6 @@ jobs:
           set -euo pipefail
           rm -rf dev_unpacked
           mkdir -p dev_unpacked
-          # -o overwrite, -q quiet. НЕ используем -X, чтобы видеть что есть.
           unzip -o W.dylib.zip -d dev_unpacked
           echo "=== all extracted files ==="
           find dev_unpacked -type f | sort
@@ -48,7 +47,6 @@ jobs:
                   | head -1)
 
           if [ -z "$DEV" ]; then
-            # fallback: любой не-AppleDouble файл
             DEV=$(find dev_unpacked -type f \
                     ! -path "*__MACOSX*" \
                     ! -name "._*" \
@@ -67,7 +65,8 @@ jobs:
           echo "=== file type ==="
           file W.dev.raw.dylib
           echo "=== first 64 bytes (hex) ==="
-          xxd W.dev.raw.dylib | head -8
+          # ИСПРАВЛЕНИЕ: используем xxd с -l (limit) вместо head
+          xxd -l 64 W.dev.raw.dylib
           echo "=== size ==="
           stat -f%z W.dev.raw.dylib
 
@@ -84,9 +83,8 @@ jobs:
 
           if echo "$FILE_INFO" | grep -q "Mach-O"; then
             if echo "$FILE_INFO" | grep -q "universal"; then
-              echo "fat binary, extracting arm64e"
-              lipo -thin arm64e -output W.dev.dylib W.dev.raw.dylib || \
-              lipo -thin arm64  -output W.dev.dylib W.dev.raw.dylib
+              echo "universal binary, extracting arm64"
+              lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
             else
               echo "already thin"
               cp W.dev.raw.dylib W.dev.dylib
@@ -113,10 +111,11 @@ jobs:
           if curl -fL --retry 3 -o stock/17.2.11.xz "$URL"; then
             (cd stock && xz -d 17.2.11.xz)
             mv stock/17.2.11 stock/17.2.11.dylib 2>/dev/null || true
+            # ИСПРАВЛЕНИЕ: извлекаем arm64, а не arm64e
             if lipo -info stock/17.2.11.dylib 2>/dev/null | grep -q "Non-fat"; then
               cp stock/17.2.11.dylib stock/17.2.11.thin.dylib
             else
-              lipo -thin arm64e -output stock/17.2.11.thin.dylib stock/17.2.11.dylib
+              lipo -thin arm64 -output stock/17.2.11.thin.dylib stock/17.2.11.dylib
             fi
             echo "stock size: $(stat -f%z stock/17.2.11.thin.dylib) bytes"
           else
