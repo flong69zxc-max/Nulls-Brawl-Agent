@@ -1,114 +1,132 @@
-name: Build Frida Gadget & Repack Nulls Brawl IPA
+name: Build Frida Gadget IPA
 
 on:
   workflow_dispatch:
-    inputs:
-      frida_version:
-        description: 'Frida version (e.g. 17.18.0 or latest)'
-        required: true
-        default: 'latest'
 
-env:
-  FRIDA_VERSION: ${{ github.event.inputs.frida_version }}
-  IPA_URL: "https://dnull.xyz/latest_bs_i"
-  OUTPUT_IPA: ./output/nulls_brawl_modded.ipa
-  GADGET_NAME: FridaGadget.dylib
-  SCRIPT_PATH: scripts/agents.js
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-14
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python & pip
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install dependencies
-        run: |
-          brew install ldid xz
-          pip install requests
-
-      - name: Resolve Frida version
-        id: frida_ver
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "$FRIDA_VERSION" = "latest" ]; then
-            RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/frida/frida/releases/latest)
-            VER=$(echo "$RESPONSE" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('tag_name') or '')")
-            if [ -z "$VER" ]; then
-              echo "Failed to resolve latest Frida version. Response:"
-              echo "$RESPONSE" | head -50
-              exit 1
-            fi
-          else
-            VER="$FRIDA_VERSION"
-          fi
-          echo "version=$VER" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
 
       - name: Download Frida Gadget
+        id: frida
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VER=${{ steps.frida_ver.outputs.version }}
-          URL="https://github.com/frida/frida/releases/download/${VER}/frida-gadget-${VER}-ios-universal.dylib.xz"
-          curl -L -o gadget.xz "$URL"
-          xz -d gadget.xz
-          mv gadget "${{ env.GADGET_NAME }}"
+          set -euo pipefail
+          mkdir -p build
+          VERSION=$(curl -sL -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/frida/frida/releases/latest" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          curl -fL -o /tmp/frida.tar.xz \
+            "https://github.com/frida/frida/releases/download/${VERSION}/frida-gadget-${VERSION}-ios-universal.dylib.xz"
+          xz -d /tmp/frida.tar.xz
+          mv /tmp/frida.tar.xz /tmp/FridaGadget.dylib 2>/dev/null || mv /tmp/frida.tar /tmp/FridaGadget.dylib
+          cp /tmp/FridaGadget.dylib build/FridaGadget.dylib
+          file build/FridaGadget.dylib
 
       - name: Download Nulls Brawl IPA
         run: |
-          mkdir -p ./input
-          curl -L -o ./input/target.ipa "${{ env.IPA_URL }}"
+          set -euo pipefail
+          mkdir -p build
+          curl -fL -A "Mozilla/5.0" -o build/bs.ipa "https://dnull.xyz/latest_bs_i"
+          test -s build/bs.ipa
+          file build/bs.ipa
 
-      - name: Prepare gadget config
+      - name: Extract IPA
+        id: extract
         run: |
-          cat > gadget.config <<'EOF'
+          set -euo pipefail
+          cd build
+          rm -rf extract
+          mkdir -p extract
+          unzip -q bs.ipa -d extract
+          if [ ! -d "extract/Payload" ]; then
+            echo "::error::Payload directory not found in IPA"
+            ls -la extract/
+            exit 1
+          fi
+          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          if [ -z "$APP_DIR" ]; then
+            echo "::error::No .app bundle found in Payload"
+            ls -la extract/Payload/
+            exit 1
+          fi
+          BIN="$APP_DIR/Nulls Brawl"
+          if [ ! -f "$BIN" ]; then
+            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
+          fi
+          if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
+            echo "::error::No executable found in .app"
+            ls -la "$APP_DIR"
+            exit 1
+          fi
+          echo "app_dir=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          file "$BIN"
+
+      - name: Setup Frameworks
+        run: |
+          set -euo pipefail
+          APP_DIR="${{ steps.extract.outputs.app_dir }}"
+          mkdir -p "$APP_DIR/Frameworks"
+          cp build/FridaGadget.dylib "$APP_DIR/Frameworks/"
+          mkdir -p "$APP_DIR/Frameworks/scripts"
+          cp scripts/agents.js "$APP_DIR/Frameworks/scripts/agents.js"
+          cat > "$APP_DIR/Frameworks/FridaGadget.config" << 'EOF'
           {
             "interaction": {
               "type": "script",
-              "/Ppath": "Frameworks/agents.jsayload"
+              "path": "Frameworks/scripts/agents.js",
+              "on_change": "ignore"
             },
-            "code_signing": " -required"
+            "runtime": "qjs",
+            "code_signing": "required"
           }
           EOF
 
-      - name: Extract IPA
+      - name: Install tools
         run: |
-          rm -rf ./extracted
-          unzip -q ./input/target.ipa -d ./extracted
-          APP_DIR=$(find ./extractedmaxdepth 1 -type d -name "*.app" | head -n1)
-          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          brew install ldid dpkg
+          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO 2>&1 | tail -5
+          cp build/Release/insert_dylib /usr/local/bin/ 2>/dev/null || cp build/Release/insert_dylib /opt/homebrew/bin/
+          chmod +x /usr/local/bin/insert_dylib 2>/dev/null || chmod +x /opt/homebrew/bin/insert_dylib
 
-      - name: Inject Frida Gadget into IPA
+      - name: Inject dylib
         run: |
-          BINARY=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" | head -n1)
-          echo "BINARY=$BINARY" >> $GITHUB_ENV
+          set -euo pipefail
+          APP_DIR="${{ steps.extract.outputs.app_dir }}"
+          BIN="${{ steps.extract.outputs.bin }}"
+          insert_dylib --weak --all-yes "@executable_path/Frameworks/FridaGadget.dylib" "$BIN" "$BIN.patched"
+          mv "$BIN.patched" "$BIN"
+          chmod +x "$BIN"
+          otool -L "$BIN" | grep -i frida || echo "no frida load command"
 
-          mkdir -p "$APP_DIR/Frameworks"
-          cp "${{ env.GADGET_NAME }}" "$APP_DIR/Frameworks/"
-          cp gadget.config "$APP_DIR/Frameworks/${GADGET_NAME%.dylib}.config"
-          cp "${{ env.SCRIPT_PATH }}" "$APP_DIR/Frameworks/agents.js"
-
-          ldid -S"$APP_DIR/Frameworks/${{ env.GADGET_NAME }}"
-          ldid -S"$BINARY"
-
-          insert_dylib --inplace --strip-codesig "@executable_path/Frameworks/${{ env.GADGET_NAME }}" "$BINARY"
-
-          ldid -S"$BINARY"
+      - name: Sign
+        run: |
+          set -euo pipefail
+          APP_DIR="${{ steps.extract.outputs.app_dir }}"
+          BIN="${{ steps.extract.outputs.bin }}"
+          ldid -S "$APP_DIR/Frameworks/FridaGadget.dylib"
+          ldid -S "$BIN"
+          echo "signed"
 
       - name: Repack IPA
         run: |
-          cd ./extracted
-          zip -qr ../output.ipa Payload
-          cd ..
-          mkdir -p ./output
-          mv output.ipa "${{ env.OUTPUT_IPA }}"
+          set -euo pipefail
+          cd build/extract
+          zip -qry ../bs_patched.ipa Payload
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: nulls-brawl-modded-ipa
-          path: ${{ env.OUTPUT_IPA }}
+          name: brawl-patched-ipa
+          path: build/bs_patched.ipa
+          retention-days: 7
