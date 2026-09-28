@@ -45,7 +45,6 @@ jobs:
           ROOT=$(npm root -g)
           node -e "console.log('frida-compile: ' + require('$ROOT/frida-compile/package.json').version)"
           node -e "console.log('frida-objc-bridge: ' + require('./node_modules/frida-objc-bridge/package.json').version)"
-          node -e "console.log('@types/frida-gum: ' + require('./node_modules/@types/frida-gum/package.json').version)"
 
       - name: Compile scripts
         run: |
@@ -59,7 +58,8 @@ jobs:
               _*|*.d) continue ;;
             esac
             echo "=== compile $f ==="
-            frida-compile "$f" -o "build/${base}.js" -S -c
+            frida-compile "$f" -o "build/${base}.js" -S -c -s agent
+            rm -f "build/${base}.js.map"
             ls -la "build/${base}.js"
             count=$((count + 1))
           done
