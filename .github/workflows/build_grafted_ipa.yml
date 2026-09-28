@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
@@ -51,11 +51,16 @@ jobs:
             brew install pkg-config libplist openssl@3
             OPENSSL_PREFIX=$(brew --prefix openssl@3)
             LIBPLIST_PREFIX=$(brew --prefix libplist)
-            export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+            export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
             export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
             export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
             rm -rf ldid-src
-            git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src
+            if git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null; then
+              echo "cloned tag ${LDID_VERSION}"
+            else
+              echo "tag not found, cloning default branch"
+              git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
+            fi
             cd ldid-src
             make CXXFLAGS="-O2 -pipe"
             sudo cp ldid /usr/local/bin/ldid
@@ -174,6 +179,7 @@ jobs:
           }
           CONFIG
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
