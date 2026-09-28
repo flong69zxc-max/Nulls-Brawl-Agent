@@ -1,4 +1,4 @@
-name: Build FridaGadget Framework (arm64 thin)
+name: Build FridaGadget Framework 17.16.4 (arm64 thin)
 
 on:
   workflow_dispatch:
@@ -6,24 +6,22 @@ on:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - name: Download Frida Gadget 17.2.11
+      - name: Download Frida Gadget 17.16.4
         run: |
           set -euo pipefail
           mkdir -p work
           curl -fL -o work/gadget.dylib.xz \
-            "https://github.com/frida/frida/releases/download/17.2.11/frida-gadget-17.2.11-ios-universal.dylib.xz"
+            "https://github.com/frida/frida/releases/download/17.16.4/frida-gadget-17.16.4-ios-universal.dylib.xz"
           xz -d work/gadget.dylib.xz
           mv work/gadget.dylib work/FridaGadget-universal
-          file work/FridaGadget-universal
           lipo -info work/FridaGadget-universal
 
       - name: Thin to arm64
         run: |
           set -euo pipefail
           lipo work/FridaGadget-universal -thin arm64 -output work/FridaGadget
-          file work/FridaGadget
           lipo -info work/FridaGadget
           ls -la work/
 
@@ -47,9 +45,9 @@ jobs:
               <key>CFBundlePackageType</key>
               <string>FMWK</string>
               <key>CFBundleShortVersionString</key>
-              <string>17.2.11</string>
+              <string>17.16.4</string>
               <key>CFBundleVersion</key>
-              <string>17.2.11</string>
+              <string>17.16.4</string>
               <key>MinimumOSVersion</key>
               <string>11.0</string>
           </dict>
@@ -59,6 +57,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FridaGadget.framework-arm64
+          name: FridaGadget.framework-17.16.4-arm64
           path: FridaGadget.framework/
           retention-days: 7
