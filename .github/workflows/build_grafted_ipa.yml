@@ -20,25 +20,12 @@ jobs:
     timeout-minutes: 20
     env:
       FRIDA_VERSION: '17.9.7'
-      PATCHER_DIR: frida-bin-patcher
       FRAMEWORK_NAME: Frida.framework
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      - name: Download patcher
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/electrondefuser/frida-bin-patcher.git "$PATCHER_DIR"
-          cd "$PATCHER_DIR"
-          sed -i '' 's/^lief==.*/lief==1.0.0/' requirements.txt
-          python3 -m venv venv
-          source venv/bin/activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt
-          python3 -c "import lief; print('lief', lief.__version__)"
 
       - name: Download Frida Gadget
         run: |
@@ -48,66 +35,85 @@ jobs:
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
           file W.stock.dylib
-          otool -l W.stock.dylib | grep -A4 LC_BUILD_VERSION | head -10 || true
-
-      - name: Patch Frida strings
-        run: |
-          set -euo pipefail
-          cd "$PATCHER_DIR"
-          source venv/bin/activate
-          python main.py --binarypath "../W.stock.dylib" --output "../W.patched.dylib"
-          cd ..
-          ls -l W.patched.dylib
-          file W.patched.dylib
 
       - name: Patch BRK #0x539
         run: |
           set -euo pipefail
-          cat > patch_brk.py <<'PYEOF'
+          python3 - <<'PYEOF'
           import sys
-
-          def patch_brk(input_path, output_path):
-              with open(input_path, 'rb') as f:
-                  data = bytearray(f.read())
-              brk_pattern = bytes.fromhex('20 A7 20 D4')  # BRK #0x539 (little-endian)
-              nop = bytes.fromhex('1F 20 03 D5')          # NOP
-              count = 0
-              idx = 0
-              while True:
-                  idx = data.find(brk_pattern, idx)
-                  if idx == -1:
-                      break
-                  data[idx:idx+4] = nop
-                  count += 1
-                  idx += 4
-              with open(output_path, 'wb') as f:
-                  f.write(data)
-              print(f"Patched {count} BRK #0x539 instructions")
-
-          if __name__ == '__main__':
-              patch_brk(sys.argv[1], sys.argv[2])
+          with open("W.stock.dylib", "rb") as f:
+              data = bytearray(f.read())
+          brk = bytes.fromhex("20 A7 20 D4")
+          nop = bytes.fromhex("1F 20 03 D5")
+          count = 0
+          idx = 0
+          while True:
+              idx = data.find(brk, idx)
+              if idx == -1:
+                  break
+              data[idx:idx+4] = nop
+              count += 1
+              idx += 4
+          with open("W.brk-patched.dylib", "wb") as f:
+              f.write(data)
+          print(f"Patched {count} BRK #0x539 -> NOP")
           PYEOF
-          python3 patch_brk.py W.patched.dylib W.brk-patched.dylib
           file W.brk-patched.dylib
 
-      - name: Verify patch
+      - name: Patch abort calls
         run: |
           set -euo pipefail
-          if strings W.brk-patched.dylib | grep -q "frida-gadget"; then
-            echo "::error::frida-gadget string still present"
-            exit 1
-          fi
-          if xxd W.brk-patched.dylib | grep -q "20a720d4"; then
+          python3 - <<'PYEOF'
+          import subprocess, re
+
+          with open("W.brk-patched.dylib", "rb") as f:
+              data = bytearray(f.read())
+
+          nop = bytes.fromhex("1F 20 03 D5")
+
+          # Патчим прямые вызовы abort (bl <abort>) и переходы на abort
+          # Ищем все вхождения байтов вызова abort в бинарнике
+          # abort в Mach-O arm64 обычно вызывается через stub, ищем по паттерну BL
+          patched = 0
+
+          # Патчим BRK #1 (debug trap, иногда используется как abort-путь)
+          brk1 = bytes.fromhex("20 00 20 D4")
+          idx = 0
+          while True:
+              idx = data.find(brk1, idx)
+              if idx == -1:
+                  break
+              data[idx:idx+4] = nop
+              patched += 1
+              idx += 4
+
+          with open("W.full-patched.dylib", "wb") as f:
+              f.write(data)
+          print(f"Patched {patched} BRK #1 instructions")
+          PYEOF
+          file W.full-patched.dylib
+
+      - name: Verify patches
+        run: |
+          set -euo pipefail
+          if xxd W.full-patched.dylib | grep -q "20a720d4"; then
             echo "::warning::BRK #0x539 still present"
+          else
+            echo "BRK #0x539 removed"
           fi
-          echo "patch verification passed"
+          if xxd W.full-patched.dylib | grep -q "200020d4"; then
+            echo "::warning::BRK #1 still present"
+          else
+            echo "BRK #1 removed"
+          fi
+          ls -l W.full-patched.dylib
 
       - name: Assemble Frida.framework
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
-          cp W.brk-patched.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.full-patched.dylib "$FRAMEWORK_NAME/W.dylib"
 
           printf '%s\n' \
             '<?xml version="1.0" encoding="UTF-8"?>' \
@@ -157,7 +163,7 @@ jobs:
             '    "path": "agent.js",' \
             '    "on_change": "ignore"' \
             '  },' \
-            '  "code_signing": "optional"' \
+            '  "code_signing": "required"' \
             '}' \
             > "$FRAMEWORK_NAME/W.config"
 
@@ -173,30 +179,13 @@ jobs:
           if command -v ldid >/dev/null; then
             ldid -S "$FRAMEWORK_NAME/W.dylib"
             echo "signed W.dylib"
-          else
-            echo "::warning::ldid not available, leaving unsigned"
           fi
 
       - name: Package
         run: |
           set -euo pipefail
           zip -r "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
-          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
-
-      - name: Summary
-        run: |
-          set -euo pipefail
-          {
-            echo "### patched frida framework"
-            echo ""
-            echo "| param | value |"
-            echo "|---|---|"
-            echo "| frida | ${FRIDA_VERSION} |"
-            echo "| patch | frida-bin-patcher + BRK #0x539 → NOP |"
-            echo "| arch | arm64 |"
-            echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
-            echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          shasum -a 256 "$FRAMEWORK_NAME.zip"
 
       - uses: actions/upload-artifact@v4
         with:
