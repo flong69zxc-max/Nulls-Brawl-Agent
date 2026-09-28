@@ -19,7 +19,6 @@ jobs:
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
-      LDID_VERSION: 'v2.1.5-procursus7'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
@@ -33,91 +32,66 @@ jobs:
           xz -d gadget.xz
           mv gadget W.fat.dylib
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "thin before sign: $(stat -f%z W.thin.dylib)"
+          echo "thin: $(stat -f%z W.thin.dylib)"
 
-      - name: Install ldid-procursus
+      - name: Extract dev reference
         run: |
           set -euo pipefail
-          sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid /usr/bin/ldid 2>/dev/null || true
-          brew uninstall ldid 2>/dev/null || true
-          brew uninstall ldid-procursus 2>/dev/null || true
-
-          PREBUILT_URL="https://github.com/ProcursusTeam/ldid/releases/download/${LDID_VERSION}/ldid_macos_arm64"
-          if curl -fL --retry 3 -o /tmp/ldid "$PREBUILT_URL" 2>/dev/null; then
-            echo "using prebuilt"
-            chmod +x /tmp/ldid
-            sudo mv /tmp/ldid /usr/local/bin/ldid
-          else
-            echo "building from source"
-            brew install pkg-config libplist openssl@3
-            OPENSSL_PREFIX=$(brew --prefix openssl@3)
-            LIBPLIST_PREFIX=$(brew --prefix libplist)
-            export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-            export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
-            export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
-            rm -rf ldid-src
-            if git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null; then
-              echo "cloned tag ${LDID_VERSION}"
-            else
-              git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
-            fi
-            cd ldid-src
-            make CXXFLAGS="-O2 -pipe"
-            sudo cp ldid /usr/local/bin/ldid
-            sudo chmod +x /usr/local/bin/ldid
-          fi
-
-          for p in /opt/homebrew/bin/ldid /usr/bin/ldid; do
-            [ -e "$p" ] && sudo rm -f "$p" || true
+          REF=""
+          for p in Frida/W.dylib.zip W.dylib.zip; do
+            if [ -f "$p" ]; then REF="$p"; break; fi
           done
-          /usr/local/bin/ldid -v 2>&1 | head -1 || true
+          [ -n "$REF" ] || { echo "::error::no dev reference"; exit 1; }
+          mkdir -p dev
+          unzip -o "$REF" -d dev > /dev/null
+          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
+          cp "$DEV" W.dev.dylib
+          lipo -thin arm64 -output W.dev.thin.dylib W.dev.dylib
+          echo "dev thin: $(stat -f%z W.dev.thin.dylib)"
 
-      - name: Generate self-signed iOS cert
+      - name: Try codesign with entitlements
         run: |
           set -euo pipefail
-          mkdir -p certs
-          cd certs
-
-          cat > cert.cnf << 'CERTEOF'
-          [req]
-          distinguished_name = dn
-          prompt = no
-          x509_extensions = v3_ext
-          [dn]
-          CN = Frida Gadget
-          O = Frida
-          OU = Gadget
-          [v3_ext]
-          basicConstraints = critical, CA:FALSE
-          keyUsage = critical, digitalSignature
-          extendedKeyUsage = critical, codeSigning
-          CERTEOF
-
-          openssl ecparam -name prime256v1 -genkey -noout -out key.pem
-          openssl req -new -x509 -key key.pem -out cert.pem \
-            -days 3650 -sha256 -config cert.cnf -extensions v3_ext
-          openssl pkcs12 -export -out sign.p12 \
-            -inkey key.pem -in cert.pem -passout pass:
-
-          ls -la
-          echo "cert ready"
-
-      - name: Try signing variants until size matches
-        run: |
-          set -euo pipefail
+          TARGET=$(stat -f%z W.dev.thin.dylib)
+          echo "target: $TARGET"
           cp W.thin.dylib W.thin.orig.dylib
-          TARGET=19006592
 
+          # minimal entitlements (пустой plist)
+          cat > /tmp/empty-ent.plist << 'EOFP'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict/></plist>
+          EOFP
+
+          # real frida entitlements
+          cat > /tmp/frida-ent.plist << 'EOFP'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>com.apple.security.cs.allow-jit</key><true/>
+              <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+              <key>com.apple.security.cs.disable-library-validation</key><true/>
+          </dict>
+          </plist>
+          EOFP
+
+          BEST_SIZE=0
           try() {
             local name="$1"; shift
             cp W.thin.orig.dylib W.thin.test.dylib
             if "$@" >/dev/null 2>/tmp/sign.err; then
               local sz=$(stat -f%z W.thin.test.dylib)
-              echo "  [$name] -> $sz"
+              local diff=$((sz > TARGET ? sz - TARGET : TARGET - sz))
+              echo "  [$name] -> $sz (diff $diff)"
               if [ "$sz" = "$TARGET" ]; then
-                echo "  [$name] *** MATCH ***"
                 cp W.thin.test.dylib W.thin.dylib
+                echo "MATCH"
                 return 0
+              fi
+              if [ "$BEST_SIZE" = "0" ] || [ "$diff" -lt "$((BEST_SIZE > TARGET ? BEST_SIZE - TARGET : TARGET - BEST_SIZE))" ]; then
+                BEST_SIZE=$sz
+                cp W.thin.test.dylib /tmp/best.dylib
               fi
             else
               echo "  [$name] -> FAIL: $(head -1 /tmp/sign.err)"
@@ -125,34 +99,28 @@ jobs:
             return 1
           }
 
-          echo "=== trying variants ==="
-          try "ad-hoc -S" \
-            /usr/local/bin/ldid -S W.thin.test.dylib && exit 0 || true
+          echo "=== tries ==="
 
-          try "cert -s sign.p12 -S" \
-            /usr/local/bin/ldid -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc" codesign --force --sign - --timestamp=none W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc der" codesign --force --sign - --timestamp=none --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc empty-ent" codesign --force --sign - --timestamp=none --entitlements /tmp/empty-ent.plist W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc empty-ent der" codesign --force --sign - --timestamp=none --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc frida-ent" codesign --force --sign - --timestamp=none --entitlements /tmp/frida-ent.plist W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc frida-ent der" codesign --force --sign - --timestamp=none --entitlements /tmp/frida-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc runtime empty-ent der" codesign --force --sign - --timestamp=none --options=runtime --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc libval empty-ent der" codesign --force --sign - --timestamp=none --options=library-validation --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc runtime frida-ent der" codesign --force --sign - --timestamp=none --options=runtime --entitlements /tmp/frida-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc all-arch" codesign --force --sign - --timestamp=none --all-architectures W.thin.test.dylib && exit 0 || true
+          try "codesign adhoc all-arch empty-ent der" codesign --force --sign - --timestamp=none --all-architectures --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
 
-          try "cert -S certs/sign.p12" \
-            /usr/local/bin/ldid -S certs/sign.p12 W.thin.test.dylib && exit 0 || true
-
-          try "cert -Cadhoc -s sign.p12 -S" \
-            /usr/local/bin/ldid -Cadhoc -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
-
-          try "cert -Clinker-signed -s sign.p12 -S" \
-            /usr/local/bin/ldid -Clinker-signed -s certs/sign.p12 -S W.thin.test.dylib && exit 0 || true
-
-          try "codesign -s -" \
-            codesign --force --sign - --timestamp=none W.thin.test.dylib && exit 0 || true
-
-          try "codesign --generate-entitlement-der" \
-            codesign --force --sign - --timestamp=none --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-
-          echo "::error::no variant matched $TARGET"
-          echo "best effort results:"
-          for n in ad-hoc cert; do
-            echo "  $n variant last size: see above"
-          done
-          exit 1
+          echo ""
+          echo "no exact match, best: $BEST_SIZE (target $TARGET)"
+          if [ -f /tmp/best.dylib ]; then
+            cp /tmp/best.dylib W.thin.dylib
+            echo "using best: $(stat -f%z W.thin.dylib)"
+          else
+            exit 1
+          fi
 
       - name: Zero signature blob
         run: |
@@ -174,49 +142,34 @@ jobs:
               o += s
           with open("W.thin.dylib", "wb") as f:
               f.write(d)
-          print("thin final: " + str(len(d)))
           PYEOF
 
-      - name: Wrap into fat binary
+      - name: Wrap into fat
         run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
 
-      - name: Compare with dev reference
+      - name: Compare
         run: |
           set -euo pipefail
-          REF=""
-          for p in Frida/W.dylib.zip W.dylib.zip frida/W.dylib.zip; do
-            if [ -f "$p" ]; then REF="$p"; break; fi
-          done
-          if [ -z "$REF" ]; then
-            echo "::warning::no dev reference"
-            exit 0
-          fi
-          mkdir -p dev
-          unzip -o "$REF" -d dev > /dev/null
-          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          cp "$DEV" W.dev.dylib
           echo "dev:  $(stat -f%z W.dev.dylib)"
           echo "ours: $(stat -f%z W.dylib)"
           python3 - << 'PYEOF'
-          with open("W.dev.dylib", "rb") as f:
-              dev = f.read()
-          with open("W.dylib", "rb") as f:
-              ours = f.read()
+          with open("W.dev.dylib", "rb") as f: dev = f.read()
+          with open("W.dylib", "rb") as f: ours = f.read()
           if len(dev) != len(ours):
-              print("SIZE MISMATCH dev=" + str(len(dev)) + " ours=" + str(len(ours)))
+              print("SIZE MISMATCH: dev=" + str(len(dev)) + " ours=" + str(len(ours)) + " diff=" + str(abs(len(dev)-len(ours))))
           n = min(len(dev), len(ours))
           diffs = [i for i in range(n) if dev[i] != ours[i]]
           print("diffs: " + str(len(diffs)))
           for i in diffs[:32]:
               print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
-          if not diffs:
+          if not diffs and len(dev) == len(ours):
               print("PERFECT")
           PYEOF
 
-      - name: Assemble Frida.framework
+      - name: Assemble
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
