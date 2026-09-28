@@ -18,7 +18,7 @@ jobs:
         id: cache-gum-graft
         with:
           path: gum-graft-bin
-          key: gum-graft-17.18.0-macos-arm64-v1
+          key: gum-graft-17.18.0-macos-arm64-v2
 
       - name: Checkout frida-gum
         if: steps.cache-gum-graft.outputs.cache-hit != 'true'
@@ -49,15 +49,19 @@ jobs:
           ninja -C build tools/gum-graft
           mkdir -p ../gum-graft-bin
           cp build/tools/gum-graft ../gum-graft-bin/gum-graft
+          cp build/gum/libfrida-gum-1.0.dylib ../gum-graft-bin/libfrida-gum-1.0.dylib
           chmod +x ../gum-graft-bin/gum-graft
-          ls -la ../gum-graft-bin/gum-graft
-          file ../gum-graft-bin/gum-graft
+          install_name_tool -change "@rpath/libfrida-gum-1.0.dylib" "@executable_path/libfrida-gum-1.0.dylib" ../gum-graft-bin/gum-graft || true
+          install_name_tool -change "@rpath/libfrida-gum-1.0.dylib" "@executable_path/libfrida-gum-1.0.dylib" ../gum-graft-bin/libfrida-gum-1.0.dylib || true
+          otool -L ../gum-graft-bin/gum-graft
+          ls -la ../gum-graft-bin/
 
       - name: Verify gum-graft
         run: |
           set -euo pipefail
-          ls -la gum-graft-bin/gum-graft
-          file gum-graft-bin/gum-graft
+          ls -la gum-graft-bin/
+          otool -L gum-graft-bin/gum-graft
+          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft --help || true
 
       - uses: actions/cache@v4
         id: cache-gadget
@@ -82,7 +86,7 @@ jobs:
           mkdir -p work
           cp gadget-cache/FridaGadget.dylib work/FridaGadget.dylib
           chmod +x gum-graft-bin/gum-graft
-          ./gum-graft-bin/gum-graft -i work/FridaGadget.dylib -a 0xb24998
+          DYLD_LIBRARY_PATH="$PWD/gum-graft-bin" ./gum-graft-bin/gum-graft -i work/FridaGadget.dylib -a 0xb24998
           file work/FridaGadget.dylib
 
       - name: Create Framework structure
