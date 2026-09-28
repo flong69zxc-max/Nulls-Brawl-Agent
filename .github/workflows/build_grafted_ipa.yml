@@ -17,88 +17,37 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 45
     env:
       FRIDA_VERSION: '17.2.11'
       FRAMEWORK_NAME: Frida.framework
-      CERT_CN: 'frida-cert'
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Create self-signed code-signing certificate
+      - name: Install build deps
         run: |
           set -euo pipefail
-          WORKDIR=$(mktemp -d)
-          KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
-
-          cat > "$WORKDIR/cert.cnf" << 'CERTEOF'
-          [req]
-          distinguished_name = dn
-          prompt = no
-          x509_extensions = v3_ext
-          [dn]
-          CN = frida-cert
-          O = Frida Local Build
-          [v3_ext]
-          basicConstraints = critical, CA:false
-          keyUsage = critical, digitalSignature
-          extendedKeyUsage = critical, codeSigning
-          subjectKeyIdentifier = hash
-          CERTEOF
-
-          openssl ecparam -name prime256v1 -genkey -noout -out "$WORKDIR/key.pem"
-          openssl req -new -x509 -key "$WORKDIR/key.pem" -out "$WORKDIR/cert.pem" \
-            -days 3650 -sha256 -config "$WORKDIR/cert.cnf" -extensions v3_ext
-
-          openssl pkcs8 -topk8 -inform PEM -outform PEM \
-            -in "$WORKDIR/key.pem" -out "$WORKDIR/key.p8.pem" \
-            -v1 PBE-SHA1-3DES -passout pass:"frida-bootstrap"
-
-          security import "$WORKDIR/key.p8.pem" -k "$KEYCHAIN" \
-            -P "frida-bootstrap" -T /usr/bin/codesign -T /usr/bin/security -A
-          security import "$WORKDIR/cert.pem" -k "$KEYCHAIN" \
-            -T /usr/bin/codesign -T /usr/bin/security -A
-          security add-trusted-cert -p codeSign -k "$KEYCHAIN" "$WORKDIR/cert.pem" \
-            >/dev/null 2>&1 || true
-
-          security find-identity -v -p codesigning "$KEYCHAIN" | grep -i frida-cert || {
-            echo "::error::certificate not found in keychain"
-            exit 1
-          }
-          echo "CERT_READY=1" >> "$GITHUB_ENV"
-          rm -rf "$WORKDIR"
-
-      - name: Install build dependencies
-        run: |
-          set -euo pipefail
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          export HOMEBREW_NO_INSTALL_CLEANUP=1
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
           brew install node@22 meson ninja pkg-config glib || true
           brew link --overwrite --force node@22
           echo "/opt/homebrew/opt/node@22/bin" >> "$GITHUB_PATH"
           python3 -m venv "$HOME/pyenv"
           source "$HOME/pyenv/bin/activate"
-          python3 -m pip install --upgrade pip
-          python3 -m pip install setuptools
-          node --version
-          meson --version
-          ninja --version
+          python3 -m pip install --upgrade pip setuptools
 
       - name: Cache Frida source and build
         id: cache-frida
         uses: actions/cache@v4
         with:
-          path: |
-            frida-src
-            ~/.cache/pip
-          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v3
+          path: frida-src
+          key: frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-v6
           restore-keys: |
             frida-src-${{ env.FRIDA_VERSION }}-${{ runner.os }}-
 
-      - name: Clone Frida source
+      - name: Clone Frida
         if: steps.cache-frida.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
@@ -107,44 +56,66 @@ jobs:
           git clone --depth 1 https://github.com/frida/frida.git frida-src
           cd frida-src
           git submodule update --init --recursive --depth 1
-          echo "=== source ready ==="
 
-      - name: Configure Frida
+      - name: Patch post-process.py to skip codesign
+        run: |
+          set -euo pipefail
+          cd frida-src/subprojects/frida-core/tools
+          python3 - << 'PYEOF'
+          import re
+          with open("post-process.py") as f:
+              src = f.read()
+          # заменяем вызов codesign на true (no-op)
+          src = re.sub(
+              r"(\bstep\(\s*\[[^\]]*codesign[^\]]*\])",
+              r"\1 if False else None",
+              src,
+          )
+          with open("post-process.py", "w") as f:
+              f.write(src)
+          PYEOF
+          grep -n "codesign" post-process.py | head -10 || true
+          echo "patched"
+
+      - name: Configure
         run: |
           set -euo pipefail
           source "$HOME/pyenv/bin/activate"
           cd frida-src
-          if [ -f build/build.ninja ]; then
-            echo "build already configured, skipping configure"
-            exit 0
+          [ -f build/build.ninja ] && exit 0
+          ./configure --enable-graft-tool --host=macos-arm64
+
+      - name: List targets
+        run: |
+          set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
+          cd frida-src/build
+          ninja -t targets all | grep -iE "gum-graft|graft" | head -20 || true
+
+      - name: Build gum-graft
+        run: |
+          set -euo pipefail
+          source "$HOME/pyenv/bin/activate"
+          cd frida-src/build
+          if ninja -t targets all | grep -q "gum-graft"; then
+            ninja gum-graft 2>&1 | tail -50
+          else
+            echo "gum-graft target not found, building gum module"
+            ninja frida-gum 2>&1 | tail -50
           fi
-          ./configure --enable-graft-tool --enable-frida-tools --host=macos-arm64
-          echo "=== configure done ==="
-
-      - name: Build Frida
-        run: |
-          set -euo pipefail
-          source "$HOME/pyenv/bin/activate"
-          cd frida-src
-          make 2>&1 | tail -150
-          echo "=== build done ==="
 
       - name: Locate gum-graft
         run: |
           set -euo pipefail
           GUM_GRAFT=$(find frida-src/build -type f -name "gum-graft" | head -1)
           if [ -z "$GUM_GRAFT" ]; then
-            echo "::error::gum-graft not found in build tree"
-            echo "=== graft-related files ==="
+            echo "::error::gum-graft not found"
             find frida-src/build -type f -iname "*graft*" || true
-            echo "=== bin dirs ==="
-            find frida-src/build -type d -name bin -exec ls -la {} \; || true
             exit 1
           fi
           chmod +x "$GUM_GRAFT"
           echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
           echo "found: $(realpath $GUM_GRAFT)"
-          "$GUM_GRAFT" --help 2>&1 | head -30 || true
 
       - name: Download Frida Gadget
         run: |
@@ -153,28 +124,14 @@ jobs:
           curl -fL --retry 3 -o gadget.dylib.xz "$URL"
           xz -d gadget.dylib.xz
           mv gadget.dylib W.stock.dylib
-          file W.stock.dylib
-          lipo -info W.stock.dylib || true
-
-      - name: Extract arm64 slice
-        run: |
-          set -euo pipefail
-          if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.stock.dylib W.thin.dylib
-          else
-            lipo -thin arm64 -output W.thin.dylib W.stock.dylib
-          fi
-          file W.thin.dylib
-          echo "thin size: $(stat -f%z W.thin.dylib) bytes"
+          lipo -thin arm64 -output W.thin.dylib W.stock.dylib
 
       - name: Run gum-graft
         run: |
           set -euo pipefail
           "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
-          echo "=== after grafting ==="
           file W.thin.dylib
-          echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
-          otool -l W.thin.dylib | grep -i graft || echo "no graft sections found"
+          echo "grafted: $(stat -f%z W.thin.dylib) bytes"
 
       - name: Assemble Frida.framework
         run: |
@@ -188,38 +145,15 @@ jobs:
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleDevelopmentRegion</key>
-              <string>en</string>
-              <key>CFBundleDisplayName</key>
-              <string>Frida</string>
-              <key>CFBundleExecutable</key>
-              <string>W.dylib</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
-              <key>CFBundleInfoDictionaryVersion</key>
-              <string>6.0</string>
-              <key>CFBundleName</key>
-              <string>Frida</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleSignature</key>
-              <string>????</string>
-              <key>CFBundleSupportedPlatforms</key>
-              <array>
-                  <string>iPhoneOS</string>
-              </array>
-              <key>CFBundleVersion</key>
-              <string>17.2.11</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.2.11</string>
-              <key>DTPlatformName</key>
-              <string>iphoneos</string>
-              <key>MinimumOSVersion</key>
-              <string>12.0</string>
-              <key>UIRequiredDeviceCapabilities</key>
-              <array>
-                  <string>arm64</string>
-              </array>
+              <key>CFBundleExecutable</key><string>W.dylib</string>
+              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
+              <key>CFBundleShortVersionString</key><string>17.2.11</string>
+              <key>CFBundleVersion</key><string>17.2.11</string>
+              <key>CFBundleName</key><string>Frida</string>
+              <key>CFBundlePackageType</key><string>FMWK</string>
+              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+              <key>DTPlatformName</key><string>iphoneos</string>
+              <key>MinimumOSVersion</key><string>12.0</string>
           </dict>
           </plist>
           PLIST
@@ -236,18 +170,13 @@ jobs:
           CONFIG
 
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
-          find "$FRAMEWORK_NAME" -type f | sort
 
-      - name: Sign framework
+      - name: Sign
         run: |
           set -euo pipefail
           brew install ldid || true
-          if command -v ldid >/dev/null; then
-            ldid -S "$FRAMEWORK_NAME/W.dylib"
-            echo "signed W.dylib"
-          fi
+          command -v ldid >/dev/null && ldid -S "$FRAMEWORK_NAME/W.dylib"
 
       - name: Package
         run: |
@@ -255,11 +184,9 @@ jobs:
           find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
           find "$FRAMEWORK_NAME" -name "._*" -delete
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
-          rm -f "$FRAMEWORK_NAME.zip"
           zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME" \
             -x "*.DS_Store" -x "__MACOSX/*" -x "*/._*"
-          unzip -l "$FRAMEWORK_NAME.zip"
-          shasum -a 256 "$FRAMEWORK_NAME.zip" | tee "$FRAMEWORK_NAME.zip.sha256"
+          shasum -a 256 "$FRAMEWORK_NAME.zip"
 
       - uses: actions/upload-artifact@v4
         with:
