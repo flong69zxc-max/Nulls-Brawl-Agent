@@ -17,59 +17,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  offsets:
+  prepare:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    env:
-      JAVA_TOOL_OPTIONS: "-XX:+UseParallelGC -XX:ParallelGCThreads=4"
+    timeout-minutes: 30
+    outputs:
+      ver: ${{ steps.resolve.outputs.VER }}
+      url: ${{ steps.resolve.outputs.URL }}
+      program_name: ${{ steps.extract.outputs.PROGRAM_NAME }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - uses: actions/setup-java@v4
-        with:
-          java-version: "21"
-          distribution: temurin
-          cache: maven
-
       - name: Install helper tools
         run: |
           set -e
-          command -v jq >/dev/null 2>&1 || sudo apt-get install -y jq
           command -v file >/dev/null 2>&1 || sudo apt-get install -y file
           command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
-
-      - uses: actions/cache@v4
-        id: cache-ghidra
-        with:
-          path: ghidra
-          key: ghidra-12.1.2-jython-v1
-          restore-keys: |
-            ghidra-12.1.2-
-            ghidra-
-
-      - name: Install Ghidra
-        if: steps.cache-ghidra.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
-          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
-          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
-          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
-          test -n "$JYTHON_ZIP"
-          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
-          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
-          rm -f /tmp/g.zip
-
-      - name: Set GHIDRA_ROOT
-        run: echo "GHIDRA_ROOT=$GITHUB_WORKSPACE/ghidra" >> "$GITHUB_ENV"
-
-      - name: Validate Ghidra
-        run: |
-          set -euo pipefail
-          test -x "$GHIDRA_ROOT/support/analyzeHeadless"
-          test -d "$GHIDRA_ROOT/Ghidra/Extensions/Jython"
 
       - name: Resolve ipa URL
         id: resolve
@@ -104,13 +68,12 @@ jobs:
           test -s ipa_cache/bs.ipa
           file ipa_cache/bs.ipa
           if ! file ipa_cache/bs.ipa | grep -qi "zip"; then
-            echo "ERROR: downloaded file is not a zip/ipa"
-            head -c 512 ipa_cache/bs.ipa | strings | head -20 || true
+            echo "ERROR: not a zip/ipa"
             exit 1
           fi
-          ls -la ipa_cache/
 
       - name: Extract executable
+        id: extract
         run: |
           set -euo pipefail
           rm -rf extract
@@ -135,28 +98,159 @@ jobs:
           test -n "$BIN"
           test -f "$BIN"
           file "$BIN"
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-          echo "BIN_NAME=$(basename "$BIN")" >> "$GITHUB_ENV"
+          cp "$BIN" /tmp/brawl_bin
+          echo "PROGRAM_NAME=brawl_bin" >> "$GITHUB_OUTPUT"
 
-      - name: Validate scripts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brawl-bin
+          path: /tmp/brawl_bin
+          retention-days: 1
+
+  cold:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: "21"
+          distribution: temurin
+
+      - name: Install helper tools
         run: |
-          set +e
-          set -uo pipefail
-          test -f "$GITHUB_WORKSPACE/scripts/find_offsets.py"
-          test -f "$GITHUB_WORKSPACE/offsets.js"
-          echo "find_offsets.py: $(wc -l < "$GITHUB_WORKSPACE/scripts/find_offsets.py") lines"
-          echo "offsets.js: $(wc -l < "$GITHUB_WORKSPACE/offsets.js") lines"
+          set -e
+          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
 
       - uses: actions/cache@v4
+        id: cache-ghidra
+        with:
+          path: ghidra
+          key: ghidra-12.1.2-jython-v1
+          restore-keys: |
+            ghidra-12.1.2-
+            ghidra-
+
+      - name: Install Ghidra
+        if: steps.cache-ghidra.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
+          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
+          test -n "$JYTHON_ZIP"
+          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          rm -f /tmp/g.zip
+
+      - uses: actions/cache/restore@v4
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-${{ steps.resolve.outputs.VER }}
+          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
           restore-keys: |
             ghidra-brawl-project-
 
-      - name: Run Ghidra
+      - uses: actions/download-artifact@v4
+        if: steps.cache-project.outputs.cache-hit != 'true'
+        with:
+          name: brawl-bin
+          path: /tmp
+
+      - name: Run COLD
+        if: steps.cache-project.outputs.cache-hit != 'true'
+        env:
+          _JAVA_OPTIONS: "-Xmx14g -Djava.awt.headless=true"
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          JOBS=$(nproc)
+          rm -rf ghidra_project
+          mkdir -p ghidra_project
+          "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
+            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+            -import /tmp/brawl_bin \
+            -processor AARCH64:LE:64:AppleSilicon \
+            -loader MachoLoader \
+            -analysisTimeoutPerFile 5400 \
+            -max-cpu "$JOBS" 2>&1 | tee cold.log | tail -60
+
+      - uses: actions/cache/save@v4
+        if: steps.cache-project.outputs.cache-hit != 'true'
+        with:
+          path: ghidra_project
+          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cold-log
+          path: cold.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  warm:
+    needs: [prepare, cold]
+    if: always() && needs.prepare.result == 'success' && needs.cold.result == 'success'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v5
+        with:
+          java-version: "21"
+          distribution: temurin
+
+      - name: Install helper tools
+        run: |
+          set -e
+          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
+
+      - uses: actions/cache@v4
+        id: cache-ghidra
+        with:
+          path: ghidra
+          key: ghidra-12.1.2-jython-v1
+          restore-keys: |
+            ghidra-12.1.2-
+            ghidra-
+
+      - name: Install Ghidra
+        if: steps.cache-ghidra.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
+          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
+          test -n "$JYTHON_ZIP"
+          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          rm -f /tmp/g.zip
+
+      - uses: actions/cache/restore@v4
+        id: cache-project
+        with:
+          path: ghidra_project
+          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
+          restore-keys: |
+            ghidra-brawl-project-
+
+      - name: Fail if no project cache
+        if: steps.cache-project.outputs.cache-hit != 'true'
+        run: |
+          echo "ERROR: ghidra_project not found after cold job"
+          exit 1
+
+      - name: Run WARM
         env:
           _JAVA_OPTIONS: "-Xmx14g -Djava.awt.headless=true"
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -164,28 +258,12 @@ jobs:
           set -euo pipefail
           JOBS=$(nproc)
           rm -f offsets_new.js offsets_report.txt
-          if [ "${{ steps.cache-project.outputs.cache-hit }}" = "true" ]; then
-            echo "=== WARM ==="
-            "$GHIDRA_ROOT/support/analyzeHeadless" \
-              "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
-              -process "$BIN_NAME" -noanalysis \
-              -postScript find_offsets.py \
-              -scriptPath "$GITHUB_WORKSPACE/scripts" \
-              -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -80
-          else
-            echo "=== COLD ==="
-            rm -rf ghidra_project
-            mkdir -p ghidra_project
-            "$GHIDRA_ROOT/support/analyzeHeadless" \
-              "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
-              -import "$BIN" \
-              -processor AARCH64:LE:64:AppleSilicon \
-              -loader MachoLoader \
-              -postScript find_offsets.py \
-              -scriptPath "$GITHUB_WORKSPACE/scripts" \
-              -analysisTimeoutPerFile 5400 \
-              -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -80
-          fi
+          "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
+            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+            -process "${{ needs.prepare.outputs.program_name }}" -noanalysis \
+            -postScript find_offsets.py \
+            -scriptPath "$GITHUB_WORKSPACE/scripts" \
+            -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -80
 
       - name: Validate outputs
         run: |
