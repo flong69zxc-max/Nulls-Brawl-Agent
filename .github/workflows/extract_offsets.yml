@@ -1,0 +1,194 @@
+name: Extract Offsets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/find_offsets.py
+      - offsets.js
+      - .github/workflows/extract_offsets.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  offsets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "25"
+          distribution: temurin
+
+      - name: Install helper tools
+        run: |
+          set -e
+          command -v jq >/dev/null 2>&1 || sudo apt-get install -y jq
+          command -v file >/dev/null 2>&1 || sudo apt-get install -y file
+          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
+
+      - uses: actions/cache@v4
+        id: cache-ghidra
+        with:
+          path: ghidra
+          key: ghidra-12.1.2-jython-v4
+
+      - name: Install Ghidra
+        if: steps.cache-ghidra.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
+          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
+          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
+          test -n "$JYTHON_ZIP"
+          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          rm -f /tmp/g.zip
+
+      - name: Set GHIDRA_ROOT
+        run: echo "GHIDRA_ROOT=$GITHUB_WORKSPACE/ghidra" >> "$GITHUB_ENV"
+
+      - name: Validate Ghidra
+        run: |
+          set -euo pipefail
+          test -x "$GHIDRA_ROOT/support/analyzeHeadless"
+          test -d "$GHIDRA_ROOT/Ghidra/Extensions/Jython"
+
+      - uses: actions/cache@v4
+        id: cache-ipa
+        with:
+          path: ipa_cache
+          key: ipa-nulls-brawl-v1
+
+      - name: Download ipa
+        if: steps.cache-ipa.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ipa_cache
+          curl -fL --retry 3 -A "Mozilla/5.0" -o ipa_cache/bs.ipa "https://nulls.ee/bs_latest_i"
+          test -s ipa_cache/bs.ipa
+          file ipa_cache/bs.ipa
+          ls -la ipa_cache/
+
+      - name: Extract executable
+        run: |
+          set -euo pipefail
+          rm -rf extract
+          mkdir -p extract
+          unzip -q ipa_cache/bs.ipa -d extract
+          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          test -n "$APP_DIR"
+          BIN=""
+          for f in "$APP_DIR"/*; do
+            [ -f "$f" ] || continue
+            [ -x "$f" ] || continue
+            case "$f" in
+              *.dylib|*.png|*.jpg|*.plist|*.car|*.ttf) continue ;;
+            esac
+            if file "$f" | grep -qi "Mach-O"; then
+              BIN="$f"
+              break
+            fi
+          done
+          test -n "$BIN"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+          echo "BIN_NAME=$(basename "$BIN")" >> "$GITHUB_ENV"
+          file "$BIN"
+
+      - name: Validate scripts
+        run: |
+          set -euo pipefail
+          test -f "$GITHUB_WORKSPACE/scripts/find_offsets.py"
+          test -f "$GITHUB_WORKSPACE/offsets.js"
+          python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$GITHUB_WORKSPACE/scripts/find_offsets.py"
+
+      - uses: actions/cache@v4
+        id: cache-project
+        with:
+          path: ghidra_project
+          key: ghidra-brawl-project-v1
+
+      - name: Run Ghidra
+        env:
+          _JAVA_OPTIONS: "-Xmx12g -Djava.awt.headless=true"
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          JOBS=$(nproc)
+          rm -f offsets_new.js offsets_report.txt signatures.json.tmp
+          if [ "${{ steps.cache-project.outputs.cache-hit }}" = "true" ]; then
+            echo "=== WARM ==="
+            "$GHIDRA_ROOT/support/analyzeHeadless" \
+              "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+              -process "$BIN_NAME" -noanalysis \
+              -postScript find_offsets.py \
+              -scriptPath "$GITHUB_WORKSPACE/scripts" \
+              -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -80
+          else
+            echo "=== COLD ==="
+            rm -rf ghidra_project
+            mkdir -p ghidra_project
+            "$GHIDRA_ROOT/support/analyzeHeadless" \
+              "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+              -import "$BIN" \
+              -processor AARCH64:LE:64:AppleSilicon \
+              -loader MachoLoader \
+              -postScript find_offsets.py \
+              -scriptPath "$GITHUB_WORKSPACE/scripts" \
+              -analysisTimeoutPerFile 5400 \
+              -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -80
+          fi
+
+      - name: Validate outputs
+        run: |
+          set -euo pipefail
+          test -s offsets_new.js
+          echo "offsets_new.js lines: $(wc -l < offsets_new.js)"
+
+      - name: Report
+        if: always()
+        run: |
+          echo "=== ghidra.log tail ==="
+          tail -120 ghidra.log 2>/dev/null || true
+          echo "=== offsets_report.txt ==="
+          cat offsets_report.txt 2>/dev/null || true
+          echo "=== offsets_new.js head ==="
+          head -30 offsets_new.js 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: brawl-offsets
+          path: |
+            offsets_new.js
+            offsets_report.txt
+            signatures.json
+            ghidra.log
+          retention-days: 30
+
+      - name: Commit result
+        if: always()
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email github-actions[bot]@users.noreply.github.com
+          if [ -f offsets_new.js ] && [ -s offsets_new.js ]; then
+            cp offsets_new.js offsets.js
+          fi
+          git add -f offsets.js 2>/dev/null || true
+          git add -f offsets_report.txt 2>/dev/null || true
+          git add -f signatures.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo no changes
+            exit 0
+          fi
+          git commit -m "extract: brawl offsets [skip ci]"
+          git push
