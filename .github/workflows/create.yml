@@ -1,9 +1,5 @@
 name: Build DebugLogger
 
-# Собирает debuglogger.m (пишется heredoc'ом, файл в репо не нужен) в DebugLogger.dylib
-# под arm64 iOS. macOS-раннер обязателен: нужен iOS SDK из Xcode (xcrun --sdk iphoneos).
-# На выходе: DebugLogger.dylib + опционально подписанный ldid DebugLogger.signed.dylib.
-
 on:
   push:
     branches: [main]
@@ -27,13 +23,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Write debuglogger.m from heredoc
+      - name: Write source
         run: |
           set -euo pipefail
           cat > debuglogger.m <<'OBJC_EOF'
-          // DebugLogger.m — диагностический логгер для Frida Gadget в LiveContainer.
-          // Грузится РАНЬШЕ гаджета, пишет в системный лог iOS через NSLog.
-          // Фильтр в idevicesyslog/StikDebug: "[FridaDebug]".
           #import <Foundation/Foundation.h>
           #import <mach-o/dyld.h>
           #import <dlfcn.h>
@@ -45,46 +38,57 @@ jobs:
 
           #define DLOG(fmt, ...) NSLog(@"[FridaDebug] " fmt, ##__VA_ARGS__)
 
-          __attribute__((constructor))
+          static void redirectLogs(void) {
+              NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+              NSString *docs = paths.count > 0 ? paths[0] : nil;
+              if (!docs) docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+              NSString *logPath = [docs stringByAppendingPathComponent:@"frida_debug.log"];
+              NSFileManager *fm = [NSFileManager defaultManager];
+              if (![fm fileExistsAtPath:logPath]) {
+                  [fm createFileAtPath:logPath contents:nil attributes:nil];
+              }
+              freopen([logPath fileSystemRepresentation], "a+", stderr);
+              DLOG(@"log redirected to %@", logPath);
+          }
+
+          __attribute__((constructor(101)))
+          __attribute__((used))
           static void onLoad(void) {
               @autoreleasepool {
+                  redirectLogs();
                   DLOG(@"========================================");
-                  DLOG(@"DebugLogger loaded (pid=%d)", getpid());
-
+                  DLOG(@"DebugLogger loaded pid=%d", getpid());
                   DLOG(@"Bundle: %@", [[NSBundle mainBundle] bundlePath]);
                   DLOG(@"Executable: %@", [[NSBundle mainBundle] executablePath]);
                   DLOG(@"Container: %@", NSHomeDirectory());
                   DLOG(@"Bundle ID: %@", [[NSBundle mainBundle] bundleIdentifier]);
 
-                  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-                  BOOL isLC = [defaults boolForKey:@"isLiveProcess"] ||
-                              [defaults stringForKey:@"lcGuestAppId"] != nil ||
-                              [defaults stringForKey:@"lcAppGroupPath"] != nil;
-                  DLOG(@"LiveContainer detected: %@", isLC ? @"YES" : @"NO");
+                  NSUserDefaults *defs = [NSUserDefaults standardUserDefaults];
+                  BOOL isLC = [defs boolForKey:@"isLiveProcess"] ||
+                              [defs stringForKey:@"lcGuestAppId"] != nil ||
+                              [defs stringForKey:@"lcAppGroupPath"] != nil;
+                  DLOG(@"LiveContainer: %@", isLC ? @"YES" : @"NO");
                   if (isLC) {
-                      DLOG(@"  lcGuestAppId: %@", [defaults stringForKey:@"lcGuestAppId"]);
-                      DLOG(@"  lcAppGroupPath: %@", [defaults stringForKey:@"lcAppGroupPath"]);
-                      DLOG(@"  isSharedApp: %@", [defaults boolForKey:@"isSharedApp"] ? @"YES" : @"NO");
+                      DLOG(@"  lcGuestAppId: %@", [defs stringForKey:@"lcGuestAppId"]);
+                      DLOG(@"  lcAppGroupPath: %@", [defs stringForKey:@"lcAppGroupPath"]);
                   }
 
-                  DLOG(@"--- loaded modules (Frida / TweakLoader / W.dylib) ---");
+                  DLOG(@"--- loaded modules ---");
                   uint32_t count = _dyld_image_count();
                   for (uint32_t i = 0; i < count; i++) {
                       const char *name = _dyld_get_image_name(i);
                       if (!name) continue;
-                      NSString *nsName = [NSString stringWithUTF8String:name];
-                      if ([nsName containsString:@"W.dylib"] ||
-                          [nsName containsString:@"Frida"] ||
-                          [nsName containsString:@"TweakLoader"] ||
-                          [nsName containsString:@"gadget"]) {
-                          DLOG(@"  [%u] %@", i, nsName);
+                      NSString *n = [NSString stringWithUTF8String:name];
+                      if ([n containsString:@"W.dylib"] || [n containsString:@"Frida"] ||
+                          [n containsString:@"TweakLoader"] || [n containsString:@"gadget"]) {
+                          DLOG(@"  [%u] %@", i, n);
                       }
                   }
 
                   Dl_info info;
                   if (dladdr((void *)&onLoad, &info) && info.dli_fname) {
                       NSString *myPath = SafePath(info.dli_fname);
-                      DLOG(@"This library loaded from: %@", myPath);
+                      DLOG(@"Loaded from: %@", myPath);
                       NSString *dir = [myPath stringByDeletingLastPathComponent];
                       for (NSString *file in @[@"W.dylib", @"W.config", @"agent.js"]) {
                           NSString *full = [dir stringByAppendingPathComponent:file];
@@ -94,25 +98,14 @@ jobs:
                   }
 
                   NSString *docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
-                  DLOG(@"Documents: %@", docs);
-                  DLOG(@"Documents writable: %@",
+                  DLOG(@"Documents: %@ writable: %@", docs,
                        [[NSFileManager defaultManager] isWritableFileAtPath:docs] ? @"YES" : @"NO");
-
                   DLOG(@"========================================");
               }
           }
           OBJC_EOF
-          echo "--- wrote debuglogger.m ($(wc -l < debuglogger.m) lines) ---"
 
-      - name: Show toolchain
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-path
-          xcrun --sdk iphoneos --show-sdk-version
-          clang --version
-
-      - name: Compile DebugLogger.dylib
+      - name: Compile
         run: |
           set -euo pipefail
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
@@ -126,49 +119,26 @@ jobs:
             -fobjc-arc \
             -O2 \
             -Wall -Wextra \
+            -Wl,-no_dead_strip_inits_and_terms \
+            -Wl,-all_load \
             -install_name "@executable_path/Frameworks/DebugLogger.dylib"
           ls -l DebugLogger.dylib
 
-      - name: Verify binary
+      - name: Verify
         run: |
           set -euo pipefail
-          file DebugLogger.dylib
-          file DebugLogger.dylib | grep -q arm64 || { echo "::error::не arm64"; exit 1; }
-          echo "--- load commands ---"
-          otool -L DebugLogger.dylib
-          echo "--- init_array (конструктор должен быть) ---"
-          otool -l DebugLogger.dylib | grep -A3 -i 'init_array' || {
-            echo "::warning::нет init_array — конструктор может не выполниться"
-          }
+          file DebugLogger.dylib | grep -q arm64
+          otool -l DebugLogger.dylib | grep -A3 -i 'init_array' || echo "WARNING: no init_array"
+          nm -gU DebugLogger.dylib | grep -i onLoad || echo "WARNING: onLoad not exported"
 
-      - name: Sign with ldid (optional)
+      - name: Sign
         run: |
           set -euo pipefail
           brew install ldid || true
           if command -v ldid >/dev/null; then
             cp DebugLogger.dylib DebugLogger.signed.dylib
             ldid -S DebugLogger.signed.dylib
-            echo "signed ok"
-            codesign -dv DebugLogger.signed.dylib 2>&1 | head -5 || true
-          else
-            echo "::warning::ldid недоступен, оставляю неподписанный"
           fi
-
-      - name: Summary
-        run: |
-          set -euo pipefail
-          {
-            echo "### debuglogger"
-            echo ""
-            echo "| файл | байт | sha256 |"
-            echo "|---|---|---|"
-            for f in DebugLogger.dylib DebugLogger.signed.dylib; do
-              [ -f "$f" ] || continue
-              echo "| \`$f\` | $(stat -f%z "$f") | \`$(shasum -a 256 "$f" | cut -c1-16)\` |"
-            done
-            echo ""
-            echo "SDK: $(xcrun --sdk iphoneos --show-sdk-version), arch: arm64, min iOS: 12.0"
-          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         with:
