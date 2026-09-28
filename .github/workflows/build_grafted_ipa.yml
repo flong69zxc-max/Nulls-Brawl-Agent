@@ -41,11 +41,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
-          import subprocess, sys
+          import subprocess, re, sys
 
           PATTERN_BRK539 = bytes.fromhex("20A720D4")
           PATTERN_BRK1   = bytes.fromhex("200020D4")
           NOP            = bytes.fromhex("1F2003D5")
+          RET            = bytes.fromhex("C0035FD6")
 
           with open("W.stock.dylib", "rb") as f:
               data = bytearray(f.read())
@@ -55,6 +56,7 @@ jobs:
           stock_nop    = bytes(data).count(NOP)
           print(f"[stock] BRK #0x539={stock_brk539} BRK #1={stock_brk1} NOP={stock_nop}")
 
+          # --- BRK patches ---
           patched_brk539 = 0
           idx = 0
           while True:
@@ -75,40 +77,80 @@ jobs:
               patched_brk1 += 1
               idx += 4
 
-          out = subprocess.run(["nm", "-gU", "W.stock.dylib"], capture_output=True, text=True)
-          abort_addr = None
-          for line in out.stdout.splitlines():
-              parts = line.split()
-              if len(parts) >= 3 and parts[2] == "_abort":
-                  abort_addr = int(parts[0], 16)
+          # --- parse otool -Iv for __stubs entries named _abort ---
+          out_iv = subprocess.run(["otool", "-Iv", "W.stock.dylib"],
+                                  capture_output=True, text=True).stdout
+
+          abort_stub_vm_addrs = []
+          in_stubs = False
+          for line in out_iv.splitlines():
+              if line.startswith("Indirect symbols for"):
+                  m = re.search(r'\(([^,]+),([^)]+)\)', line)
+                  if m:
+                      in_stubs = (m.group(2) == "__stubs")
+                  continue
+              if in_stubs:
+                  parts = line.split()
+                  if len(parts) >= 3:
+                      try:
+                          addr = int(parts[0], 16)
+                          name = parts[2]
+                          if name == "_abort":
+                              abort_stub_vm_addrs.append(addr)
+                      except ValueError:
+                          pass
+
+          print(f"[stubs] abort VM addrs: {[hex(a) for a in abort_stub_vm_addrs]}")
+
+          # --- parse otool -l for __TEXT,__stubs section: vmaddr + file offset ---
+          out_l = subprocess.run(["otool", "-l", "W.stock.dylib"],
+                                 capture_output=True, text=True).stdout
+
+          stubs_vmaddr = None
+          stubs_fileoff = None
+          stubs_size = None
+
+          lines = out_l.splitlines()
+          for i, line in enumerate(lines):
+              if "sectname __stubs" in line:
+                  for j in range(i, min(i + 10, len(lines))):
+                      l = lines[j].strip()
+                      m_addr = re.match(r'addr\s+(0x[0-9a-fA-F]+)', l)
+                      m_off  = re.match(r'offset\s+(\d+)', l)
+                      m_size = re.match(r'size\s+(0x[0-9a-fA-F]+)', l)
+                      if m_addr:
+                          stubs_vmaddr = int(m_addr.group(1), 16)
+                      if m_off:
+                          stubs_fileoff = int(m_off.group(1))
+                      if m_size:
+                          stubs_size = int(m_size.group(1), 16)
                   break
 
-          patched_abort = 0
-          if abort_addr is not None:
-              print(f"[abort] symbol address 0x{abort_addr:x}")
-              for i in range(0, len(data) - 4, 4):
-                  instr = int.from_bytes(data[i:i+4], "little")
-                  if (instr & 0xFC000000) == 0x94000000:
-                      imm26 = instr & 0x03FFFFFF
-                      if imm26 & 0x02000000:
-                          imm26 -= 0x04000000
-                      target = i + imm26 * 4
-                      if target == abort_addr:
-                          data[i:i+4] = NOP
-                          patched_abort += 1
-          else:
-              print("[abort] symbol not found, skipping BL patch")
+          print(f"[stubs] vmaddr={hex(stubs_vmaddr) if stubs_vmaddr else None} "
+                f"fileoff={stubs_fileoff} size={hex(stubs_size) if stubs_size else None}")
 
-          print(f"[patched] BRK #0x539={patched_brk539} BRK #1={patched_brk1} BL_abort={patched_abort}")
+          patched_abort = 0
+          if stubs_vmaddr is not None and stubs_fileoff is not None:
+              for vm in abort_stub_vm_addrs:
+                  file_off = stubs_fileoff + (vm - stubs_vmaddr)
+                  if 0 <= file_off <= len(data) - 4:
+                      data[file_off:file_off+4] = RET
+                      patched_abort += 1
+                      print(f"[patch] abort stub at file 0x{file_off:x} -> RET")
+          else:
+              print("[patch] __stubs section not found, skipping abort patch")
+
+          print(f"[patched] BRK #0x539={patched_brk539} BRK #1={patched_brk1} abort_stubs={patched_abort}")
 
           with open("W.full-patched.dylib", "wb") as f:
               f.write(data)
 
-          patched_data = bytes(data)
-          final_brk539 = patched_data.count(PATTERN_BRK539)
-          final_brk1   = patched_data.count(PATTERN_BRK1)
-          final_nop    = patched_data.count(NOP)
-          print(f"[final] BRK #0x539={final_brk539} BRK #1={final_brk1} NOP={final_nop}")
+          final_data = bytes(data)
+          final_brk539 = final_data.count(PATTERN_BRK539)
+          final_brk1   = final_data.count(PATTERN_BRK1)
+          final_nop    = final_data.count(NOP)
+          final_ret    = final_data.count(RET)
+          print(f"[final] BRK #0x539={final_brk539} BRK #1={final_brk1} NOP={final_nop} RET={final_ret}")
 
           errors = []
           if final_brk539 != 0:
@@ -120,6 +162,8 @@ jobs:
           expected_nop_min = stock_nop + stock_brk539 + stock_brk1
           if final_nop < expected_nop_min:
               errors.append(f"NOP count {final_nop} < expected {expected_nop_min}")
+          if patched_abort == 0:
+              errors.append("no abort stub patched — check otool -Iv output")
 
           with open("patch-report.txt", "w") as f:
               f.write(f"stock_brk539={stock_brk539}\n")
@@ -131,6 +175,7 @@ jobs:
               f.write(f"final_brk539={final_brk539}\n")
               f.write(f"final_brk1={final_brk1}\n")
               f.write(f"final_nop={final_nop}\n")
+              f.write(f"final_ret={final_ret}\n")
 
           if errors:
               for e in errors:
@@ -144,9 +189,7 @@ jobs:
       - name: Show patch report
         run: |
           set -euo pipefail
-          echo "=== patch report ==="
           cat patch-report.txt
-          echo "=== arch ==="
           file W.full-patched.dylib | grep -q arm64
           echo "arm64 OK"
 
@@ -232,8 +275,8 @@ jobs:
               data = f.read()
           brk539 = data.count(bytes.fromhex("20A720D4"))
           brk1   = data.count(bytes.fromhex("200020D4"))
-          nop    = data.count(bytes.fromhex("1F2003D5"))
-          print(f"final BRK #0x539={brk539} BRK #1={brk1} NOP={nop}")
+          ret    = data.count(bytes.fromhex("C0035FD6"))
+          print(f"final BRK #0x539={brk539} BRK #1={brk1} RET={ret}")
           if brk539 or brk1:
               raise SystemExit("patches missing in final W.dylib")
           print("OK: final W.dylib verified")
@@ -254,7 +297,7 @@ jobs:
             echo "| param | value |"
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
-            echo "| patches | BRK #0x539, BRK #1, BL abort |"
+            echo "| patches | BRK #0x539, BRK #1, abort stub -> RET |"
             echo "| arch | arm64 |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
