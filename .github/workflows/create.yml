@@ -37,65 +37,109 @@ jobs:
           #import <fcntl.h>
           #import <sys/types.h>
           #import <stddef.h>
+          #import <sys/sysctl.h>
 
           #define CS_OPS_STATUS 0
 
           extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 
-          static void redirectLogs(void) {
+          static int g_log_fd = -1;
+
+          static void openLogFile(void) {
               NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
               NSString *docs = paths.count > 0 ? paths[0] : nil;
               if (!docs) docs = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
               NSString *logPath = [docs stringByAppendingPathComponent:@"inspector.log"];
-              int fd = open([logPath fileSystemRepresentation], O_CREAT | O_WRONLY | O_APPEND, 0666);
-              if (fd >= 0) {
-                  dup2(fd, STDERR_FILENO);
-                  dup2(fd, STDOUT_FILENO);
-                  close(fd);
+              g_log_fd = open([logPath fileSystemRepresentation], O_CREAT | O_WRONLY | O_APPEND, 0666);
+              if (g_log_fd >= 0) {
+                  dup2(g_log_fd, STDERR_FILENO);
+                  dup2(g_log_fd, STDOUT_FILENO);
                   setvbuf(stderr, NULL, _IONBF, 0);
                   setvbuf(stdout, NULL, _IONBF, 0);
               }
-              NSLog(@"[Inspector] log: %@", logPath);
           }
 
-          static void logFile(NSString *path) {
-              NSFileManager *fm = [NSFileManager defaultManager];
-              BOOL isDir = NO;
-              if (![fm fileExistsAtPath:path isDirectory:&isDir]) {
-                  NSLog(@"[Inspector] %@ -> missing", path);
-                  return;
-              }
-              if (isDir) {
-                  NSArray *items = [fm contentsOfDirectoryAtPath:path error:nil];
-                  NSLog(@"[Inspector] %@ contents (%lu):", path, (unsigned long)items.count);
-                  for (NSString *item in items) {
-                      NSString *full = [path stringByAppendingPathComponent:item];
-                      NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-                      NSNumber *size = attrs[NSFileSize];
-                      NSLog(@"[Inspector]   %@ (%@ B)", item, size ?: @"?");
-                  }
-              } else {
-                  NSDictionary *attrs = [fm attributesOfItemAtPath:path error:nil];
-                  NSNumber *size = attrs[NSFileSize];
-                  NSLog(@"[Inspector] %@ FOUND (%@ B)", path, size ?: @"?");
-              }
+          static void writeLine(const char *fmt, ...) {
+              if (g_log_fd < 0) return;
+              va_list args;
+              va_start(args, fmt);
+              char buf[4096];
+              int n = vsnprintf(buf, sizeof(buf), fmt, args);
+              va_end(args);
+              if (n > 0) write(g_log_fd, buf, n);
           }
 
           static void dumpEnv(void) {
-              NSLog(@"[Inspector] --- environment ---");
-              for (NSString *key in @[@"DYLD_INSERT_LIBRARIES", @"DYLD_LIBRARY_PATH", @"DYLD_FRAMEWORK_PATH", @"HOME", @"TMPDIR", @"MallocNanoZone"]) {
-                  char *val = getenv([key UTF8String]);
-                  if (val) NSLog(@"[Inspector]   %@ = %s", key, val);
+              writeLine("[Inspector] === ENVIRONMENT ===\n");
+              const char *keys[] = {"DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "HOME", "TMPDIR", "MallocNanoZone"};
+              for (int i = 0; i < 6; i++) {
+                  char *val = getenv(keys[i]);
+                  if (val) writeLine("[Inspector] %s = %s\n", keys[i], val);
               }
               uint32_t flags = 0;
               csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
-              NSLog(@"[Inspector] csops flags: 0x%x", flags);
-              BOOL getTaskAllow = (flags & 0x1000000) != 0;
-              NSLog(@"[Inspector] get-task-allow: %@", getTaskAllow ? @"YES" : @"NO");
+              writeLine("[Inspector] csops flags: 0x%x\n", flags);
+              writeLine("[Inspector] get-task-allow: %s\n", (flags & 0x1000000) ? "YES" : "NO");
+              writeLine("[Inspector] platform: %s\n", TARGET_OS_SIMULATOR ? "simulator" : "device");
+              writeLine("[Inspector] pid: %d\n", getpid());
+              writeLine("[Inspector] ppid: %d\n", getppid());
+              writeLine("[Inspector] uid: %d euid: %d\n", getuid(), geteuid());
+          }
+
+          static void dumpFiles(void) {
+              writeLine("[Inspector] === FILE CHECKS ===\n");
+              NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+              NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
+              NSString *fwDir = [bundlePath stringByAppendingPathComponent:@"Frameworks"];
+              NSString *container = NSHomeDirectory();
+              NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
+              NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
+              NSString *appsDir = [docs stringByAppendingPathComponent:@"Applications"];
+
+              NSArray *allCandidates = @[
+                  [bundlePath stringByAppendingPathComponent:@"W.config"],
+                  [bundlePath stringByAppendingPathComponent:@"agent.js"],
+                  [bundlePath stringByAppendingPathComponent:@"FridaGadget.config"],
+                  [fwDir stringByAppendingPathComponent:@"W.config"],
+                  [fwDir stringByAppendingPathComponent:@"agent.js"],
+                  [fwDir stringByAppendingPathComponent:@"FridaGadget.config"],
+                  [appDir stringByAppendingPathComponent:@"W.config"],
+                  [appDir stringByAppendingPathComponent:@"agent.js"],
+                  [docs stringByAppendingPathComponent:@"W.config"],
+                  [docs stringByAppendingPathComponent:@"agent.js"],
+                  [tweaks stringByAppendingPathComponent:@"W.config"],
+                  [tweaks stringByAppendingPathComponent:@"agent.js"],
+                  [tweaks stringByAppendingPathComponent:@"W.dylib"],
+              ];
+
+              NSFileManager *fm = [NSFileManager defaultManager];
+              for (NSString *p in allCandidates) {
+                  BOOL exists = [fm fileExistsAtPath:p];
+                  NSDictionary *attrs = [fm attributesOfItemAtPath:p error:nil];
+                  NSNumber *size = attrs[NSFileSize];
+                  writeLine("[Inspector] %s %s (%s B)\n", exists ? "FOUND" : "MISSING", [p UTF8String], size ? [[size stringValue] UTF8String] : "-");
+              }
+
+              writeLine("[Inspector] === DIRECTORY LISTINGS ===\n");
+              NSArray *dirs = @[bundlePath, fwDir, tweaks, appsDir, docs];
+              for (NSString *dir in dirs) {
+                  BOOL isDir = NO;
+                  if ([fm fileExistsAtPath:dir isDirectory:&isDir] && isDir) {
+                      writeLine("[Inspector] DIR %s:\n", [dir UTF8String]);
+                      NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+                      for (NSString *item in items) {
+                          NSString *full = [dir stringByAppendingPathComponent:item];
+                          NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
+                          writeLine("[Inspector]   %s (%s B)\n", [item UTF8String], a ? [[a[NSFileSize] stringValue] UTF8String] : "-");
+                      }
+                  } else {
+                      writeLine("[Inspector] DIR %s -> MISSING\n", [dir UTF8String]);
+                  }
+              }
           }
 
           static void dumpModules(void) {
-              NSLog(@"[Inspector] --- loaded modules (filtered) ---");
+              writeLine("[Inspector] === LOADED MODULES ===\n");
               uint32_t count = _dyld_image_count();
               for (uint32_t i = 0; i < count; i++) {
                   const char *name = _dyld_get_image_name(i);
@@ -105,73 +149,70 @@ jobs:
                       [n containsString:@"frida"] || [n containsString:@"TweakLoader"] ||
                       [n containsString:@"Inspector"] || [n containsString:@"Locator"] ||
                       [n containsString:@".app/"]) {
-                      NSLog(@"[Inspector]   [%u] %@", i, n);
+                      const struct mach_header *header = _dyld_get_image_header(i);
+                      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+                      writeLine("[Inspector]   [%u] %s base=%p slide=%p\n", i, name, header, (void*)slide);
                   }
               }
           }
 
           static void dumpThreads(void) {
-              NSLog(@"[Inspector] --- threads ---");
+              writeLine("[Inspector] === THREADS ===\n");
               thread_act_array_t threads;
               mach_msg_type_number_t threadCount = 0;
               if (task_threads(mach_task_self(), &threads, &threadCount) == KERN_SUCCESS) {
+                  writeLine("[Inspector] total threads: %u\n", threadCount);
                   for (mach_msg_type_number_t i = 0; i < threadCount; i++) {
                       thread_t t = threads[i];
                       thread_extended_info_data_t info;
                       mach_msg_type_number_t infoCount = THREAD_EXTENDED_INFO_COUNT;
                       if (thread_info(t, THREAD_EXTENDED_INFO, (thread_info_t)&info, &infoCount) == KERN_SUCCESS) {
                           NSString *name = [NSString stringWithUTF8String:info.pth_name];
-                          if (name.length > 0 && ([name containsString:@"frida"] || [name containsString:@"gadget"])) {
-                              NSLog(@"[Inspector]   thread %u: %@", i, name);
-                          }
+                          writeLine("[Inspector]   thread %u: %s\n", i, name.length > 0 ? [name UTF8String] : "(unnamed)");
                       }
                   }
                   vm_deallocate(mach_task_self(), (vm_address_t)threads, threadCount * sizeof(thread_t));
               }
           }
 
-          static void dumpConfig(void) {
-              NSLog(@"[Inspector] --- config / agent files ---");
-              NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-              NSString *appDir = [bundlePath stringByDeletingLastPathComponent];
-              NSString *fwDir = [bundlePath stringByAppendingPathComponent:@"Frameworks"];
-              NSString *container = NSHomeDirectory();
-              NSString *docs = [container stringByAppendingPathComponent:@"Documents"];
-              NSString *tweaks = [docs stringByAppendingPathComponent:@"Tweaks"];
-
-              NSArray *candidates = @[
-                  [bundlePath stringByAppendingPathComponent:@"W.config"],
-                  [bundlePath stringByAppendingPathComponent:@"agent.js"],
-                  [fwDir stringByAppendingPathComponent:@"W.config"],
-                  [fwDir stringByAppendingPathComponent:@"agent.js"],
-                  [appDir stringByAppendingPathComponent:@"W.config"],
-                  [appDir stringByAppendingPathComponent:@"agent.js"],
-                  [docs stringByAppendingPathComponent:@"W.config"],
-                  [tweaks stringByAppendingPathComponent:@"W.config"],
-                  [tweaks stringByAppendingPathComponent:@"agent.js"],
+          static void dumpConfigContents(void) {
+              writeLine("[Inspector] === CONFIG CONTENTS ===\n");
+              NSFileManager *fm = [NSFileManager defaultManager];
+              NSArray *paths = @[
+                  [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"W.config"],
+                  [[[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"Frameworks"] stringByAppendingPathComponent:@"W.config"],
+                  [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/W.config"],
+                  [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/Tweaks/W.config"],
               ];
-              for (NSString *p in candidates) logFile(p);
+              for (NSString *p in paths) {
+                  if ([fm fileExistsAtPath:p]) {
+                      NSString *content = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+                      writeLine("[Inspector] CONFIG %s:\n%s\n", [p UTF8String], content ? [content UTF8String] : "(unreadable)");
+                  }
+              }
           }
 
           static void runInspector(void) {
               @autoreleasepool {
-                  NSLog(@"[Inspector] ========================================");
-                  NSLog(@"[Inspector] pid=%d", getpid());
-                  NSLog(@"[Inspector] Bundle: %@", [[NSBundle mainBundle] bundlePath]);
-                  NSLog(@"[Inspector] Executable: %@", [[NSBundle mainBundle] executablePath]);
-                  NSLog(@"[Inspector] Container: %@", NSHomeDirectory());
+                  openLogFile();
+                  writeLine("[Inspector] ========================================\n");
+                  writeLine("[Inspector] Inspector loaded\n");
+                  writeLine("[Inspector] Bundle: %s\n", [[[NSBundle mainBundle] bundlePath] UTF8String]);
+                  writeLine("[Inspector] Executable: %s\n", [[[NSBundle mainBundle] executablePath] UTF8String]);
+                  writeLine("[Inspector] Container: %s\n", [NSHomeDirectory() UTF8String]);
+                  writeLine("[Inspector] Process name: %s\n", [[[NSProcessInfo processInfo] processName] UTF8String]);
                   dumpEnv();
-                  dumpConfig();
+                  dumpFiles();
+                  dumpConfigContents();
                   dumpModules();
                   dumpThreads();
-                  NSLog(@"[Inspector] ========================================");
+                  writeLine("[Inspector] ========================================\n");
               }
           }
 
           __attribute__((constructor))
           __attribute__((used))
           static void onLoad(void) {
-              redirectLogs();
               runInspector();
           }
 
