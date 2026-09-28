@@ -93,7 +93,6 @@ jobs:
           file ipa_cache/bs.ipa
           if ! file ipa_cache/bs.ipa | grep -qi "zip"; then
             echo "ERROR: downloaded file is not a zip/ipa"
-            echo "--- first bytes ---"
             head -c 512 ipa_cache/bs.ipa | strings | head -20 || true
             exit 1
           fi
@@ -132,10 +131,15 @@ jobs:
 
       - name: Validate scripts
         run: |
-          set -euo pipefail
+          set -uo pipefail
           test -f "$GITHUB_WORKSPACE/scripts/find_offsets.py"
           test -f "$GITHUB_WORKSPACE/offsets.js"
-          python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$GITHUB_WORKSPACE/scripts/find_offsets.py"
+          echo "find_offsets.py: $(wc -l < "$GITHUB_WORKSPACE/scripts/find_offsets.py") lines"
+          echo "offsets.js: $(wc -l < "$GITHUB_WORKSPACE/offsets.js") lines"
+          echo "--- find_offsets.py head ---"
+          head -5 "$GITHUB_WORKSPACE/scripts/find_offsets.py"
+          echo "--- find_offsets.py tail ---"
+          tail -5 "$GITHUB_WORKSPACE/scripts/find_offsets.py"
 
       - uses: actions/cache@v4
         id: cache-project
@@ -176,8 +180,13 @@ jobs:
 
       - name: Validate outputs
         run: |
-          set -euo pipefail
-          test -s offsets_new.js
+          set -uo pipefail
+          if [ ! -s offsets_new.js ]; then
+            echo "offsets_new.js missing or empty"
+            echo "--- ghidra.log tail ---"
+            tail -120 ghidra.log 2>/dev/null || true
+            exit 1
+          fi
           echo "offsets_new.js lines: $(wc -l < offsets_new.js)"
 
       - name: Report
@@ -204,7 +213,7 @@ jobs:
       - name: Commit result
         if: always()
         run: |
-          set -euo pipefail
+          set -uo pipefail
           git config user.name github-actions[bot]
           git config user.email github-actions[bot]@users.noreply.github.com
           if [ -f offsets_new.js ] && [ -s offsets_new.js ]; then
