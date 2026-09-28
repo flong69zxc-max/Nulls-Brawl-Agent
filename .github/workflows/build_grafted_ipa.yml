@@ -24,7 +24,7 @@ jobs:
             if [ -f "$p" ]; then CAND="$p"; break; fi
           done
           if [ -z "$CAND" ]; then
-            echo "::error::agent script not found in repo"
+            echo "::error::agent script not found"
             find . -maxdepth 3 -name "*.js" -not -path "./node_modules/*" -not -path "./ghidra/*"
             exit 1
           fi
@@ -61,7 +61,7 @@ jobs:
           ")
           fi
           if [ -z "$URL" ]; then
-            echo "::error::No iOS gadget asset in release $VERSION"
+            echo "::error::No iOS gadget asset in $VERSION"
             echo "$META" | python3 -c "import sys,json; [print(a['name']) for a in json.load(sys.stdin).get('assets',[])]"
             exit 1
           fi
@@ -162,10 +162,18 @@ jobs:
           brew install ldid
           git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
           cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO 2>&1 | tail -5
+          xcodebuild -project insert_dylib.xcodeproj \
+            -scheme insert_dylib \
+            -configuration Release \
+            build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tail -5
           sudo cp build/Release/insert_dylib /usr/local/bin/
           sudo chmod +x /usr/local/bin/insert_dylib
           which insert_dylib ldid
+          otool -hv /usr/local/bin/insert_dylib | head -5
 
       - name: Inject dylib
         run: |
