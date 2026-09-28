@@ -1,342 +1,56 @@
-name: Compare Our gum-graft vs Dev W.dylib
+name: Cleanup repository
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  contents: write
 
 jobs:
-  build:
-    runs-on: macos-14
-    timeout-minutes: 60
-    env:
-      FRIDA_VERSION: '17.2.11'
-      FRAMEWORK_NAME: Frida.framework
-
+  cleanup:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install build deps
-        run: |
-          set -euo pipefail
-          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install node@22 meson ninja pkg-config glib || true
-          brew link --overwrite --force node@22
-          echo "/opt/homebrew/opt/node@22/bin" >> "$GITHUB_PATH"
-          python3 -m venv "$HOME/pyenv"
-          source "$HOME/pyenv/bin/activate"
-          python3 -m pip install --upgrade pip setuptools
-
-      - name: Cache frida-gum
-        id: cache-gum
-        uses: actions/cache@v4
         with:
-          path: frida-gum
-          key: frida-gum-${{ env.FRIDA_VERSION }}-compare-v2
-          restore-keys: |
-            frida-gum-${{ env.FRIDA_VERSION }}-
+          fetch-depth: 0
 
-      - name: Clone frida-gum
-        if: steps.cache-gum.outputs.cache-hit != 'true'
+      - name: Remove junk files
         run: |
           set -euo pipefail
-          rm -rf frida-gum
-          git clone --depth 1 --branch ${FRIDA_VERSION} \
-            https://github.com/frida/frida-gum.git frida-gum
-          cd frida-gum
-          git submodule update --init --recursive --depth 1
+          git rm -f .github/workflows/compare.yml 2>/dev/null || true
+          git rm -f .github/workflows/create.yml 2>/dev/null || true
+          git rm -rf FridaGadget.framework 2>/dev/null || true
+          git rm -f offsets_report.txt 2>/dev/null || true
+          git rm -f offsets_resolved.js 2>/dev/null || true
+          git rm -f scripts/agent.js 2>/dev/null || true
 
-      - name: Configure
+      - name: Add .gitignore
         run: |
-          set -euo pipefail
-          source "$HOME/pyenv/bin/activate"
-          cd frida-gum
-          [ -f build/build.ninja ] && exit 0
-          ./configure --host=macos-arm64 -- \
-            -Dgraft_tool=enabled \
-            -Dgumjs=disabled \
-            -Dtests=disabled \
-            -Doptimization=s \
-            -Db_ndebug=true \
-            -Dstrip=true \
-            -Ddefault_library=static
+          cat > .gitignore << 'EOF'
+          # Generated artifacts
+          FridaGadget.framework/
+          offsets_report.txt
+          offsets_resolved.js
+          scripts/agent.js
 
-      - name: Build gum-graft
+          # Build outputs
+          dist/
+          .meta/
+
+          # Node
+          node_modules/
+          package-lock.json
+
+          # macOS
+          .DS_Store
+          __MACOSX/
+          ._*
+          EOF
+
+      - name: Commit
         run: |
-          set -euo pipefail
-          source "$HOME/pyenv/bin/activate"
-          cd frida-gum/build
-          ninja 2>&1 | tail -20
-
-      - name: Locate gum-graft
-        run: |
-          set -euo pipefail
-          GUM_GRAFT=$(find frida-gum -type f -name "gum-graft" -perm +111 | head -1)
-          [ -n "$GUM_GRAFT" ] || { echo "::error::gum-graft not found"; exit 1; }
-          chmod +x "$GUM_GRAFT"
-          echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
-
-      - name: Prepare stock
-        run: |
-          set -euo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          curl -fL --retry 3 -o gadget.dylib.xz "$URL"
-          xz -d gadget.dylib.xz
-          mv gadget.dylib W.stock.dylib
-          lipo -thin arm64 -output W.thin.dylib W.stock.dylib
-          xcrun strip -Sx W.thin.dylib -o W.thin-stripped.dylib
-          mv W.thin-stripped.dylib W.thin.dylib
-          cp W.thin.dylib W.ours.dylib
-
-      - name: Graft our binary
-        run: |
-          set -euo pipefail
-          "$GUM_GRAFT" --ingest-function-starts W.ours.dylib
-          xcrun strip -Sx W.ours.dylib -o W.ours-stripped.dylib
-          mv W.ours-stripped.dylib W.ours.dylib
-
-      - name: Unpack dev
-        run: |
-          set -euo pipefail
-          mkdir -p dev
-          unzip -o W.dylib.zip -d dev > /dev/null
-          DEV=$(find dev -type f -name "*.dylib" ! -path "*__MACOSX*" ! -name "._*" | head -1)
-          cp "$DEV" W.dev.raw.dylib
-          if lipo -info W.dev.raw.dylib 2>/dev/null | grep -q "Non-fat"; then
-            cp W.dev.raw.dylib W.dev.dylib
-          else
-            lipo -thin arm64 -output W.dev.dylib W.dev.raw.dylib
-          fi
-
-      - name: Generate diagnostics
-        continue-on-error: true
-        run: |
-          mkdir -p diagnostics
-
-          # 1. Sections list
-          {
-            for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
-              echo "=== $f ==="
-              otool -l "$f" 2>/dev/null | awk '
-                /sectname/ { s = $2 }
-                /segname/  { g = $2 }
-                /^  size /  { if (s != "") print g " " s " " $2; s = "" }
-              ' | sort -u
-              echo ""
-            done
-          } > diagnostics/sections.txt 2>&1 || true
-
-          # 2. Counts
-          python3 - << 'PYEOF' > diagnostics/counts.txt 2>&1
-          import os
-          def counts(path):
-              with open(path,"rb") as f: d=f.read()
-              return {
-                  "brk539": d.count(bytes.fromhex("20A720D4")),
-                  "brk1": d.count(bytes.fromhex("200020D4")),
-                  "nop": d.count(bytes.fromhex("1F2003D5")),
-                  "ret": d.count(bytes.fromhex("C0035FD6")),
-              }
-          for path in ["W.dev.dylib","W.ours.dylib","W.thin.dylib"]:
-              c = counts(path)
-              print(f"=== {path} (size={os.path.getsize(path)}) ===")
-              for k,v in c.items():
-                  print(f"  {k}: {v}")
-              print("")
-          PYEOF
-
-          # 3. __FRIDA trampolines of ours
-          python3 - << 'PYEOF' > diagnostics/trampolines.txt 2>&1
-          import subprocess
-          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
-          lines = out.splitlines()
-          # find all __trampolines sections
-          for i,l in enumerate(lines):
-              if 'sectname __trampolines' in l:
-                  segname = "?"
-                  for k in range(max(0,i-2), i+1):
-                      if 'segname' in lines[k]:
-                          segname = lines[k].split()[1]
-                  off = size = None
-                  for j in range(i,i+12):
-                      s=lines[j].strip()
-                      if s.startswith('offset '): off=int(s.split()[1])
-                      if s.startswith('size '): size=int(s.split()[1],16)
-                  if off is not None and size:
-                      with open("W.ours.dylib","rb") as f:
-                          f.seek(off)
-                          data=f.read(min(size,128))
-                      print(f"=== {segname} __trampolines off={off} size={size} ===")
-                      for k in range(0,len(data),16):
-                          print(f"  {off+k:08x}: " + " ".join(f"{b:02x}" for b in data[k:k+16]))
-                      print("")
-          PYEOF
-
-          # 4. dev __text head
-          python3 - << 'PYEOF' > diagnostics/dev_text.txt 2>&1
-          import subprocess
-          out = subprocess.run(["otool","-l","W.dev.dylib"],capture_output=True,text=True).stdout
-          lines=out.splitlines()
-          off=None
-          for i,l in enumerate(lines):
-              if 'sectname __text' in l and 'segname __TEXT' in lines[i-1]:
-                  for j in range(i,i+12):
-                      s=lines[j].strip()
-                      if s.startswith('offset '): off=int(s.split()[1])
-                  break
-          if off is not None:
-              with open("W.dev.dylib","rb") as f:
-                  f.seek(off); d=f.read(256)
-              for i in range(0,len(d),16):
-                  print(f"{off+i:08x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
-          else:
-              print("offset not found")
-          PYEOF
-
-          # 5. ours __text head
-          python3 - << 'PYEOF' > diagnostics/ours_text.txt 2>&1
-          import subprocess
-          out = subprocess.run(["otool","-l","W.ours.dylib"],capture_output=True,text=True).stdout
-          lines=out.splitlines()
-          off=None
-          for i,l in enumerate(lines):
-              if 'sectname __text' in l and 'segname __TEXT' in lines[i-1]:
-                  for j in range(i,i+12):
-                      s=lines[j].strip()
-                      if s.startswith('offset '): off=int(s.split()[1])
-                  break
-          if off is not None:
-              with open("W.ours.dylib","rb") as f:
-                  f.seek(off); d=f.read(256)
-              for i in range(0,len(d),16):
-                  print(f"{off+i:08x}: " + " ".join(f"{b:02x}" for b in d[i:i+16]))
-          else:
-              print("offset not found")
-          PYEOF
-
-          # 6. LC commands presence
-          {
-            for f in W.dev.dylib W.ours.dylib; do
-              echo "=== $f ==="
-              otool -l "$f" | grep -E 'LC_FUNCTION_STARTS|LC_DYLD_CHAINED_FIXUPS|LC_DYLD_EXPORTS_TRIE|LC_DYLD_INFO|LC_CODE_SIGNATURE|LC_SEGMENT_64' | sort | uniq -c
-              echo ""
-            done
-          } > diagnostics/lc_commands.txt 2>&1 || true
-
-          # 7. Segment names
-          {
-            for f in W.dev.dylib W.ours.dylib; do
-              echo "=== $f ==="
-              otool -l "$f" | grep 'segname' | awk '{print $2}' | sort -u
-              echo ""
-            done
-          } > diagnostics/segments.txt 2>&1 || true
-
-          # 8. Symbols
-          {
-            for f in W.dev.dylib W.ours.dylib; do
-              echo "=== $f: total globals ==="
-              nm -gU "$f" 2>/dev/null | wc -l
-              echo ""
-            done
-            echo "=== diff of symbol names (dev vs ours, first 50) ==="
-            diff <(nm -gU W.dev.dylib 2>/dev/null | awk '{print $3}' | sort) \
-                 <(nm -gU W.ours.dylib 2>/dev/null | awk '{print $3}' | sort) 2>&1 | head -50 || true
-          } > diagnostics/symbols.txt 2>&1 || true
-
-          # 9. File sizes
-          {
-            for f in W.dev.dylib W.ours.dylib W.thin.dylib; do
-              echo "$f: $(stat -f%z $f) bytes"
-            done
-          } > diagnostics/sizes.txt 2>&1 || true
-
-          # 10. Segment-level size dump from vmRegionInfo perspective
-          {
-            for f in W.dev.dylib W.ours.dylib; do
-              echo "=== $f vm sizes ==="
-              otool -l "$f" | awk '
-                /segname/ { g = $2 }
-                /vmsize/  { print g, $2 }
-              ' | sort -u
-              echo ""
-            done
-          } > diagnostics/vmsizes.txt 2>&1 || true
-
-          echo "=== diagnostics generated ==="
-          ls -la diagnostics/
-          wc -l diagnostics/*.txt
-
-      - name: Show diagnostics in log
-        continue-on-error: true
-        run: |
-          for f in diagnostics/*.txt; do
-            echo "########## $f ##########"
-            cat "$f"
-            echo ""
-          done
-
-      - name: Assemble final framework (ours)
-        run: |
-          set -euo pipefail
-          rm -rf "$FRAMEWORK_NAME"
-          mkdir -p "$FRAMEWORK_NAME"
-          cp W.ours.dylib "$FRAMEWORK_NAME/W.dylib"
-          cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key><string>W.dylib</string>
-              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
-              <key>CFBundleShortVersionString</key><string>17.2.11</string>
-              <key>CFBundleVersion</key><string>17.2.11</string>
-              <key>CFBundleName</key><string>Frida</string>
-              <key>CFBundlePackageType</key><string>FMWK</string>
-              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
-              <key>DTPlatformName</key><string>iphoneos</string>
-              <key>MinimumOSVersion</key><string>12.0</string>
-          </dict>
-          </plist>
-          PLIST
-          cat > "$FRAMEWORK_NAME/W.config" << 'CONFIG'
-          {
-            "interaction": {"type": "script", "path": "agent.js", "on_change": "ignore"},
-            "code_signing": "required"
-          }
-          CONFIG
-          echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-          plutil -lint "$FRAMEWORK_NAME/Info.plist"
-
-      - name: Sign
-        run: |
-          set -euo pipefail
-          brew install ldid || true
-          command -v ldid >/dev/null && ldid -S "$FRAMEWORK_NAME/W.dylib"
-
-      - name: Package
-        run: |
-          set -euo pipefail
-          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
-          find "$FRAMEWORK_NAME" -name "._*" -delete
-          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
-          zip -r -X "$FRAMEWORK_NAME.zip" "$FRAMEWORK_NAME"
-          shasum -a 256 "$FRAMEWORK_NAME.zip"
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: Frida.framework-and-compare
-          path: |
-            Frida.framework.zip
-            Frida.framework.zip.sha256
-            diagnostics/
-          retention-days: 30
-          if-no-files-found: warn
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .gitignore
+          git commit -m "chore: cleanup junk files" || echo "nothing to commit"
+          git push
