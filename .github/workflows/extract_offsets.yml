@@ -61,11 +61,23 @@ jobs:
           test -x "$GHIDRA_ROOT/support/analyzeHeadless"
           test -d "$GHIDRA_ROOT/Ghidra/Extensions/Jython"
 
+      - name: Resolve ipa URL
+        id: resolve
+        run: |
+          set -euo pipefail
+          LOC=$(curl -sIL -A "Mozilla/5.0" "https://dnull.xyz/latest_bs_i" \
+            | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\r\n')
+          test -n "$LOC"
+          echo "URL=$LOC" >> "$GITHUB_OUTPUT"
+          VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')
+          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "resolved: $LOC (version $VER)"
+
       - uses: actions/cache@v4
         id: cache-ipa
         with:
           path: ipa_cache
-          key: ipa-nulls-brawl-v4
+          key: ipa-nulls-brawl-${{ steps.resolve.outputs.VER }}
 
       - name: Download ipa
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -74,18 +86,15 @@ jobs:
           mkdir -p ipa_cache
           curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
             --max-time 900 \
-            -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1" \
-            -e "https://nulls.ee/" \
+            -A "Mozilla/5.0" \
             -o ipa_cache/bs.ipa \
-            "https://dnull.xyz/latest_bs_i"
+            "${{ steps.resolve.outputs.URL }}"
           test -s ipa_cache/bs.ipa
           file ipa_cache/bs.ipa
           if ! file ipa_cache/bs.ipa | grep -qi "zip"; then
             echo "ERROR: downloaded file is not a zip/ipa"
             echo "--- first bytes ---"
             head -c 512 ipa_cache/bs.ipa | strings | head -20 || true
-            echo "--- HTTP headers ---"
-            curl -sIL -A "Mozilla/5.0" "https://dnull.xyz/latest_bs_i" | head -30 || true
             exit 1
           fi
           ls -la ipa_cache/
@@ -127,7 +136,7 @@ jobs:
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-v1
+          key: ghidra-brawl-project-${{ steps.resolve.outputs.VER }}
 
       - name: Run Ghidra
         env:
