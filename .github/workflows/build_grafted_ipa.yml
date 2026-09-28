@@ -31,8 +31,6 @@ jobs:
           curl -fL --retry 3 -o gadget.xz "$URL"
           xz -d gadget.xz
           mv gadget W.fat.dylib
-          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "thin: $(stat -f%z W.thin.dylib)"
 
       - name: Extract dev reference
         run: |
@@ -49,132 +47,24 @@ jobs:
           lipo -thin arm64 -output W.dev.thin.dylib W.dev.dylib
           echo "dev thin: $(stat -f%z W.dev.thin.dylib)"
 
-      - name: Try codesign with entitlements
+      - name: Extract thin arm64 from stock
         run: |
           set -euo pipefail
-          TARGET=$(stat -f%z W.dev.thin.dylib)
-          echo "target: $TARGET"
-          cp W.thin.dylib W.thin.orig.dylib
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+          echo "thin before: $(stat -f%z W.thin.dylib)"
 
-          # minimal entitlements (пустой plist)
-          cat > /tmp/empty-ent.plist << 'EOFP'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict/></plist>
-          EOFP
-
-          # real frida entitlements
-          cat > /tmp/frida-ent.plist << 'EOFP'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>com.apple.security.cs.allow-jit</key><true/>
-              <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
-              <key>com.apple.security.cs.disable-library-validation</key><true/>
-          </dict>
-          </plist>
-          EOFP
-
-          BEST_SIZE=0
-          try() {
-            local name="$1"; shift
-            cp W.thin.orig.dylib W.thin.test.dylib
-            if "$@" >/dev/null 2>/tmp/sign.err; then
-              local sz=$(stat -f%z W.thin.test.dylib)
-              local diff=$((sz > TARGET ? sz - TARGET : TARGET - sz))
-              echo "  [$name] -> $sz (diff $diff)"
-              if [ "$sz" = "$TARGET" ]; then
-                cp W.thin.test.dylib W.thin.dylib
-                echo "MATCH"
-                return 0
-              fi
-              if [ "$BEST_SIZE" = "0" ] || [ "$diff" -lt "$((BEST_SIZE > TARGET ? BEST_SIZE - TARGET : TARGET - BEST_SIZE))" ]; then
-                BEST_SIZE=$sz
-                cp W.thin.test.dylib /tmp/best.dylib
-              fi
-            else
-              echo "  [$name] -> FAIL: $(head -1 /tmp/sign.err)"
-            fi
-            return 1
-          }
-
-          echo "=== tries ==="
-
-          try "codesign adhoc" codesign --force --sign - --timestamp=none W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc der" codesign --force --sign - --timestamp=none --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc empty-ent" codesign --force --sign - --timestamp=none --entitlements /tmp/empty-ent.plist W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc empty-ent der" codesign --force --sign - --timestamp=none --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc frida-ent" codesign --force --sign - --timestamp=none --entitlements /tmp/frida-ent.plist W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc frida-ent der" codesign --force --sign - --timestamp=none --entitlements /tmp/frida-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc runtime empty-ent der" codesign --force --sign - --timestamp=none --options=runtime --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc libval empty-ent der" codesign --force --sign - --timestamp=none --options=library-validation --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc runtime frida-ent der" codesign --force --sign - --timestamp=none --options=runtime --entitlements /tmp/frida-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc all-arch" codesign --force --sign - --timestamp=none --all-architectures W.thin.test.dylib && exit 0 || true
-          try "codesign adhoc all-arch empty-ent der" codesign --force --sign - --timestamp=none --all-architectures --entitlements /tmp/empty-ent.plist --generate-entitlement-der W.thin.test.dylib && exit 0 || true
-
-          echo ""
-          echo "no exact match, best: $BEST_SIZE (target $TARGET)"
-          if [ -f /tmp/best.dylib ]; then
-            cp /tmp/best.dylib W.thin.dylib
-            echo "using best: $(stat -f%z W.thin.dylib)"
-          else
-            exit 1
-          fi
-
-      - name: Zero signature blob
+      - name: Remove existing signature
         run: |
           set -euo pipefail
-          python3 - << 'PYEOF'
-          import struct
-          with open("W.thin.dylib", "rb") as f:
-              d = bytearray(f.read())
-          n = struct.unpack_from("<I", d, 16)[0]
-          o = 32
-          for _ in range(n):
-              c, s = struct.unpack_from("<II", d, o)
-              if c == 0x1d:
-                  off, sz = struct.unpack_from("<II", d, o + 8)
-                  print("sig offset=" + str(off) + " size=" + str(sz))
-                  for i in range(off, off + sz):
-                      d[i] = 0
-                  break
-              o += s
-          with open("W.thin.dylib", "wb") as f:
-              f.write(d)
-          PYEOF
+          codesign --remove-signature W.thin.dylib 2>/dev/null || true
+          echo "after remove: $(stat -f%z W.thin.dylib)"
 
-      - name: Wrap into fat
-        run: |
-          set -euo pipefail
-          lipo -create -arch arm64 W.thin.dylib -output W.dylib
-          echo "fat: $(stat -f%z W.dylib)"
-
-      - name: Compare
-        run: |
-          set -euo pipefail
-          echo "dev:  $(stat -f%z W.dev.dylib)"
-          echo "ours: $(stat -f%z W.dylib)"
-          python3 - << 'PYEOF'
-          with open("W.dev.dylib", "rb") as f: dev = f.read()
-          with open("W.dylib", "rb") as f: ours = f.read()
-          if len(dev) != len(ours):
-              print("SIZE MISMATCH: dev=" + str(len(dev)) + " ours=" + str(len(ours)) + " diff=" + str(abs(len(dev)-len(ours))))
-          n = min(len(dev), len(ours))
-          diffs = [i for i in range(n) if dev[i] != ours[i]]
-          print("diffs: " + str(len(diffs)))
-          for i in diffs[:32]:
-              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
-          if not diffs and len(dev) == len(ours):
-              print("PERFECT")
-          PYEOF
-
-      - name: Assemble
+      - name: Build Frida.framework
         run: |
           set -euo pipefail
           rm -rf "$FRAMEWORK_NAME"
           mkdir -p "$FRAMEWORK_NAME"
-          cp W.dylib "$FRAMEWORK_NAME/W.dylib"
+          cp W.thin.dylib "$FRAMEWORK_NAME/W.dylib"
           cat > "$FRAMEWORK_NAME/Info.plist" << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -199,6 +89,108 @@ jobs:
           }
           CONFIG
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+
+      - name: Sign framework as bundle
+        run: |
+          set -euo pipefail
+          TARGET=$(stat -f%z W.dev.thin.dylib)
+          echo "target dylib size: $TARGET"
+
+          # Sign the whole framework as bundle → codesign adds Info.plist + resources slots
+          codesign --force --sign - --timestamp=none "$FRAMEWORK_NAME" 2>&1 || true
+
+          SZ=$(stat -f%z "$FRAMEWORK_NAME/W.dylib")
+          echo "after framework sign: $SZ (diff $((SZ - TARGET)))"
+
+          if [ "$SZ" != "$TARGET" ]; then
+            echo "bundle sign did not produce target, trying alternatives"
+
+            # restore thin dylib and try other variants
+            cp W.thin.dylib "$FRAMEWORK_NAME/W.dylib"
+
+            # try signing framework with identifier override
+            codesign --force --sign - --timestamp=none --identifier re.frida.gadget "$FRAMEWORK_NAME" 2>&1 || true
+            SZ=$(stat -f%z "$FRAMEWORK_NAME/W.dylib")
+            echo "with identifier: $SZ (diff $((SZ - TARGET)))"
+
+            if [ "$SZ" != "$TARGET" ]; then
+              echo "::error::cannot match target $TARGET"
+              echo "closest frameworks:"
+              ls -la "$FRAMEWORK_NAME/W.dylib"
+              exit 1
+            fi
+          fi
+
+      - name: Zero signature blob
+        run: |
+          set -euo pipefail
+          python3 - << 'PYEOF'
+          import struct
+          path = "Frida.framework/W.dylib"
+          with open(path, "rb") as f:
+              d = bytearray(f.read())
+          n = struct.unpack_from("<I", d, 16)[0]
+          o = 32
+          for _ in range(n):
+              c, s = struct.unpack_from("<II", d, o)
+              if c == 0x1d:
+                  off, sz = struct.unpack_from("<II", d, o + 8)
+                  print("sig offset=" + str(off) + " size=" + str(sz))
+                  for i in range(off, off + sz):
+                      d[i] = 0
+                  break
+              o += s
+          with open(path, "wb") as f:
+              f.write(d)
+          print("done")
+          PYEOF
+
+      - name: Compare with dev thin
+        run: |
+          set -euo pipefail
+          cp "$FRAMEWORK_NAME/W.dylib" W.thin.dylib
+          echo "dev thin:  $(stat -f%z W.dev.thin.dylib)"
+          echo "ours thin: $(stat -f%z W.thin.dylib)"
+          python3 - << 'PYEOF'
+          with open("W.dev.thin.dylib", "rb") as f: dev = f.read()
+          with open("W.thin.dylib", "rb") as f: ours = f.read()
+          if len(dev) != len(ours):
+              print("SIZE MISMATCH: dev=" + str(len(dev)) + " ours=" + str(len(ours)) + " diff=" + str(abs(len(dev)-len(ours))))
+          n = min(len(dev), len(ours))
+          diffs = [i for i in range(n) if dev[i] != ours[i]]
+          print("diffs: " + str(len(diffs)))
+          for i in diffs[:32]:
+              print("  off 0x%x: dev=%02x ours=%02x" % (i, dev[i], ours[i]))
+          if not diffs and len(dev) == len(ours):
+              print("PERFECT")
+          PYEOF
+
+      - name: Wrap into fat binary
+        run: |
+          set -euo pipefail
+          lipo -create -arch arm64 W.thin.dylib -output W.dylib
+          echo "fat: $(stat -f%z W.dylib)"
+
+      - name: Compare with dev fat
+        run: |
+          set -euo pipefail
+          echo "dev fat:  $(stat -f%z W.dev.dylib)"
+          echo "ours fat: $(stat -f%z W.dylib)"
+          python3 - << 'PYEOF'
+          with open("W.dev.dylib", "rb") as f: dev = f.read()
+          with open("W.dylib", "rb") as f: ours = f.read()
+          n = min(len(dev), len(ours))
+          diffs = [i for i in range(n) if dev[i] != ours[i]]
+          print("diffs: " + str(len(diffs)))
+          if not diffs and len(dev) == len(ours):
+              print("PERFECT")
+          PYEOF
+
+      - name: Final assemble
+        run: |
+          set -euo pipefail
+          cp W.dylib "$FRAMEWORK_NAME/W.dylib"
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
         run: |
