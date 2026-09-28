@@ -69,11 +69,8 @@ jobs:
               NSLog(@"[Locator] %@ contents (%lu): %@", dir, (unsigned long)items.count, items);
           }
 
-          __attribute__((constructor))
-          __attribute__((used))
-          static void onLoad(void) {
+          static void runLocator(void) {
               @autoreleasepool {
-                  redirectLogs();
                   NSLog(@"[Locator] ========================================");
                   NSLog(@"[Locator] Locator loaded pid=%d", getpid());
                   NSLog(@"[Locator] Bundle: %@", [[NSBundle mainBundle] bundlePath]);
@@ -96,8 +93,6 @@ jobs:
                   checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"W.config");
                   checkFile([bundlePath stringByAppendingPathComponent:@"Frameworks"], @"agent.js");
                   checkFile(appDir, @"W.dylib");
-                  checkFile(appDir, @"W.config");
-                  checkFile(appDir, @"agent.js");
                   checkFile(docs, @"W.dylib");
                   checkFile(docs, @"W.config");
                   checkFile(docs, @"agent.js");
@@ -125,12 +120,26 @@ jobs:
                   }
 
                   Dl_info info;
-                  if (dladdr((void *)&onLoad, &info) && info.dli_fname) {
+                  if (dladdr((void *)&runLocator, &info) && info.dli_fname) {
                       NSLog(@"[Locator] Loaded from: %s", info.dli_fname);
                   }
                   NSLog(@"[Locator] ========================================");
               }
           }
+
+          __attribute__((constructor))
+          __attribute__((used))
+          static void onLoad(void) {
+              redirectLogs();
+              runLocator();
+          }
+
+          @interface LocatorLoader : NSObject @end
+          @implementation LocatorLoader
+          + (void)load {
+              onLoad();
+          }
+          @end
           OBJC_EOF
 
       - name: Compile
@@ -147,8 +156,6 @@ jobs:
             -fobjc-arc \
             -O2 \
             -Wall -Wextra \
-            -Wl,-init,_onLoad \
-            -Wl,-no_dead_strip_inits_and_terms \
             -install_name "@executable_path/Frameworks/Locator.dylib"
           ls -l Locator.dylib
 
