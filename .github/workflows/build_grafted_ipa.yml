@@ -95,59 +95,11 @@ jobs:
           print(f"[patch] BRK #0x539 -> NOP: {patched_brk539}")
           print(f"[patch] BRK #1 -> NOP: {patched_brk1}")
 
-          # --- LIEF: find abort symbol address ---
+          # --- LIEF: find all stub sections ---
           bin = lief.MachO.parse("W.stock.dylib")
           m = bin.at(0)
 
-          abort_addr = None
-          for sym in m.symbols:
-              if sym.name == "_abort":
-                  abort_addr = sym.value
-                  print(f"[symbol] _abort at 0x{abort_addr:x}")
-                  break
-
-          if abort_addr is None:
-              print("[symbol] _abort not found in symbol table")
-
-          # --- find all BL to abort (including stubs) ---
-          # BL encoding: 0x94000000 | imm26
-          # target = PC + imm26 * 4
-          # For arm64, PC is address of BL instruction
-          # We need to convert file offset to VM address using segments
-          # Simple approach: scan entire __TEXT segment
-          text_seg = None
-          for seg in m.segments:
-              if seg.name == "__TEXT":
-                  text_seg = seg
-                  break
-
-          patched_abort_calls = 0
-          if text_seg is not None and abort_addr is not None:
-              text_fileoff = text_seg.file_offset
-              text_vmaddr = text_seg.virtual_address
-              text_size = text_seg.file_size
-              print(f"[text] fileoff={text_fileoff} vmaddr=0x{text_vmaddr:x} "
-                    f"size=0x{text_size:x}")
-
-              for i in range(0, text_size - 4, 4):
-                  file_off = text_fileoff + i
-                  vm_addr = text_vmaddr + i
-                  instr = int.from_bytes(data[file_off:file_off+4], "little")
-                  if (instr & 0xFC000000) == 0x94000000:
-                      imm26 = instr & 0x03FFFFFF
-                      if imm26 & 0x02000000:
-                          imm26 -= 0x04000000
-                      target = vm_addr + imm26 * 4
-                      if target == abort_addr:
-                          data[file_off:file_off+4] = NOP
-                          patched_abort_calls += 1
-                          print(f"[patch] BL abort at file 0x{file_off:x} "
-                                f"(vm 0x{vm_addr:x}) -> NOP")
-
-          print(f"[patch] direct BL abort calls patched: {patched_abort_calls}")
-
-          # --- patch stubs as well (for completeness) ---
-          stubs_sections = []
+          stub_sections = []
           for seg in m.segments:
               for sec in seg.sections:
                   name_lower = sec.name.lower()
@@ -155,14 +107,23 @@ jobs:
                   if hasattr(sec.flags, 'value') and (sec.flags.value & 0xFF) == 0x08:
                       is_stub = True
                   if "stub" in name_lower or is_stub:
-                      stubs_sections.append(sec)
+                      stub_sections.append(sec)
+                      print(f"[stubs] found section: {sec.name} "
+                            f"addr=0x{sec.virtual_address:x} "
+                            f"offset={sec.offset} size=0x{sec.size:x} "
+                            f"reserved2={sec.reserved2} "
+                            f"flags=0x{sec.flags.value:x}")
 
+          # --- patch all stubs to RET ---
           patched_stubs = 0
-          for sec in stubs_sections:
+          for sec in stub_sections:
               stub_size = sec.reserved2
               if not stub_size:
+                  print(f"[stubs] {sec.name}: reserved2=0, skipping")
                   continue
               stub_count = sec.size // stub_size
+              print(f"[stubs] {sec.name}: patching {stub_count} stubs "
+                    f"of size {stub_size} at offset {sec.offset}")
               for i in range(stub_count):
                   off = sec.offset + i * stub_size
                   if off + 4 > len(data):
@@ -195,8 +156,8 @@ jobs:
           expected_nop_min = stock_nop + stock_brk539 + stock_brk1
           if final_nop < expected_nop_min:
               errors.append(f"NOP count {final_nop} < expected {expected_nop_min}")
-          if patched_abort_calls == 0 and patched_stubs == 0:
-              errors.append("no abort calls or stubs patched")
+          if patched_stubs == 0:
+              errors.append("no stubs patched to RET")
 
           with open("patch-report.txt", "w") as f:
               f.write(f"stock_brk539={stock_brk539}\n")
@@ -205,7 +166,6 @@ jobs:
               f.write(f"stock_ret={stock_ret}\n")
               f.write(f"patched_brk539={patched_brk539}\n")
               f.write(f"patched_brk1={patched_brk1}\n")
-              f.write(f"patched_abort_calls={patched_abort_calls}\n")
               f.write(f"patched_stubs={patched_stubs}\n")
               f.write(f"final_brk539={final_brk539}\n")
               f.write(f"final_brk1={final_brk1}\n")
@@ -285,7 +245,7 @@ jobs:
             '    "path": "agent.js",' \
             '    "on_change": "ignore"' \
             '  },' \
-            '  "code_signing": "optional"' \
+            '  "code_signing": "required"' \
             '}' \
             > "$FRAMEWORK_NAME/W.config"
 
@@ -334,7 +294,7 @@ jobs:
             echo "| param | value |"
             echo "|---|---|"
             echo "| frida | ${FRIDA_VERSION} |"
-            echo "| patches | BRK #0x539, BRK #1, all BL abort -> NOP, stubs -> RET |"
+            echo "| patches | BRK #0x539, BRK #1, all stub sections -> RET |"
             echo "| arch | arm64 |"
             echo "| dylib size | $(stat -f%z $FRAMEWORK_NAME/W.dylib) B |"
             echo "| sha256 | \`$(shasum -a 256 $FRAMEWORK_NAME.zip | cut -c1-16)\` |"
