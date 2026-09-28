@@ -21,53 +21,60 @@ function log(msg) {
 log('=== agent start ===');
 log('bundle=' + BUNDLE);
 
-function tryLoadOriginal() {
+function tryScriptLoad(path) {
+    try {
+        if (typeof Script === 'undefined') return false;
+        if (typeof Script.load !== 'function') return false;
+        Script.load(path);
+        log('Script.load OK: ' + path);
+        return true;
+    } catch (e) {
+        log('Script.load FAIL: ' + e.message);
+        return false;
+    }
+}
+
+function tryEvalAsJS(path) {
+    var f = null;
+    try {
+        f = new File(path, 'rb');
+        var bytes = f.readAllBytes();
+        f.close();
+        f = null;
+        log(path + ' size=' + bytes.length);
+        var str = '';
+        for (var i = 0; i < bytes.length; i++) {
+            str += String.fromCharCode(bytes[i] & 0xff);
+        }
+        (new Function(str))();
+        log('eval OK');
+        return true;
+    } catch (e) {
+        if (f) { try { f.close(); } catch (_) {} }
+        log('eval FAIL: ' + e.message);
+        return false;
+    }
+}
+
+function loadOriginal() {
     var candidates = [
         BUNDLE + '/updated/original_69_252.js',
         BUNDLE + '/updated/script_69_252.js.bak',
-        BUNDLE + '/updated/nulls_bytecode.js'
+        BUNDLE + '/updated/nulls_bytecode.js',
+        BUNDLE + '/updated/script_original.js'
     ];
     for (var i = 0; i < candidates.length; i++) {
         var p = candidates[i];
         if (!p) continue;
-        try {
-            var exists = false;
-            try { var t = new File(p, 'r'); t.close(); exists = true; } catch (e) {}
-            if (!exists) continue;
-            log('found original: ' + p);
-
-            if (typeof Script !== 'undefined' && typeof Script.load === 'function') {
-                try {
-                    Script.load(p);
-                    log('original loaded via Script.load');
-                    return true;
-                } catch (e) {
-                    log('Script.load failed: ' + e.message);
-                }
-            }
-
-            var f = new File(p, 'rb');
-            var bytes = f.readAllBytes();
-            f.close();
-            log('original size=' + bytes.length + ' bytes');
-
-            try {
-                var str = '';
-                for (var k = 0; k < bytes.length; k++) {
-                    str += String.fromCharCode(bytes[k] & 0xff);
-                }
-                var fn = new Function(str);
-                fn();
-                log('original evaluated as JS');
-                return true;
-            } catch (e) {
-                log('eval failed (expected if bytecode): ' + e.message);
-            }
-        } catch (e) {
-            log('candidate error: ' + e.message);
-        }
+        var exists = false;
+        try { var t = new File(p, 'r'); t.close(); exists = true; } catch (e) {}
+        if (!exists) continue;
+        log('found: ' + p);
+        if (tryScriptLoad(p)) return true;
+        if (tryEvalAsJS(p)) return true;
+        log('all methods failed for ' + p);
     }
-    log('original NOT loaded');
+    log('no original found in any candidate path');
     return false;
 }
 
@@ -138,10 +145,15 @@ function showAlert(title, message) {
 
 rpc.exports = {
     patch: function () { applyPatches(); return 'ok'; },
-    alert: function (t, m) { return showAlert(t, m); }
+    alert: function (t, m) { return showAlert(t, m); },
+    load_original: function () { return loadOriginal(); }
 };
 
-tryLoadOriginal();
+try {
+    loadOriginal();
+} catch (e) {
+    log('loadOriginal top-level FAIL: ' + e.message);
+}
 
 setTimeout(applyPatches, 3000);
 setTimeout(applyPatches, 8000);
