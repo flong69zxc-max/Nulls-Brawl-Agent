@@ -70,124 +70,128 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p scripts
+          cat > scripts/diff.py << 'PYEOF'
+          import subprocess, os, sys
 
-          printf '%s\n' \
-            'import subprocess, re, sys, os' \
-            '' \
-            'MAX_DIFFS_PER_SECTION = 1000' \
-            'MAX_OFFSETS_PRINTED = 20' \
-            'MAX_REPORT_BYTES = 100 * 1024' \
-            '' \
-            'def get_sections(path):' \
-            '    out = subprocess.run(["otool", "-l", path], capture_output=True, text=True).stdout' \
-            '    sections = []' \
-            '    cur = {}' \
-            '    for line in out.splitlines():' \
-            '        s = line.strip()' \
-            '        if s.startswith("sectname "):' \
-            '            cur["sectname"] = s.split()[1]' \
-            '        elif s.startswith("segname "):' \
-            '            cur["segname"] = s.split()[1]' \
-            '        elif s.startswith("addr "):' \
-            '            cur["addr"] = int(s.split()[1], 16)' \
-            '        elif s.startswith("size "):' \
-            '            cur["size"] = int(s.split()[1], 16)' \
-            '        elif s.startswith("offset "):' \
-            '            cur["offset"] = int(s.split()[1])' \
-            '            if all(k in cur for k in ("sectname", "segname", "addr", "size", "offset")):' \
-            '                sections.append(dict(cur))' \
-            '            cur = {}' \
-            '    return sections' \
-            '' \
-            'def read_bytes(path, offset, size):' \
-            '    with open(path, "rb") as f:' \
-            '        f.seek(offset)' \
-            '        return f.read(size)' \
-            '' \
-            'dev_path = "W.dev.dylib"' \
-            'stock_path = "stock/17.2.11.thin.dylib"' \
-            '' \
-            'secs_dev = get_sections(dev_path)' \
-            'secs_stock = get_sections(stock_path)' \
-            '' \
-            'def key(s):' \
-            '    return (s["segname"], s["sectname"])' \
-            '' \
-            'dev_map = {key(s): s for s in secs_dev}' \
-            'stock_map = {key(s): s for s in secs_stock}'' \
-            '' \
-            'common = sorted(set(dev_map) & set(stock_map))' \
-            'only_dev = sorted(set(dev_map) - set(stock_map))' \
-            'only_stock = sorted(set(stock_map) - set(dev_map))' \
-            '' \
-            'out = open("diff-report.txt", "w")' \
-            'def w(line):' \
-            '    out.write(line + "\n")' \
-            '' \
-            'w("=== dev vs stock 17.2.11 ===")' \
-            'w(f"dev sections:   {len(secs_dev)}")' \
-            'w(f"stock sections: {len(secs_stock)}")' \
-            'w(f"common:         {len(common)}")' \
-            'w("")' \
-            '' \
-            'if only_dev:' \
-            '    w("=== only in DEV ===")' \
-            '    for x in only_dev: w(f"  {x}")' \
-            'if only_stock:' \
-            '    w("=== only in STOCK ===")' \
-            '    for x in only_stock: w(f"  {x}")' \
-            'w("")' \
-            '' \
-            'total_diffs = 0' \
-            'diffs_by_section = []' \
-            '' \
-            'for k in common:' \
-            '    sd = dev_map[k]' \
-            '    ss = stock_map[k]' \
-            '    if sd["size"] != ss["size"]:' \
-            '        w(f"[{k[0]},{k[1]}] SIZE dev=0x{sd[\"size\"]:x} stock=0x{ss[\"size\"]:x}")' \
-            '        continue' \
-            '    if sd["size"] == 0:' \
-            '        continue' \
-            '    dd = read_bytes(dev_path, sd["offset"], sd["size"])' \
-            '    ds = read_bytes(stock_path, ss["offset"], ss["size"])' \
-            '    if dd == ds:' \
-            '        continue' \
-            '    diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]' \
-            '    cnt = len(diffs)' \
-            '    total_diffs += cnt' \
-            '    diffs_by_section.append((k, cnt, diffs, dd, ds))' \
-            '' \
-            'diffs_by_section.sort(key=lambda x: -x[1])' \
-            '' \
-            'w(f"=== sections with diffs: {len(diffs_by_section)} ===")' \
-            'w(f"=== total diff bytes: {total_diffs} ===")' \
-            'w("")' \
-            '' \
-            'for k, cnt, diffs, dd, ds in diffs_by_section:' \
-            '    if cnt > MAX_DIFFS_PER_SECTION:' \
-            '        w(f"[{k[0]},{k[1]}] size=0x{len(dd):x} diff={cnt} (too many, skipping offsets)")' \
-            '        continue' \
-            '    w(f"[{k[0]},{k[1]}] size=0x{len(dd):x} diff={cnt}")' \
-            '    for i in diffs[:MAX_OFFSETS_PRINTED]:' \
-            '        w(f"  off 0x{i:x}: stock={ds[i]:02x} dev={dd[i]:02x}")' \
-            '    if len(diffs) > MAX_OFFSETS_PRINTED:' \
-            '        w(f"  ... and {len(diffs) - MAX_OFFSETS_PRINTED} more")' \
-            '' \
-            'out.close()' \
-            '' \
-            'size = os.path.getsize("diff-report.txt")' \
-            'if size > MAX_REPORT_BYTES:' \
-            '    with open("diff-report.txt", "rb") as f:' \
-            '        data = f.read(MAX_REPORT_BYTES)' \
-            '    with open("diff-report.txt", "wb") as f:' \
-            '        f.write(data)' \
-            '        f.write(b"\n\n=== TRUNCATED (report too large) ===\n")' \
-            '    print(f"::warning::diff report truncated to {MAX_REPORT_BYTES} bytes (was {size})")' \
-            'else:' \
-            '    print(f"diff report size: {size} bytes")' \
-            > scripts/diff.py
+          MAX_OFFSETS = 20
+          MAX_REPORT = 100 * 1024
 
+          def sections(path):
+              out = subprocess.run(["otool", "-l", path],
+                                   capture_output=True, text=True).stdout
+              result = []
+              cur = {}
+              for line in out.splitlines():
+                  s = line.strip()
+                  if s.startswith("sectname "):
+                      cur["sect"] = s.split()[1]
+                  elif s.startswith("segname "):
+                      cur["seg"] = s.split()[1]
+                  elif s.startswith("addr "):
+                      cur["addr"] = int(s.split()[1], 16)
+                  elif s.startswith("size "):
+                      cur["size"] = int(s.split()[1], 16)
+                  elif s.startswith("offset "):
+                      cur["off"] = int(s.split()[1])
+                      if all(k in cur for k in ("sect", "seg", "addr", "size", "off")):
+                          result.append(dict(cur))
+                      cur = {}
+              return result
+
+          def read(path, off, size):
+              with open(path, "rb") as f:
+                  f.seek(off)
+                  return f.read(size)
+
+          dev_path = "W.dev.dylib"
+          stock_path = "stock/17.2.11.thin.dylib"
+
+          dev_secs = sections(dev_path)
+          stock_secs = sections(stock_path)
+
+          def key(s):
+              return (s["seg"], s["sect"])
+
+          dev_map = {key(s): s for s in dev_secs}
+          stock_map = {key(s): s for s in stock_secs}
+
+          common = sorted(set(dev_map) & set(stock_map))
+          only_dev = sorted(set(dev_map) - set(stock_map))
+          only_stock = sorted(set(stock_map) - set(dev_map))
+
+          out = open("diff-report.txt", "w")
+          def w(line):
+              out.write(line + "\n")
+
+          w("=== dev vs stock 17.2.11 ===")
+          w("dev sections:   " + str(len(dev_secs)))
+          w("stock sections: " + str(len(stock_secs)))
+          w("common:         " + str(len(common)))
+          w("")
+
+          if only_dev:
+              w("=== only in DEV ===")
+              for x in only_dev:
+                  w("  " + str(x))
+          if only_stock:
+              w("=== only in STOCK ===")
+              for x in only_stock:
+                  w("  " + str(x))
+          w("")
+
+          total = 0
+          results = []
+          for k in common:
+              sd = dev_map[k]
+              ss = stock_map[k]
+              if sd["size"] != ss["size"]:
+                  w("[" + str(k) + "] SIZE dev=0x" + format(sd["size"], "x") +
+                    " stock=0x" + format(ss["size"], "x"))
+                  continue
+              if sd["size"] == 0:
+                  continue
+              dd = read(dev_path, sd["off"], sd["size"])
+              ds = read(stock_path, ss["off"], ss["size"])
+              if dd == ds:
+                  continue
+              diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]
+              cnt = len(diffs)
+              total += cnt
+              results.append((k, cnt, diffs, dd, ds))
+
+          results.sort(key=lambda x: -x[1])
+
+          w("=== sections with diffs: " + str(len(results)) + " ===")
+          w("=== total diff bytes: " + str(total) + " ===")
+          w("")
+
+          w("=== top sections by diff count ===")
+          for k, cnt, diffs, dd, ds in results:
+              w("[" + str(k) + "] size=0x" + format(len(dd), "x") + " diff=" + str(cnt))
+          w("")
+
+          if results:
+              k, cnt, diffs, dd, ds = results[0]
+              w("=== first section details: " + str(k) + " ===")
+              for i in diffs[:MAX_OFFSETS]:
+                  w("  off 0x" + format(i, "x") + ": stock=" +
+                    format(ds[i], "02x") + " dev=" + format(dd[i], "02x"))
+              if len(diffs) > MAX_OFFSETS:
+                  w("  ... and " + str(len(diffs) - MAX_OFFSETS) + " more")
+
+          out.close()
+
+          size = os.path.getsize("diff-report.txt")
+          if size > MAX_REPORT:
+              with open("diff-report.txt", "rb") as f:
+                  data = f.read(MAX_REPORT)
+              with open("diff-report.txt", "wb") as f:
+                  f.write(data)
+                  f.write(b"\n\n=== TRUNCATED ===\n")
+              print("::warning::diff report truncated to " + str(MAX_REPORT) + " bytes")
+          else:
+              print("diff report size: " + str(size) + " bytes")
+          PYEOF
           echo "script written"
 
       - name: Run comparison
@@ -195,13 +199,13 @@ jobs:
           set -euo pipefail
           python3 scripts/diff.py
 
-      - name: Show report head
+      - name: Show report
         run: |
           set -euo pipefail
           echo "=== report size ==="
           stat -f%z diff-report.txt
-          echo "=== first 200 lines ==="
-          head -200 diff-report.txt
+          echo "=== contents ==="
+          cat diff-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
