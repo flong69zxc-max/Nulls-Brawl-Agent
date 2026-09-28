@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   compare:
     runs-on: macos-14
@@ -62,60 +66,69 @@ jobs:
           file stock/17.2.11.thin.dylib
           echo "stock size: $(stat -f%z stock/17.2.11.thin.dylib) bytes"
 
-      - name: Install LIEF
-        run: |
-          set -euo pipefail
-          python3 -m venv venv
-          source venv/bin/activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "lief>=0.17.2"
-          python3 -c "import lief; print('lief', lief.__version__)"
-
-      - name: Write analysis script
+      - name: Write comparison script
         run: |
           set -euo pipefail
           mkdir -p scripts
 
           printf '%s\n' \
-            'import lief, sys' \
+            'import subprocess, re, sys, os' \
+            '' \
+            'MAX_DIFFS_PER_SECTION = 1000' \
+            'MAX_OFFSETS_PRINTED = 20' \
+            'MAX_REPORT_BYTES = 100 * 1024' \
             '' \
             'def get_sections(path):' \
-            '    try:' \
-            '        fat = lief.MachO.parse(path)' \
-            '        if fat is None: return None' \
-            '        binary = fat.at(0)' \
-            '        if binary is None: return None' \
-            '        sections = {}' \
-            '        for seg in binary.segments:' \
-            '            for sec in seg.sections:' \
-            '                sections[(seg.name, sec.name)] = sec' \
-            '        return sections' \
-            '    except Exception as e:' \
-            '        print(f"::error::exception parsing {path}: {e}")' \
-            '        return None' \
+            '    out = subprocess.run(["otool", "-l", path], capture_output=True, text=True).stdout' \
+            '    sections = []' \
+            '    cur = {}' \
+            '    for line in out.splitlines():' \
+            '        s = line.strip()' \
+            '        if s.startswith("sectname "):' \
+            '            cur["sectname"] = s.split()[1]' \
+            '        elif s.startswith("segname "):' \
+            '            cur["segname"] = s.split()[1]' \
+            '        elif s.startswith("addr "):' \
+            '            cur["addr"] = int(s.split()[1], 16)' \
+            '        elif s.startswith("size "):' \
+            '            cur["size"] = int(s.split()[1], 16)' \
+            '        elif s.startswith("offset "):' \
+            '            cur["offset"] = int(s.split()[1])' \
+            '            if all(k in cur for k in ("sectname", "segname", "addr", "size", "offset")):' \
+            '                sections.append(dict(cur))' \
+            '            cur = {}' \
+            '    return sections' \
             '' \
-            'secs_dev = get_sections("W.dev.dylib")' \
-            'secs_stock = get_sections("stock/17.2.11.thin.dylib")' \
-            'if secs_dev is None or secs_stock is None:' \
-            '    sys.exit(1)' \
+            'def read_bytes(path, offset, size):' \
+            '    with open(path, "rb") as f:' \
+            '        f.seek(offset)' \
+            '        return f.read(size)' \
             '' \
-            'with open("W.dev.dylib", "rb") as f: data_dev = f.read()' \
-            'with open("stock/17.2.11.thin.dylib", "rb") as f: data_stock = f.read()' \
+            'dev_path = "W.dev.dylib"' \
+            'stock_path = "stock/17.2.11.thin.dylib"' \
+            '' \
+            'secs_dev = get_sections(dev_path)' \
+            'secs_stock = get_sections(stock_path)' \
+            '' \
+            'def key(s):' \
+            '    return (s["segname"], s["sectname"])' \
+            '' \
+            'dev_map = {key(s): s for s in secs_dev}' \
+            'stock_map = {key(s): s for s in secs_stock}'' \
+            '' \
+            'common = sorted(set(dev_map) & set(stock_map))' \
+            'only_dev = sorted(set(dev_map) - set(stock_map))' \
+            'only_stock = sorted(set(stock_map) - set(dev_map))' \
             '' \
             'out = open("diff-report.txt", "w")' \
             'def w(line):' \
-            '    print(line)' \
             '    out.write(line + "\n")' \
             '' \
-            'w(f"=== dev vs stock 17.2.11 ===")' \
-            'w(f"dev size:   {len(data_dev)}")' \
-            'w(f"stock size: {len(data_stock)}")' \
-            'w(f"diff:       {len(data_dev) - len(data_stock)}")' \
+            'w("=== dev vs stock 17.2.11 ===")' \
+            'w(f"dev sections:   {len(secs_dev)}")' \
+            'w(f"stock sections: {len(secs_stock)}")' \
+            'w(f"common:         {len(common)}")' \
             'w("")' \
-            '' \
-            'common = sorted(secs_dev.keys() & secs_stock.keys())' \
-            'only_dev = sorted(set(secs_dev.keys()) - set(secs_stock.keys()))' \
-            'only_stock = sorted(set(secs_stock.keys()) - set(secs_dev.keys()))' \
             '' \
             'if only_dev:' \
             '    w("=== only in DEV ===")' \
@@ -125,77 +138,70 @@ jobs:
             '    for x in only_stock: w(f"  {x}")' \
             'w("")' \
             '' \
-            'total = 0' \
-            'for k in common:' \
-            '    sd = secs_dev[k]' \
-            '    ss = secs_stock[k]' \
-            '    if sd.size != ss.size:' \
-            '        w(f"[{k[0]},{k[1]}] SIZE dev=0x{sd.size:x} stock=0x{ss.size:x}")' \
-            '        continue' \
-            '    if sd.offset == 0 or ss.offset == 0: continue' \
-            '    if sd.offset + sd.size > len(data_dev) or ss.offset + ss.size > len(data_stock): continue' \
-            '    dd = data_dev[sd.offset:sd.offset+sd.size]' \
-            '    ds = data_stock[ss.offset:ss.offset+ss.size]' \
-            '    if dd == ds: continue' \
-            '    diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]' \
-            '    total += len(diffs)' \
-            '    w(f"[{k[0]},{k[1]}] size=0x{sd.size:x} diff={len(diffs)}")' \
-            '    for i in diffs[:500]:' \
-            '        w(f"  off 0x{i:x}: stock={ds[i]:02x} dev={dd[i]:02x}")' \
-            '    if len(diffs) > 500:' \
-            '        w(f"  ... and {len(diffs)-500} more")' \
+            'total_diffs = 0' \
+            'diffs_by_section = []' \
             '' \
+            'for k in common:' \
+            '    sd = dev_map[k]' \
+            '    ss = stock_map[k]' \
+            '    if sd["size"] != ss["size"]:' \
+            '        w(f"[{k[0]},{k[1]}] SIZE dev=0x{sd[\"size\"]:x} stock=0x{ss[\"size\"]:x}")' \
+            '        continue' \
+            '    if sd["size"] == 0:' \
+            '        continue' \
+            '    dd = read_bytes(dev_path, sd["offset"], sd["size"])' \
+            '    ds = read_bytes(stock_path, ss["offset"], ss["size"])' \
+            '    if dd == ds:' \
+            '        continue' \
+            '    diffs = [i for i in range(len(dd)) if dd[i] != ds[i]]' \
+            '    cnt = len(diffs)' \
+            '    total_diffs += cnt' \
+            '    diffs_by_section.append((k, cnt, diffs, dd, ds))' \
+            '' \
+            'diffs_by_section.sort(key=lambda x: -x[1])' \
+            '' \
+            'w(f"=== sections with diffs: {len(diffs_by_section)} ===")' \
+            'w(f"=== total diff bytes: {total_diffs} ===")' \
             'w("")' \
-            'w(f"=== total diff bytes: {total} ===")' \
+            '' \
+            'for k, cnt, diffs, dd, ds in diffs_by_section:' \
+            '    if cnt > MAX_DIFFS_PER_SECTION:' \
+            '        w(f"[{k[0]},{k[1]}] size=0x{len(dd):x} diff={cnt} (too many, skipping offsets)")' \
+            '        continue' \
+            '    w(f"[{k[0]},{k[1]}] size=0x{len(dd):x} diff={cnt}")' \
+            '    for i in diffs[:MAX_OFFSETS_PRINTED]:' \
+            '        w(f"  off 0x{i:x}: stock={ds[i]:02x} dev={dd[i]:02x}")' \
+            '    if len(diffs) > MAX_OFFSETS_PRINTED:' \
+            '        w(f"  ... and {len(diffs) - MAX_OFFSETS_PRINTED} more")' \
+            '' \
             'out.close()' \
+            '' \
+            'size = os.path.getsize("diff-report.txt")' \
+            'if size > MAX_REPORT_BYTES:' \
+            '    with open("diff-report.txt", "rb") as f:' \
+            '        data = f.read(MAX_REPORT_BYTES)' \
+            '    with open("diff-report.txt", "wb") as f:' \
+            '        f.write(data)' \
+            '        f.write(b"\n\n=== TRUNCATED (report too large) ===\n")' \
+            '    print(f"::warning::diff report truncated to {MAX_REPORT_BYTES} bytes (was {size})")' \
+            'else:' \
+            '    print(f"diff report size: {size} bytes")' \
             > scripts/diff.py
 
-          printf '%s\n' \
-            'patterns = [' \
-            '    (bytes.fromhex("20A720D4"), "brk539"),' \
-            '    (bytes.fromhex("200020D4"), "brk1"),' \
-            '    (bytes.fromhex("1F2003D5"), "nop"),' \
-            '    (bytes.fromhex("C0035FD6"), "ret"),' \
-            '    (bytes.fromhex("00000000"), "nulls"),' \
-            ']' \
-            'out = open("brk-analysis.txt", "w")' \
-            'for path in ["W.dev.dylib", "stock/17.2.11.thin.dylib"]:' \
-            '    with open(path, "rb") as f: data = f.read()' \
-            '    out.write(f"=== {path} (size={len(data)}) ===\n")' \
-            '    print(f"=== {path} ===")' \
-            '    for pat, name in patterns:' \
-            '        cnt = data.count(pat)' \
-            '        out.write(f"  {name}: {cnt}\n")' \
-            '        print(f"  {name}: {cnt}")' \
-            '    out.write("\n")' \
-            'out.close()' \
-            > scripts/brk.py
+          echo "script written"
 
-          echo "scripts written"
-
-      - name: Run diff analysis
+      - name: Run comparison
         run: |
           set -euo pipefail
-          source venv/bin/activate
-          python3 scripts/diff.py || echo "::warning::diff script failed"
+          python3 scripts/diff.py
 
-      - name: Run BRK analysis
+      - name: Show report head
         run: |
           set -euo pipefail
-          source venv/bin/activate
-          python3 scripts/brk.py
-
-      - name: Version strings
-        run: |
-          set -euo pipefail
-          {
-            echo "=== version strings in dev ==="
-            strings W.dev.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 || true
-            echo ""
-            echo "=== version strings in stock 17.2.11 ==="
-            strings stock/17.2.11.thin.dylib | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -u | head -40 || true
-          } > version-strings.txt
-          cat version-strings.txt
+          echo "=== report size ==="
+          stat -f%z diff-report.txt
+          echo "=== first 200 lines ==="
+          head -200 diff-report.txt
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -203,8 +209,6 @@ jobs:
           name: comparison
           path: |
             diff-report.txt
-            brk-analysis.txt
-            version-strings.txt
-            scripts/
+            scripts/diff.py
           retention-days: 30
           if-no-files-found: warn
