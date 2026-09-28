@@ -31,8 +31,6 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tools
-          # gum-graft для macOS arm64. Имя артефакта в релизах Frida:
-          # gum-graft-macos-arm64 (по данным CI-конфига Frida)
           URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-macos-arm64.tar.xz"
           echo "downloading $URL"
           curl -fL --retry 3 -o tools/gum-graft.tar.xz "$URL"
@@ -54,7 +52,6 @@ jobs:
       - name: Extract arm64 slice
         run: |
           set -euo pipefail
-          # gum-graft работает только с arm64 (не arm64e)
           if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
             cp W.stock.dylib W.thin.dylib
           else
@@ -66,15 +63,10 @@ jobs:
       - name: Run gum-graft
         run: |
           set -euo pipefail
-          # --ingest-function-starts: автоматически инструментировать все функции
-          # из LC_FUNCTION_STARTS. gum-graft пишет результат в тот же файл.
-          ./tools/gum-graft \
-            --ingest-function-starts \
-            W.thin.dylib
+          ./tools/gum-graft --ingest-function-starts W.thin.dylib
           echo "=== after grafting ==="
           file W.thin.dylib
           echo "grafted size: $(stat -f%z W.thin.dylib) bytes"
-          # Проверяем, что появились новые секции (graft trampolines)
           otool -l W.thin.dylib | grep -i graft || echo "no graft sections found"
 
       - name: Assemble Frida.framework
@@ -125,7 +117,6 @@ jobs:
             '</plist>' \
             > "$FRAMEWORK_NAME/Info.plist"
 
-          # ВАЖНО: code_signing должен быть "required" для работы gum-graft
           printf '%s\n' \
             '{' \
             '  "interaction": {' \
