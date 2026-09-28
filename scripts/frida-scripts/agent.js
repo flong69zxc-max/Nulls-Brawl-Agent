@@ -190,6 +190,10 @@ function log(line) {
   } catch (e) {}
 }
 
+function sep(label) {
+  log("---- " + label + " ----");
+}
+
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
 function selector(name) {
@@ -254,11 +258,10 @@ function fileSize(path) {
 
 function writable(path) {
   if (!path) return false;
-  const test = path + "/ {
-" + TEST_NAME;
-  const payload = "pro be-" + const Date.now();
-  if (!writeText(test, out payload)) return false;
-  if (read =Text(test) !== payload) {
+  const test = path + "/" + TEST_NAME;
+  const payload = "probe-" + Date.now();
+  if (!writeText(test, payload)) return false;
+  if (readText(test) !== payload) {
     try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
     return false;
   }
@@ -289,6 +292,10 @@ function uuidIn(path) {
 function numOf(pointer) {
   const text = pointer.toString();
   return parseInt(text.substring(0, 2) === "0x" ? text.substring(2) : text, 16);
+}
+
+function hex(pointer) {
+  return "0x" + numOf(pointer).toString(16);
 }
 
 function lcDump() {
@@ -337,7 +344,8 @@ function bundlePath() {
   try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
 }
 
-function bundleCandidates() [];
+function bundleCandidates() {
+  const out = [];
   const bundle = bundlePath();
   if (!bundle) return out;
   const parts = bundle.replace(/\/+$/, "").split("/");
@@ -459,6 +467,7 @@ function saveConfig(path) { writeText(path, JSON.stringify(DEFAULTS, null, 2) + 
 function loadConfig() {
   if (updatedPath === null) {
     cfg = JSON.parse(JSON.stringify(DEFAULTS));
+    log("no updated path, using defaults");
     return;
   }
   const path = updatedPath + "/" + CFG_NAME;
@@ -483,21 +492,32 @@ function loadConfig() {
 function findTargetModule() {
   try {
     const mods = Process.enumerateModules();
+    log("modules total: " + mods.length);
     for (let i = 0; i < mods.length; i++) {
       const m = mods[i];
       const p = m.path || "";
-      if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) return m;
+      if (p.indexOf("/NB.app/") !== -1 && p.indexOf("/Frameworks/") === -1) {
+        log("target module matched NB.app: " + m.name + " " + m.base + " size=" + m.size + " path=" + p);
+        return m;
+      }
     }
     for (let i = 0; i < mods.length; i++) {
       const m = mods[i];
-      if (/nulls/i.test(m.name || "")) return m;
+      if (/nulls/i.test(m.name || "")) {
+        log("target module matched name nulls: " + m.name + " " + m.base);
+        return m;
+      }
     }
     let best = mods.length > 0 ? mods[0] : null;
     for (let i = 0; i < mods.length; i++) {
       if (best === null || mods[i].size > best.size) best = mods[i];
     }
+    if (best !== null) log("target module fallback largest: " + best.name + " " + best.base + " size=" + best.size);
     return best;
-  } catch (e) { return null; }
+  } catch (e) {
+    log("findTargetModule failed: " + e.message);
+    return null;
+  }
 }
 
 function baseOf(target) {
@@ -540,52 +560,52 @@ function applyTarget(target) {
   const size = sizeOf(type);
   let addr;
   try { addr = addrOf(target); } catch (e) {
-    log(name + " address failed: " + e.message);
+    log("target " + name + ": address failed: " + e.message);
     return "addr-error";
   }
   const range = Process.findRangeByAddress(addr);
   if (range === null) {
-    log(name + " @" + addr + " is not mapped, skipped");
+    log("target " + name + " @" + addr + ": not mapped, skipped");
     return "unmapped";
   }
   if (range.protection.indexOf("r") === -1) {
-    log(name + " @" + addr + " not readable (" + range.protection + "), skipped");
+    log("target " + name + " @" + addr + ": not readable (" + range.protection + "), skipped");
     return "unreadable";
   }
   let before;
   try { before = readAt(addr, type); } catch (e) {
-    log(name + " @" + addr + " read failed: " + e.message);
+    log("target " + name + " @" + addr + ": read failed: " + e.message);
     return "read-error";
   }
   const want = valueOf(target.value, type);
   if (target.expect !== undefined && target.expect !== null) {
     const expect = valueOf(target.expect, type);
     if (expect !== before) {
-      log(name + " @" + addr + " expect " + str(expect) + " but found " + str(before) + ", skipped");
+      log("target " + name + " @" + addr + ": expect " + str(expect) + " but found " + str(before) + ", skipped");
       return "expect-mismatch";
     }
   }
   if (before === want) {
-    log(name + " @" + addr + " already " + str(before) + " (" + range.protection + ")");
+    log("target " + name + " @" + addr + ": already " + str(before) + " (" + range.protection + ")");
     return "already";
   }
   if (cfg.patch === false || target.patch === false) {
-    log(name + " @" + addr + " probe: before=" + str(before) + " want=" + str(want) + " (" + range.protection + ")");
+    log("target " + name + " @" + addr + ": probe: before=" + str(before) + " want=" + str(want) + " (" + range.protection + ")");
     return "probe";
   }
   try {
     Memory.patchCode(addr, size, function (code) { writeAt(code, want, type); });
   } catch (e) {
-    log(name + " @" + addr + " patchCode failed: " + e.message);
+    log("target " + name + " @" + addr + ": patchCode failed: " + e.message);
     return "patch-error";
   }
   let after = null;
   try { after = readAt(addr, type); } catch (e) {}
   if (after === want) {
-    log(name + " @" + addr + " " + str(before) + " -> " + str(after) + " (" + range.protection + ")");
+    log("target " + name + " @" + addr + ": " + str(before) + " -> " + str(after) + " (" + range.protection + ")");
     return "ok";
   }
-  log(name + " @" + addr + " write did not stick (" + str(before) + " -> " + str(after) + ")");
+  log("target " + name + " @" + addr + ": write did not stick (" + str(before) + " -> " + str(after) + ")");
   return "no-stick";
 }
 
@@ -596,7 +616,7 @@ function applyPatches() {
     const name = targets[i].name || ("target" + i);
     try { result[name] = applyTarget(targets[i]); } catch (e) {
       result[name] = "error";
-      log(name + " apply failed: " + e.message);
+      log("target " + name + ": apply failed: " + e.message);
     }
   }
   return result;
@@ -625,7 +645,14 @@ function targetRange() {
 function regionList(protections) {
   const key = protections.slice().sort().join(",");
   if (regionCache[key] !== undefined) return regionCache[key];
-  const [lo, hi] = targetRange() || [0, -1];
+  const tr = targetRange();
+  if (tr === null) {
+    regionCache[key] = [];
+    return regionCache[key];
+  }
+  const lo = tr[0];
+  const hi = tr[1];
+  log("region filter: lo=" + "0x" + lo.toString(16) + " hi=" + "0x" + hi.toString(16));
   const out = [];
   const seen = {};
   for (let i = 0; i < protections.length; i++) {
@@ -642,6 +669,7 @@ function regionList(protections) {
       out.push(range);
     }
   }
+  log("regions after filter [" + protections.join("|") + "]: " + out.length);
   regionCache[key] = out;
   return out;
 }
@@ -656,7 +684,9 @@ function scanRegion(range, pattern) {
     try {
       const matches = Memory.scanSync(base.add(offset), take, pattern);
       for (let i = 0; i < matches.length; i++) results.push(matches[i].address);
-    } catch (e) {}
+    } catch (e) {
+      log("scan chunk fail at " + hex(base.add(offset)) + " size=" + take + ": " + e.message);
+    }
     offset += take;
   }
   return results;
@@ -671,11 +701,16 @@ function tagAnchor(target, tag) {
 function collectStringHits(map, regions) {
   const hits = [];
   const byAddress = {};
+  let anchorsTotal = 0;
+  let anchorsScanned = 0;
+  for (const name in map) anchorsTotal += map[name].length;
   for (const name in map) {
     const anchors = map[name];
     for (let a = 0; a < anchors.length; a++) {
       const pattern = hexPattern(anchors[a]);
       if (pattern === null) continue;
+      anchorsScanned++;
+      let before = hits.length;
       for (let r = 0; r < regions.length; r++) {
         const matches = scanRegion(regions[r], pattern);
         for (let m = 0; m < matches.length; m++) {
@@ -688,8 +723,12 @@ function collectStringHits(map, regions) {
           tagAnchor(byAddress[key], name + ":" + anchors[a]);
         }
       }
+      if (hits.length > before) {
+        log("anchor " + name + ":" + anchors[a] + " -> " + (hits.length - before) + " new hit(s)");
+      }
     }
   }
+  log("anchors scanned " + anchorsScanned + "/" + anchorsTotal + ", unique addresses=" + hits.length);
   return hits;
 }
 
@@ -702,8 +741,13 @@ function symbolOf(address) {
 }
 
 function findXrefs(targets, regions) {
+  if (targets.length === 0) return;
   const wanted = {};
   for (let i = 0; i < targets.length; i++) wanted[String(targets[i].address)] = targets[i];
+  log("xref search over " + regions.length + " exec region(s) for " + targets.length + " addresses");
+  let execBytes = 0;
+  for (let r = 0; r < regions.length; r++) execBytes += regions[r].size;
+  log("exec bytes total: " + execBytes);
   for (let r = 0; r < regions.length; r++) {
     const range = regions[r];
     const base = numOf(range.base);
@@ -712,7 +756,10 @@ function findXrefs(targets, regions) {
     while (offset < size) {
       const take = Math.min(SCAN_CHUNK, size - offset);
       let buffer = null;
-      try { buffer = range.base.add(offset).readByteArray(take); } catch (e) { offset += take; continue; }
+      try { buffer = range.base.add(offset).readByteArray(take); } catch (e) {
+        offset += take;
+        continue;
+      }
       if (buffer === null) { offset += take; continue; }
       const view = new DataView(buffer);
       const count = Math.floor(take / 4);
@@ -748,20 +795,24 @@ function findXrefs(targets, regions) {
 }
 
 function scanMap(map, label, resultFile) {
-  log("=== scan " + label + " start ===");
+  sep("scan " + label + " start");
   if (targetModule === null) targetModule = findTargetModule();
-  if (targetModule !== null) log("target module: " + targetModule.name + " base=" + targetModule.base + " size=" + targetModule.size);
-  const readRegions = regionList(["r--", "r-x"]);
-  const execRegions = regionList(["r-x"]);
-  log("regions: readable=" + readRegions.length + " executable=" + execRegions.length);
-  const hits = collectStringHits(map, readRegions);
-  log("string hits: " + hits.length);
   if (targetModule === null) {
     log("no target module, abort");
     return null;
   }
+  log("target module: " + targetModule.name);
+  log("target base: " + targetModule.base);
+  log("target size: 0x" + targetModule.size.toString(16));
+  log("target path: " + targetModule.path);
   const base = numOf(targetModule.base);
+  const readRegions = regionList(["r--", "r-x"]);
+  const execRegions = regionList(["r-x"]);
+  log("read regions: " + readRegions.length);
+  log("exec regions: " + execRegions.length);
+  const hits = collectStringHits(map, readRegions);
   for (let i = 0; i < hits.length; i++) hits[i].rva = hits[i].address - base;
+  log("hits with rva computed: " + hits.length);
   findXrefs(hits, execRegions);
   const report = {
     generatedAt: new Date().toISOString(),
@@ -769,14 +820,16 @@ function scanMap(map, label, resultFile) {
     module: {
       name: targetModule.name,
       base: targetModule.base.toString(),
-      size: targetModule.size
+      size: targetModule.size,
+      path: targetModule.path
     },
     hits: [],
-    summary: { hits: hits.length, withXrefs: 0 }
+    summary: { hits: hits.length, withXrefs: 0, totalXrefs: 0 }
   };
   for (let i = 0; i < hits.length; i++) {
     const hit = hits[i];
     if (hit.xrefs.length > 0) report.summary.withXrefs++;
+    report.summary.totalXrefs += hit.xrefs.length;
     const entry = {
       anchor: hit.anchors.join(","),
       address: "0x" + hit.address.toString(16),
@@ -792,17 +845,21 @@ function scanMap(map, label, resultFile) {
       });
     }
     report.hits.push(entry);
-    log("anchor " + entry.anchor + " rva=" + entry.rva + " xrefs=" + entry.xrefs.length +
-      (entry.xrefs.length > 0
-        ? " functionRva=" + entry.xrefs[0].functionRva + (entry.xrefs[0].symbol === null ? "" : " symbol=" + entry.xrefs[0].symbol)
-        : ""));
+    if (entry.xrefs.length > 0) {
+      log("HIT " + entry.anchor + " strRva=" + entry.rva + " xrefs=" + entry.xrefs.length);
+      for (let x = 0; x < entry.xrefs.length && x < 5; x++) {
+        log("    xref funcRva=" + entry.xrefs[x].functionRva + (entry.xrefs[x].symbol ? " symbol=" + entry.xrefs[x].symbol : ""));
+      }
+    } else {
+      log("HIT " + entry.anchor + " strRva=" + entry.rva + " xrefs=0");
+    }
   }
   if (updatedPath !== null) {
     const target = updatedPath + "/" + (resultFile || cfg.scan_result_file);
     if (writeText(target, JSON.stringify(report, null, 2) + "\n")) log("scan result written to " + target);
     else log("scan result write failed: " + target);
   }
-  log("=== scan " + label + " done: hits=" + report.summary.hits + " withXrefs=" + report.summary.withXrefs + " ===");
+  sep("scan " + label + " done: hits=" + report.summary.hits + " withXrefs=" + report.summary.withXrefs + " totalXrefs=" + report.summary.totalXrefs);
   return report;
 }
 
@@ -853,6 +910,7 @@ function showAlert(title, message) {
 }
 
 function environment() {
+  sep("environment");
   try { log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id); } catch (e) {}
   try {
     const device = ObjC.classes.UIDevice.currentDevice();
@@ -861,46 +919,63 @@ function environment() {
   try { log("bundle=" + bundlePath()); } catch (e) {}
   try { log("bundleId=" + str(ObjC.classes.NSBundle.mainBundle().bundleIdentifier())); } catch (e) {}
   try {
-    log("executable=" + Process.mainModule.path);
-    log("base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy);
+    log("mainModule.path=" + Process.mainModule.path);
+    log("mainModule.base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy);
   } catch (e) {}
   const lc = lcDump();
-  log("livecontainer: " + (lc.length === 0 ? "not detected" : lc.join(" | ")));
-  log("documents=" + str(docsPath));
-  log("uuid=" + uuidIn(docsPath) + " uuids=" + uuidsIn(docsPath).join(","));
-  log("updated=" + str(updatedPath));
-  log("log=" + str(logPath));
+  log("livecontainer: " + (lc.length === 0 ? "not detected" : "detected"));
+  for (let i = 0; i < lc.length; i++) log("  lc " + lc[i]);
+  log("docsPath=" + str(docsPath));
+  log("updatedPath=" + str(updatedPath));
+  log("logPath=" + str(logPath));
+  log("uuid=" + uuidIn(docsPath) + " all=" + uuidsIn(docsPath).join(","));
+  sep("path candidates");
   for (let i = 0; i < pathReport.length; i++) {
     const r = pathReport[i];
-    log("candidate " + r.path + " [" + r.source + "] dir=" + r.dir + " container=" + r.container + " writable=" + r.writable);
+    log("  " + r.path);
+    log("    source=" + r.source + " dir=" + r.dir + " container=" + r.container + " writable=" + r.writable);
   }
-  if (updatedPath !== null) log("updated contents: " + listDir(updatedPath).join(" "));
+  if (updatedPath !== null) log("updated contents: [" + listDir(updatedPath).join(" ") + "]");
 }
 
 function start(stage, parameters) {
   if (started) return;
   started = true;
   initPaths();
-  log("=== agent start ===");
-  log("stage=" + str(stage) + " parameters=" + JSON.stringify(parameters === undefined ? {} : parameters));
+  sep("agent start");
+  log("stage=" + str(stage));
+  log("parameters=" + JSON.stringify(parameters === undefined ? {} : parameters));
   environment();
   loadConfig();
   targetModule = findTargetModule();
-  log("target module: " + (targetModule === null ? "null" : targetModule.name + " base=" + targetModule.base + " size=" + targetModule.size));
-  log("config patch=" + cfg.patch + " alert=" + cfg.alert + " targets=" + (cfg.targets || []).length);
-  log("patches: " + JSON.stringify(applyPatches()));
+  sep("config");
+  log("patch=" + cfg.patch);
+  log("alert=" + cfg.alert);
+  log("scan_strings=" + cfg.scan_strings);
+  log("scan_dev_flags=" + cfg.scan_dev_flags);
+  log("scan_delay_ms=" + cfg.scan_delay_ms);
+  log("targets count=" + (cfg.targets || []).length);
+  for (let i = 0; i < (cfg.targets || []).length; i++) {
+    const t = cfg.targets[i];
+    log("  target[" + i + "] " + (t.name || "?") + " rva=" + t.rva + " type=" + (t.type || "u8") + " value=" + t.value);
+  }
+  sep("initial patches");
+  log("result: " + JSON.stringify(applyPatches()));
   const delays = cfg.reapply_ms || [];
   for (let i = 0; i < delays.length; i++) {
-    setTimeout(function () { log("reapply " + JSON.stringify(applyPatches())); }, delays[i]);
+    (function (delay) {
+      setTimeout(function () { log("reapply at +" + delay + "ms: " + JSON.stringify(applyPatches())); }, delay);
+    })(delays[i]);
   }
   if (cfg.scan_strings || cfg.scan_dev_flags) {
     setTimeout(function () {
       if (cfg.scan_strings) scanStrings();
       if (cfg.scan_dev_flags) scanDevFlags();
+      log("=== all scans complete ===");
     }, cfg.scan_delay_ms);
   }
   showAlert("Nulls Brawl", "agent loaded");
-  log("=== agent armed ===");
+  sep("agent armed");
 }
 
 rpc.exports = {
@@ -940,7 +1015,7 @@ rpc.exports = {
       patch: cfg.patch,
       alert: cfg.alert,
       targets: cfg.targets,
-      targetModule: targetModule === null ? null : { name: targetModule.name, base: targetModule.base.toString(), size: targetModule.size }
+      targetModule: targetModule === null ? null : { name: targetModule.name, base: targetModule.base.toString(), size: targetModule.size, path: targetModule.path }
     };
   },
   paths: function () {
