@@ -1,26 +1,14 @@
-# Build artifacts
 dist/
 .meta/
 FridaGadget.framework/
 *.framework.zip
-
-# Generated
 offsets_report.txt
 offsets_resolved.js
 scripts/agent.js
-
-# Node
 node_modules/
 package-lock.json
-npm-debug.log*
-
-# macOS
 .DS_Store
 __MACOSX/
 ._*
-
-# IDE
 .vscode/
 .idea/
-*.swp
-*.swo
