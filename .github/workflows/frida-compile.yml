@@ -4,14 +4,19 @@ name: Frida Compile
 # node_modules, которые frida-compile@17 пихает в начало файла) и гарантирует, что
 # в артефакт не попадает ничего, кроме самого агента + frida-objc-bridge.
 #
-# Почему бридж остаётся внутри: с Frida 17 рантайм больше не содержит встроенного ObjC
-# (см. frida.re/docs/javascript-api -> ObjC -> "Moved"), поэтому agent.js без бриджа
-# падает с ReferenceError: ObjC is not defined. Гейт 4 запрещает выпустить такой файл.
+# Целевой рантайм: Frida 17.9.7 (QuickJS + стабы ObjC/Java). Проверки ниже привязаны
+# именно к 17.9.7 — при апгрейде FRIDA_VERSION перечитать комментарии и маркеры бриджа.
+#
+# Почему бридж остаётся внутри: с Frida 17 (включая 17.9.7) рантайм больше не содержит
+# встроенного ObjC (см. frida.re/docs/javascript-api -> ObjC -> "Moved"), поэтому agent.js
+# без бриджа падает с ReferenceError: ObjC is not defined. Гейт 4 запрещает выпустить
+# такой файл.
 #
 # Почему --banner:js='"use strict";': бридж вызывает eval("var m = ...") внутри функции,
 # в которой уже есть const m. В ЭС-модуле (строгий режим) это отдельная область видимости,
 # а в обычном "sloppy" скрипте - SyntaxError "Identifier 'm' has already been declared",
-# из-за чего молча ломаются bundlePath() и UIAlertController. Проверено симуляцией рантайма.
+# из-за чего молча ломаются bundlePath() и UIAlertController. Проверено симуляцией
+# рантайма QuickJS, который используется в Frida 17.9.7.
 
 on:
   push:
@@ -36,6 +41,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Версия рантайма Frida, под которую собираются агенты. Меняется вместе с bridge
+  # и перечитыванием комментариев сверху.
+  FRIDA_VERSION: '17.9.7'
   ESBUILD_VERSION: '0.28.2'
   # нижняя граница = защита от "чистого" agent.js без бриджа (он нерабочий на Frida 17)
   MIN_BYTES: '20480'
@@ -64,7 +72,13 @@ jobs:
           npm install --no-package-lock --no-audit --no-fund --ignore-scripts
           npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts "esbuild@${ESBUILD_VERSION}"
           ./node_modules/.bin/esbuild --version
-          node -e "console.log('frida-objc-bridge ' + require('./node_modules/frida-objc-bridge/package.json').version)"
+          bridge_ver=$(node -e "console.log(require('./node_modules/frida-objc-bridge/package.json').version)")
+          echo "frida-objc-bridge ${bridge_ver} (target runtime: Frida ${FRIDA_VERSION})"
+          case "$bridge_ver" in
+            8.*|9.*) : ;;
+            *) echo "::warning::frida-objc-bridge ${bridge_ver} не проверен против Frida ${FRIDA_VERSION}" ;;
+          esac
+          echo "BRIDGE_VERSION=${bridge_ver}" >> "$GITHUB_ENV"
 
       - name: Resolve entries
         run: |
@@ -89,7 +103,7 @@ jobs:
           rm -rf dist .meta
           mkdir -p dist .meta
           for name in $ENTRIES; do
-            echo "=== esbuild $name ==="
+            echo "=== esbuild $name (target Frida ${FRIDA_VERSION}) ==="
             ./node_modules/.bin/esbuild "scripts/frida-scripts/$name.js" \
               --bundle --format=esm --target=es2020 --minify \
               --legal-comments=none \
@@ -169,14 +183,14 @@ jobs:
             }
           '
 
-      - name: Gate 4 - bridge present, size sane
+      - name: Gate 4 - bridge present, size sane, runtime-compatible
         run: |
           set -euo pipefail
           for n in $ENTRIES; do
             f="dist/$n.js"
             bytes=$(stat -c %s "$f")
             test "$bytes" -ge "$MIN_BYTES" || {
-              echo "::error::$f = $bytes B < $MIN_BYTES: бридж ObjC не собран, на Frida 17 агент упадёт с ReferenceError: ObjC is not defined"
+              echo "::error::$f = $bytes B < $MIN_BYTES: бридж ObjC не собран, на Frida ${FRIDA_VERSION} агент упадёт с ReferenceError: ObjC is not defined"
               exit 1
             }
             test "$bytes" -le "$MAX_BYTES" || {
@@ -187,7 +201,13 @@ jobs:
               grep -qF -- "$m" "$f" || { echo "::error::$f: нет маркера бриджа '$m'"; exit 1; }
             done
             grep -qF -- 'rpc' "$f" || { echo "::error::$f: не похоже на агент (нет rpc)"; exit 1; }
-            echo "$f: $bytes B, bridge ok"
+            # Frida 17.9.7 крутит QuickJS, там нет Node-глобалов. Ловим утечки из CJS-модулей.
+            if grep -nE '(^|[^A-Za-z0-9_$.])(require|__dirname|__filename|module\.exports|process\.binding)\b' "$f" > /tmp/leak.txt; then
+              echo "::error::$f: содержит Node-глобалы, которых нет в рантайме Frida ${FRIDA_VERSION}:"
+              head -5 /tmp/leak.txt
+              exit 1
+            fi
+            echo "$f: $bytes B, bridge ok, runtime Frida ${FRIDA_VERSION} (bridge ${BRIDGE_VERSION})"
           done
 
       - name: Gate 5 - sources untouched
@@ -207,7 +227,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### frida-compiled"
+            echo "### frida-compiled (target: Frida ${FRIDA_VERSION}, bridge ${BRIDGE_VERSION})"
             echo ""
             echo "| файл | байт | sha256 |"
             echo "|---|---|---|"
