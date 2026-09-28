@@ -34,7 +34,6 @@ jobs:
           npm install -g frida-compile@17
           NPM_BIN="$(npm prefix -g)/bin"
           echo "$NPM_BIN" >> "$GITHUB_PATH"
-          echo "npm bin: $NPM_BIN"
           ls -la "$NPM_BIN" | grep frida || true
 
       - name: Verify frida-compile
@@ -58,6 +57,7 @@ jobs:
             echo "=== compile $f ==="
             frida-compile "$f" -o "build/${base}.js"
             rm -f "build/${base}.js.map"
+            rm -f "scripts/frida-scripts/${base}.js.map"
             ls -la "build/${base}.js"
             count=$((count + 1))
           done
