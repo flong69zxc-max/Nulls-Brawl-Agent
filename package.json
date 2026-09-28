@@ -5,5 +5,9 @@
   "type": "module",
   "dependencies": {
     "frida-objc-bridge": "8.0.6"
+  },
+  "devDependencies": {
+    "@types/frida-gum": "^18.7.2",
+    "frida-compile": "^17.0.0"
   }
 }
