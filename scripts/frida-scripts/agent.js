@@ -18,8 +18,8 @@ const DEFAULTS = {
   reapply_ms: [3000, 8000, 15000],
   log_path: "",
   docs_path: "",
-  scan_strings: false,
-  scan_dev_flags: false,
+  scan_strings: true,
+  scan_dev_flags: true,
   scan_delay_ms: 10000,
   scan_max_hits: 8,
   scan_min_length: 4,
@@ -35,13 +35,6 @@ const STRING_ANCHORS = {
   "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
   "LogicVersion_isProduction": ["isProduction"],
   "SCIDConfig_isDevBuild": ["isDevBuild"],
-  "DebugMenu": ["DebugMenu"],
-  "devMenu": ["devMenu"],
-  "Developer": ["Developer"],
-  "cheats": ["cheats"],
-  "CheatsEnabled": ["CheatsEnabled"],
-  "GodMode": ["GodMode"],
-  "SCID": ["SCID"],
   "LogicBattleModeClient_update": ["LogicBattleModeClient"],
   "BattleScreen_activateSkill": ["activateSkill"],
   "Gui_showFloaterTextAtDefaultPos": ["showFloaterText"],
@@ -448,7 +441,7 @@ function initPaths() {
   }
 
   if (logPath === null) {
-    log("log opened at console only (no writable directory found)");
+    try { console.log("[agent] no writable directory for log"); } catch (e) {}
     return;
   }
   log("log opened at " + logPath);
