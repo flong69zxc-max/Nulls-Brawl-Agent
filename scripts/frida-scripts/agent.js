@@ -1,53 +1,35 @@
 import ObjC from "frida-objc-bridge";
 
-const LOG_NAME = "modmenu.log";
+const LOG_NAME = "offsets_finder.log";
 const CFG_NAME = "modmenu_config.json";
+const RESULT_NAME = "offsets.json";
 const UPDATED = "updated";
-const TEST_NAME = ".__modmenu_write_test";
+const TEST_NAME = ".__finder_write_test";
 const DOC_DIR = 9;
 const USER_MASK = 1;
 const MAX_LOG_BYTES = 1048576;
+const MAX_SCAN_REGION = 128 * 1024 * 1024;
+const CHUNK_SIZE = 1024 * 1024;
+const MAX_XREF_HITS = 24;
 
-const POSITIONS = ["bottom_left", "bottom_right", "top_left", "top_right"];
-
-const DEFAULTS = {
-  enabled: true,
-  position: "bottom_left",
-  text: "MOD MENU",
-  color_rgb: [255, 255, 255],
-  log_path: "",
-  docs_path: "",
-  reapply_ms: [3000, 8000, 15000],
-  rva: {
-    Stage_instance: null,
-    ResourceManager_getMovieClip: null,
-    GameButton_ctor: null,
-    MovieClip_getTextFieldByName: null,
-    MovieClip_gotoAndStopFrameIndex: null,
-    MovieClip_setChildVisible: null,
-    Sprite_ctor: null,
-    Sprite_addChild: null,
-    DropGUIContainer_ctor: null,
-    DisplayObject_setXY: null,
-    TextField_setText: null,
-    String_ctor: null,
-    HomePage_ctor: null,
-    GUI_closePopup: null,
-    GUI_showFloaterTextAt: null
-  }
+// Строковые якоря — из этих строк ищем XREF'ы на функции
+const ANCHORS = {
+  Stage_instance:                     ["Stage"],
+  ResourceManager_getMovieClip:       ["getMovieClip"],
+  GameButton_ctor:                    ["onButtonPressed"],
+  MovieClip_getTextFieldByName:       ["getTextFieldByName"],
+  MovieClip_gotoAndStopFrameIndex:    ["gotoAndStopFrameIndex"],
+  MovieClip_setChildVisible:          ["setChildVisible"],
+  Sprite_ctor:                        ["Sprite"],
+  Sprite_addChild:                    ["addChild"],
+  DropGUIContainer_ctor:              ["DropGUIContainer"],
+  DisplayObject_setXY:                ["setXY"],
+  TextField_setText:                  ["setText"],
+  String_ctor:                        ["String not found:"],
+  HomePage_ctor:                      ["HomePage"],
+  GUI_closePopup:                     ["closePopup"],
+  GUI_showFloaterTextAt:              ["showFloaterTextAt"]
 };
-
-let cfg = {};
-let logPath = null;
-let docsPath = null;
-let updatedPath = null;
-let pathReport = [];
-let started = false;
-
-let modMenuButton = null;
-let homePageHook = null;
-let closePopupHook = null;
-let bindings = {};
 
 // -------------------------------------------------------------------------
 // infra
@@ -74,14 +56,6 @@ function log(line) {
 
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
-function selector(name) { try { return ObjC.selector(name); } catch (e) { return null; } }
-
-function responds(target, name) {
-  const sel = selector(name);
-  if (sel === null) return false;
-  try { return target.respondsToSelector_(sel) === true; } catch (e) { return false; }
-}
-
 function mkdir(path) {
   try {
     fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(path, true, null, null);
@@ -89,47 +63,20 @@ function mkdir(path) {
   } catch (e) { return false; }
 }
 
-function listDir(path) {
-  const out = [];
-  try {
-    const arr = fileManager().contentsOfDirectoryAtPath_error_(path, null);
-    if (arr === null) return out;
-    const n = arr.count();
-    for (let i = 0; i < n; i++) out.push(str(arr.objectAtIndex_(i)));
-  } catch (e) {}
-  return out;
-}
-
 function exists(path) {
   try { return fileManager().fileExistsAtPath_(path) === true; } catch (e) { return false; }
 }
 
 function readText(path) {
-  try {
-    const f = new File(path, "r");
-    const text = f.readText();
-    f.close();
-    return text;
-  } catch (e) { return null; }
+  try { const f = new File(path, "r"); const t = f.readText(); f.close(); return t; } catch (e) { return null; }
 }
 
 function writeText(path, text) {
-  try {
-    const f = new File(path, "w");
-    f.write(text);
-    f.flush();
-    f.close();
-    return true;
-  } catch (e) { return false; }
+  try { const f = new File(path, "w"); f.write(text); f.flush(); f.close(); return true; } catch (e) { return false; }
 }
 
 function fileSize(path) {
-  try {
-    const f = new File(path, "r");
-    const bytes = f.readAllBytes();
-    f.close();
-    return bytes.length;
-  } catch (e) { return -1; }
+  try { const f = new File(path, "r"); const b = f.readAllBytes(); f.close(); return b.length; } catch (e) { return -1; }
 }
 
 function writable(path) {
@@ -152,14 +99,9 @@ function containerLike(path) {
   return false;
 }
 
-function uuidsIn(path) {
-  const m = (path === null ? "" : path).match(/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/g);
-  return m === null ? [] : m;
-}
-
 function uuidIn(path) {
-  const all = uuidsIn(path);
-  return all.length === 0 ? "-" : all[all.length - 1];
+  const m = (path === null ? "" : path).match(/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/g);
+  return m === null ? "-" : m[m.length - 1];
 }
 
 function bundlePath() {
@@ -193,7 +135,6 @@ function collectCandidates() {
     seen[p] = true;
     list.push({ path: p, source: source });
   };
-  if (cfg.docs_path) add(cfg.docs_path, "config.docs_path");
   try {
     const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
     if (urls !== null && urls.count() > 0) add(str(urls.firstObject().path()), "URLsForDirectory");
@@ -216,31 +157,25 @@ function collectCandidates() {
 
 function filesystemDir() {
   const candidates = collectCandidates();
-  const rows = [];
   let loose = null;
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
     let docs = c.path;
     if (!/\/Documents$/.test(docs) && exists(docs + "/Documents")) docs = docs + "/Documents";
-    const isDir = exists(docs);
-    const cc = containerLike(docs);
-    const wr = isDir && writable(docs);
-    rows.push({ path: docs, source: c.source, dir: isDir, container: cc, writable: wr });
-    if (!wr) continue;
+    if (!exists(docs)) continue;
+    if (!writable(docs)) continue;
     if (loose === null) loose = docs;
-    if (cc) { pathReport = rows; return docs; }
+    if (containerLike(docs)) return docs;
   }
-  pathReport = rows;
   return loose;
 }
 
 function initPaths() {
-  docsPath = cfg.docs_path && writable(cfg.docs_path) ? cfg.docs_path : filesystemDir();
+  docsPath = filesystemDir();
   updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
   if (updatedPath !== null) mkdir(updatedPath);
 
   const chain = [];
-  if (cfg.log_path) chain.push(cfg.log_path);
   if (updatedPath !== null) chain.push(updatedPath + "/" + LOG_NAME);
   if (docsPath !== null) chain.push(docsPath + "/" + LOG_NAME);
   chain.push("/tmp/" + LOG_NAME);
@@ -269,377 +204,503 @@ function initPaths() {
   log("log opened at " + logPath);
 }
 
-function saveConfig(path) { writeText(path, JSON.stringify(DEFAULTS, null, 2) + "\n"); }
-
-function loadConfig() {
-  if (updatedPath === null) {
-    cfg = JSON.parse(JSON.stringify(DEFAULTS));
-    return;
-  }
-  const path = updatedPath + "/" + CFG_NAME;
-  const text = readText(path);
-  if (text === null) {
-    cfg = JSON.parse(JSON.stringify(DEFAULTS));
-    saveConfig(path);
-    log("config created " + path);
-    return;
-  }
-  try {
-    const parsed = JSON.parse(text);
-    cfg = Object.assign({}, DEFAULTS, parsed);
-    if (!cfg.rva || typeof cfg.rva !== "object") cfg.rva = DEFAULTS.rva;
-    if (POSITIONS.indexOf(cfg.position) === -1) cfg.position = DEFAULTS.position;
-    log("config loaded " + path);
-  } catch (e) {
-    cfg = JSON.parse(JSON.stringify(DEFAULTS));
-    log("config parse failed (" + e.message + "), defaults used");
-  }
-}
+let logPath = null;
+let docsPath = null;
+let updatedPath = null;
 
 // -------------------------------------------------------------------------
-// game bindings
+// game module
 // -------------------------------------------------------------------------
 
-function rva(name) {
-  const v = cfg.rva ? cfg.rva[name] : null;
-  if (v === null || v === undefined || v === "") return null;
-  try { return Process.mainModule.base.add(parseInt(String(v), 16)); } catch (e) { return null; }
+let gameModule = null;
+
+function skipModule(m) {
+  const path = m.path || "";
+  if (path.indexOf("/usr/lib/") === 0) return true;
+  if (path.indexOf("/System/") === 0) return true;
+  if (path.indexOf("/Developer/") === 0) return true;
+  if (m.name === "LiveContainer") return true;
+  if (m.name.indexOf("Frida") !== -1) return true;
+  if (m.size < 1024 * 1024) return true;
+  return false;
 }
 
-function nf(address, ret, args) {
-  if (address === null || address === undefined) return null;
-  try { return new NativeFunction(address, ret, args); } catch (e) { return null; }
-}
+function findGameModule() {
+  const modules = Process.enumerateModules();
+  let best = null;
 
-function bind() {
-  bindings = {};
-  for (const k in cfg.rva) {
-    const addr = rva(k);
-    bindings[k] = addr;
-    log("binding " + k + " = " + str(addr));
-  }
-}
+  const bundleId = (() => {
+    try { return String(ObjC.classes.NSBundle.mainBundle().bundleIdentifier()).toLowerCase(); } catch (e) { return ""; }
+  })();
+  const needle = bundleId.replace(/\./g, "");
 
-function strPtr(text) { return Memory.allocUtf8String(text); }
-
-function scPtr(text) {
-  const ctor = nf(bindings.String_ctor, "pointer", ["pointer", "pointer"]);
-  if (ctor === null) return strPtr(text);
-  try {
-    const buf = Memory.alloc(64);
-    ctor(buf, strPtr(text));
-    return buf;
-  } catch (e) {
-    return strPtr(text);
-  }
-}
-
-function setXY(ptr, x, y) {
-  const fn = nf(bindings.DisplayObject_setXY, "void", ["pointer", "float", "float"]);
-  if (fn !== null) {
-    try { fn(ptr, x, y); return; } catch (e) {}
-  }
-  try {
-    ptr.add(32).writeFloat(x);
-    ptr.add(36).writeFloat(y);
-  } catch (e) {}
-}
-
-function screenBounds() {
-  const instance = bindings.Stage_instance;
-  if (instance === null) return { rightX: 800, scale: 0.1 };
-  try {
-    const stage = instance.readPointer();
-    const f88 = stage.add(88).readFloat();
-    const f84 = stage.add(84).readFloat();
-    let scale = 0.1;
-    if (stage.add(7224).readFloat() !== 0) scale = stage.add(7232).readFloat();
-    const rightX = stage.add(7376).readInt() - (f84 + f88) / scale;
-    return { rightX: rightX, scale: scale };
-  } catch (e) {
-    return { rightX: 800, scale: 0.1 };
-  }
-}
-
-function positionXY(position) {
-  const bounds = screenBounds();
-  switch (position) {
-    case "top_left":     return { x: 40,                y: 40  };
-    case "top_right":    return { x: bounds.rightX - 40, y: 30  };
-    case "bottom_right": return { x: bounds.rightX - 40, y: 540 };
-    case "bottom_left":
-    default:             return { x: 40,                y: 540 };
-  }
-}
-
-function floater(message) {
-  const fn = nf(bindings.GUI_showFloaterTextAt, "void", ["pointer", "pointer", "float", "int"]);
-  if (fn === null) return;
-  try { fn(ptr(0), scPtr(message), 0, -1); } catch (e) {}
-}
-
-// -------------------------------------------------------------------------
-// MOD MENU button
-// -------------------------------------------------------------------------
-
-function createButton() {
-  if (!cfg.enabled) { log("button disabled in config"); return null; }
-  if (modMenuButton !== null) return modMenuButton;
-
-  const clipFn = nf(bindings.ResourceManager_getMovieClip, "pointer", ["pointer", "pointer"]);
-  const spriteCtor = nf(bindings.Sprite_ctor, "void", ["pointer", "int"]);
-  const gameBtnCtor = nf(bindings.GameButton_ctor, "void", ["pointer"]);
-  const dropGuiCtor = bindings.DropGUIContainer_ctor;
-  const tfByName = nf(bindings.MovieClip_getTextFieldByName, "pointer", ["pointer", "pointer"]);
-  const setText = nf(bindings.TextField_setText, "pointer", ["pointer", "pointer", "bool"]);
-
-  if (clipFn === null || gameBtnCtor === null) {
-    log("cannot create button: ResourceManager_getMovieClip or GameButton_ctor missing");
-    return null;
-  }
-
-  try {
-    const ptr = Memory.alloc(544);
-    if (spriteCtor !== null) spriteCtor(ptr, 1);
-
-    const clip = clipFn(strPtr("sc/ui.sc"), strPtr("map_editor_exit_button"));
-    if (clip === null || clip.isNull()) {
-      log("movie clip lookup failed (sc/ui.sc / map_editor_exit_button)");
-      return null;
+  for (let i = 0; i < modules.length; i++) {
+    const m = modules[i];
+    if (skipModule(m)) continue;
+    const hay = ((m.name || "") + " " + (m.path || "")).toLowerCase().replace(/\./g, "");
+    if (needle && hay.indexOf(needle) !== -1) {
+      gameModule = m;
+      log("game module matched by bundleId: " + m.name + " base=" + m.base + " size=" + m.size);
+      return m;
     }
+  }
 
-    try {
-      if (dropGuiCtor !== null) new NativeFunction(dropGuiCtor, "void", ["pointer", "pointer"])(ptr, clip);
-    } catch (e) {
-      log("DropGUIContainer ctor failed: " + e.message);
+  for (let i = 0; i < modules.length; i++) {
+    const m = modules[i];
+    if (skipModule(m)) continue;
+    if (m.path.indexOf(".app") === -1 && m.path.indexOf("Application") === -1) continue;
+    if (best === null || m.size > best.size) best = m;
+  }
+  if (best === null) {
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      if (skipModule(m)) continue;
+      if (best === null || m.size > best.size) best = m;
     }
+  }
+  if (best === null) best = Process.mainModule;
+  gameModule = best;
+  log("game module fallback (largest): " + best.name + " base=" + best.base + " size=" + best.size);
+  return best;
+}
 
-    gameBtnCtor(ptr);
+function gameBase() {
+  if (gameModule === null) findGameModule();
+  return gameModule.base;
+}
 
-    try {
-      const vtableMethod = ptr.readPointer().add(352).readPointer();
-      new NativeFunction(vtableMethod, "void", ["pointer", "pointer", "bool"])(ptr, clip, 1);
-    } catch (e) {
-      log("vtable attach failed: " + e.message);
+// -------------------------------------------------------------------------
+// string scan
+// -------------------------------------------------------------------------
+
+function hexPattern(text) {
+  if (!text) return null;
+  const parts = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c > 127) return null;
+    parts.push(("0" + c.toString(16)).slice(-2));
+  }
+  return parts.join(" ");
+}
+
+function collectReadableRanges() {
+  const ranges = [];
+  const seen = {};
+  const modes = ["r--", "rw-", "r-x"];
+  for (let i = 0; i < modes.length; i++) {
+    let list = [];
+    try { list = Process.enumerateRanges(modes[i]); } catch (e) { continue; }
+    for (let r = 0; r < list.length; r++) {
+      const range = list[r];
+      const key = range.base.toString();
+      if (seen[key] === true) continue;
+      seen[key] = true;
+      if (range.size <= 0) continue;
+      if (range.size > MAX_SCAN_REGION) continue;
+      ranges.push(range);
     }
+  }
+  return ranges;
+}
 
-    try {
-      const field = tfByName(clip, strPtr("txt"));
-      if (field !== null && !field.isNull() && setText !== null) {
-        setText(field, scPtr(cfg.text), 1);
+function findStrings(needles, ranges) {
+  const hits = [];
+  const byAddr = {};
+
+  for (let n = 0; n < needles.length; n++) {
+    const pattern = hexPattern(needles[n]);
+    if (pattern === null) {
+      log("anchor skipped (non-ascii): " + needles[n]);
+      continue;
+    }
+    for (let r = 0; r < ranges.length; r++) {
+      let matches = [];
+      try { matches = Memory.scanSync(ranges[r].base, ranges[r].size, pattern); } catch (e) { continue; }
+      for (let m = 0; m < matches.length; m++) {
+        const a = matches[m].address;
+        const key = a.toString();
+        if (byAddr[key] === undefined) {
+          byAddr[key] = { address: a, needles: [] };
+          hits.push(byAddr[key]);
+        }
+        if (byAddr[key].needles.indexOf(needles[n]) === -1) byAddr[key].needles.push(needles[n]);
       }
-    } catch (e) {
-      log("setText failed: " + e.message);
+    }
+  }
+  return hits;
+}
+
+// -------------------------------------------------------------------------
+// xref scan (ADRP + ADD imm)
+// -------------------------------------------------------------------------
+
+function pageOf(addr) {
+  return addr.and(ptr("0xFFFFFFFFFFFFF000"));
+}
+
+function findXrefs(targets) {
+  // targets: [{ address: NativePointer }]
+  const map = {};
+  for (let i = 0; i < targets.length; i++) {
+    map[targets[i].address.toString()] = targets[i];
+    targets[i].xrefs = [];
+  }
+
+  const execRanges = (() => {
+    try { return Process.enumerateRanges("r-x"); } catch (e) { return []; }
+  })();
+
+  for (let r = 0; r < execRanges.length; r++) {
+    const range = execRanges[r];
+    if (range.size > MAX_SCAN_REGION) continue;
+    let off = 0;
+    while (off < range.size) {
+      const take = Math.min(CHUNK_SIZE, range.size - off);
+      let buf = null;
+      try { buf = range.base.add(off).readByteArray(take); } catch (e) { break; }
+      if (buf === null) break;
+      const view = new DataView(buf);
+      const count = Math.floor(take / 4);
+      const regs = {};
+
+      for (let i = 0; i < count; i++) {
+        const insn = view.getUint32(i * 4, true);
+        const insnAddr = range.base.add(off + i * 4);
+        const family = (insn & 0x9f000000) >>> 0;
+
+        // ADRP
+        if (family === 0x90000000) {
+          let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
+          if (imm & 0x100000) imm -= 0x200000;
+          regs[insn & 0x1f] = pageOf(insnAddr).add(imm * 4096);
+          continue;
+        }
+        // ADR
+        if (family === 0x10000000) {
+          let imm = (((insn >>> 5) & 0x7ffff) << 2) | ((insn >>> 29) & 3);
+          if (imm & 0x100000) imm -= 0x200000;
+          const tgt = insnAddr.add(imm);
+          const hit = map[tgt.toString()];
+          if (hit && hit.xrefs.length < MAX_XREF_HITS) hit.xrefs.push(insnAddr);
+          continue;
+        }
+        // ADD (imm12)
+        if (((insn & 0xff800000) >>> 0) === 0x91000000) {
+          const from = regs[(insn >>> 5) & 0x1f];
+          if (from === undefined) continue;
+          const shift = (insn >>> 22) & 3;
+          const imm12 = (insn >>> 10) & 0xfff;
+          const val = shift === 1 ? from.add(imm12 * 4096) : from.add(imm12);
+          const hit = map[val.toString()];
+          if (hit && hit.xrefs.length < MAX_XREF_HITS) hit.xrefs.push(insnAddr);
+        }
+      }
+      off += take;
+    }
+  }
+}
+
+// -------------------------------------------------------------------------
+// backend scanner (все экспорты/символы во всех модулях)
+// -------------------------------------------------------------------------
+
+function backendScan() {
+  const names = Object.keys(ANCHORS);
+  const result = {};
+  const modules = Process.enumerateModules();
+
+  for (let i = 0; i < modules.length; i++) {
+    const m = modules[i];
+    if (skipModule(m)) continue;
+
+    let exports = [];
+    try { exports = Module.enumerateExports(m.name); } catch (e) { continue; }
+    for (let e = 0; e < exports.length; e++) {
+      const exp = exports[e];
+      const n = exp.name || "";
+      for (let k = 0; k < names.length; k++) {
+        const key = names[k];
+        const needles = ANCHORS[key];
+        for (let j = 0; j < needles.length; j++) {
+          if (n.indexOf(needles[j]) === -1) continue;
+          if (result[key] === undefined) result[key] = [];
+          const rva = exp.address.sub(m.base);
+          result[key].push({
+            module: m.name,
+            source: "export",
+            name: n,
+            rva: "0x" + rva.toString(16),
+            abs: exp.address.toString()
+          });
+          break;
+        }
+      }
     }
 
-    const pos = positionXY(cfg.position);
-    setXY(ptr, pos.x, pos.y);
-
-    modMenuButton = { ptr: ptr, clip: clip, x: pos.x, y: pos.y };
-    log("MOD MENU button created at " + pos.x + "," + pos.y + " pos=" + cfg.position);
-    return modMenuButton;
-  } catch (e) {
-    log("createButton error: " + e.message);
-    return null;
-  }
-}
-
-function destroyButton() {
-  if (modMenuButton === null) return;
-  try { modMenuButton.ptr.add(8).writeU8(0); } catch (e) {}
-  try { setXY(modMenuButton.ptr, 9999, 9999); } catch (e) {}
-  modMenuButton = null;
-  log("MOD MENU button removed");
-}
-
-function reposition() {
-  if (modMenuButton === null) return false;
-  const pos = positionXY(cfg.position);
-  setXY(modMenuButton.ptr, pos.x, pos.y);
-  modMenuButton.x = pos.x;
-  modMenuButton.y = pos.y;
-  log("MOD MENU button moved to " + pos.x + "," + pos.y + " pos=" + cfg.position);
-  return true;
-}
-
-function recreateButton() {
-  destroyButton();
-  return createButton();
-}
-
-// -------------------------------------------------------------------------
-// hooks
-// -------------------------------------------------------------------------
-
-function attachHooks() {
-  if (homePageHook === null && bindings.HomePage_ctor !== null) {
-    homePageHook = Interceptor.attach(bindings.HomePage_ctor, {
-      onEnter(args) { this.self = args[0]; },
-      onLeave() {
-        setTimeout(function () {
-          recreateButton();
-        }, 200);
+    if (m.size > 4 * 1024 * 1024) {
+      let syms = [];
+      try { syms = Module.enumerateSymbols(m.name); } catch (e) { syms = []; }
+      for (let s = 0; s < syms.length; s++) {
+        const sym = syms[s];
+        const n = sym.name || "";
+        for (let k = 0; k < names.length; k++) {
+          const key = names[k];
+          const needles = ANCHORS[key];
+          for (let j = 0; j < needles.length; j++) {
+            if (n.indexOf(needles[j]) === -1) continue;
+            if (result[key] === undefined) result[key] = [];
+            const rva = sym.address.sub(m.base);
+            result[key].push({
+              module: m.name,
+              source: "symbol",
+              name: n,
+              rva: "0x" + rva.toString(16),
+              abs: sym.address.toString()
+            });
+            break;
+          }
+        }
       }
-    });
-    log("hooked HomePage.ctor");
+    }
   }
 
-  if (closePopupHook === null && bindings.GUI_closePopup !== null) {
-    closePopupHook = Interceptor.attach(bindings.GUI_closePopup, {
-      onEnter() {
-        setTimeout(function () {
-          if (modMenuButton === null) createButton();
-          else reposition();
-        }, 300);
+  return result;
+}
+
+// -------------------------------------------------------------------------
+// string scan backend
+// -------------------------------------------------------------------------
+
+function stringScan() {
+  log("enumerating readable ranges");
+  const ranges = collectReadableRanges();
+  log("readable ranges: " + ranges.length);
+
+  const result = {};
+  const names = Object.keys(ANCHORS);
+
+  for (let i = 0; i < names.length; i++) {
+    const key = names[i];
+    log("scan strings for " + key);
+    const hits = findStrings(ANCHORS[key], ranges);
+    if (hits.length > 0) log("  string hits: " + hits.length);
+    result[key] = { strings: hits, functions: [] };
+  }
+
+  // собираем все найденные строки в один список для xref
+  const allStrings = [];
+  for (let i = 0; i < names.length; i++) {
+    const key = names[i];
+    const strings = result[key].strings;
+    for (let j = 0; j < strings.length; j++) allStrings.push(strings[j]);
+  }
+  log("total string hits: " + allStrings.length);
+
+  log("scanning xrefs (ADRP+ADD)...");
+  findXrefs(allStrings);
+  log("xrefs done");
+
+  const base = gameBase();
+  for (let i = 0; i < names.length; i++) {
+    const key = names[i];
+    const strings = result[key].strings;
+    const funcs = [];
+    const seenRva = {};
+    for (let j = 0; j < strings.length; j++) {
+      const xrefs = strings[j].xrefs || [];
+      for (let x = 0; x < xrefs.length; x++) {
+        const rva = xrefs[x].sub(base);
+        const rvaStr = "0x" + rva.toString(16);
+        if (seenRva[rvaStr] === true) continue;
+        seenRva[rvaStr] = true;
+        funcs.push({
+          string: strings[j].address.toString(),
+          needle: strings[j].needles[0],
+          xref: xrefs[x].toString(),
+          rva: rvaStr
+        });
       }
-    });
-    log("hooked GUI.closePopup");
+    }
+    result[key].functions = funcs;
   }
-}
 
-function detachHooks() {
-  if (homePageHook !== null) { try { homePageHook.detach(); } catch (e) {} homePageHook = null; }
-  if (closePopupHook !== null) { try { closePopupHook.detach(); } catch (e) {} closePopupHook = null; }
+  return result;
 }
 
 // -------------------------------------------------------------------------
-// lifecycle
+// main flow
 // -------------------------------------------------------------------------
 
-function environment() {
-  try { log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch + " pid=" + Process.id); } catch (e) {}
+function saveOffsets(result) {
+  if (updatedPath === null) return;
+  const path = updatedPath + "/" + RESULT_NAME;
+  if (writeText(path, JSON.stringify(result, null, 2) + "\n")) log("offsets written: " + path);
+
+  // плоский список — первый найденный RVA
+  const flat = {};
+  const keys = Object.keys(result);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const entry = result[key];
+    if (entry.functions && entry.functions.length > 0) {
+      flat[key] = entry.functions[0].rva;
+    } else if (entry.candidates && entry.candidates.length > 0) {
+      flat[key] = entry.candidates[0].rva;
+    }
+  }
+  const flatPath = updatedPath + "/offsets_flat.json";
+  if (writeText(flatPath, JSON.stringify(flat, null, 2) + "\n")) log("flat offsets written: " + flatPath);
+  return flat;
+}
+
+function run() {
+  log("=== offsets finder start ===");
+  initPaths();
+
   try {
     const device = ObjC.classes.UIDevice.currentDevice();
     log("device=" + str(device.systemName()) + " " + str(device.systemVersion()) + " " + str(device.model()));
   } catch (e) {}
-  try { log("bundle=" + bundlePath()); } catch (e) {}
-  try { log("bundleId=" + str(ObjC.classes.NSBundle.mainBundle().bundleIdentifier())); } catch (e) {}
-  try {
-    log("executable=" + Process.mainModule.path);
-    log("base=" + Process.mainModule.base + " code_signing=" + Process.codeSigningPolicy);
-  } catch (e) {}
-  log("documents=" + str(docsPath));
-  log("uuid=" + uuidIn(docsPath));
+  log("frida=" + Frida.version + " runtime=" + Script.runtime + " arch=" + Process.arch);
+  log("bundle=" + bundlePath());
+  log("docs=" + str(docsPath));
   log("updated=" + str(updatedPath));
-  log("log=" + str(logPath));
-  for (let i = 0; i < pathReport.length; i++) {
-    const r = pathReport[i];
-    log("candidate " + r.path + " [" + r.source + "] dir=" + r.dir + " container=" + r.container + " writable=" + r.writable);
-  }
-}
 
-function start(stage, parameters) {
-  if (started) return;
-  started = true;
-  initPaths();
-  log("=== modmenu start ===");
-  log("stage=" + str(stage) + " parameters=" + JSON.stringify(parameters === undefined ? {} : parameters));
-  environment();
-  loadConfig();
-  log("config enabled=" + cfg.enabled + " position=" + cfg.position + " text=" + cfg.text);
-  bind();
-  attachHooks();
-  const delays = cfg.reapply_ms || [];
-  for (let i = 0; i < delays.length; i++) {
-    setTimeout(function () {
-      log("reapply tick");
-      attachHooks();
-      if (modMenuButton === null) createButton();
-      else reposition();
-    }, delays[i]);
-  }
-  log("=== modmenu armed ===");
-}
+  const mod = findGameModule();
+  log("game module: " + mod.name + " base=" + mod.base + " size=" + mod.size);
+  const base = mod.base;
 
-function dispose() {
-  log("=== modmenu dispose ===");
-  detachHooks();
-  destroyButton();
-  started = false;
+  // 1) экспорты/символы
+  log("--- backend scan (exports/symbols) ---");
+  const backendHits = backendScan();
+  const backendKeys = Object.keys(backendHits);
+  for (let i = 0; i < backendKeys.length; i++) {
+    const k = backendKeys[i];
+    log("backend " + k + ": " + backendHits[k].length + " hits");
+    for (let j = 0; j < Math.min(3, backendHits[k].length); j++) {
+      const h = backendHits[k][j];
+      log("  " + h.source + " " + h.module + " " + h.name + " rva=" + h.rva);
+    }
+  }
+
+  // 2) строки + xref
+  log("--- string scan (needles + xref) ---");
+  const stringHits = stringScan();
+
+  // 3) собираем результат
+  const result = {};
+  const allKeys = Object.keys(ANCHORS);
+  for (let i = 0; i < allKeys.length; i++) {
+    const key = allKeys[i];
+    const candidates = (backendHits[key] || []).slice(0);
+    const funcs = (stringHits[key] && stringHits[key].functions) ? stringHits[key].functions : [];
+    result[key] = {
+      candidates: candidates,
+      functions: funcs,
+      strings: (stringHits[key] && stringHits[key].strings) ? stringHits[key].strings.map(function (s) {
+        return { address: s.address.toString(), needles: s.needles };
+      }) : []
+    };
+  }
+
+  log("--- summary ---");
+  for (let i = 0; i < allKeys.length; i++) {
+    const key = allKeys[i];
+    const e = result[key];
+    log(key + ": exports/symbols=" + e.candidates.length + " xrefs=" + e.functions.length + " strings=" + e.strings.length);
+    if (e.candidates.length > 0) log("  best(candidate) rva=" + e.candidates[0].rva + " (" + e.candidates[0].name + ")");
+    if (e.functions.length > 0) log("  best(xref)     rva=" + e.functions[0].rva + " needle=" + e.functions[0].needle);
+  }
+
+  saveOffsets(result);
+  log("=== offsets finder done ===");
 }
 
 // -------------------------------------------------------------------------
 // RPC
 // -------------------------------------------------------------------------
 
+let started = false;
+
 rpc.exports = {
-  init: function (stage, parameters) { start(stage, parameters); return true; },
-  dispose: function () { dispose(); return true; },
-  show: function () { return createButton() !== null; },
-  hide: function () { destroyButton(); return true; },
-  recreate: function () { recreateButton(); return true; },
-  setPosition: function (position) {
-    if (POSITIONS.indexOf(position) === -1) return false;
-    cfg.position = position;
-    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
-    const ok = reposition();
-    floater("Position: " + position);
-    return ok;
-  },
-  setText: function (text) {
-    cfg.text = str(text) || "MOD MENU";
-    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
-    recreateButton();
+  init: function () {
+    if (started) return true;
+    started = true;
+    setTimeout(run, 0);
     return true;
   },
-  setColor: function (r, g, b) {
-    cfg.color_rgb = [r | 0, g | 0, b | 0];
-    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
-    log("color set to rgb(" + cfg.color_rgb.join(",") + ")");
-    return cfg.color_rgb;
-  },
-  enable: function (flag) {
-    cfg.enabled = flag !== false;
-    if (updatedPath !== null) writeText(updatedPath + "/" + CFG_NAME, JSON.stringify(cfg, null, 2) + "\n");
-    if (cfg.enabled) createButton();
-    else destroyButton();
-    return cfg.enabled;
-  },
-  reload: function () {
-    loadConfig();
-    bind();
-    recreateButton();
-    return true;
-  },
-  info: function () {
-    return {
-      log: logPath,
-      documents: docsPath,
-      updated: updatedPath,
-      uuid: uuidIn(docsPath),
-      uuids: uuidsIn(docsPath),
-      bundle: bundlePath(),
-      candidates: pathReport,
-      enabled: cfg.enabled,
-      position: cfg.position,
-      text: cfg.text,
-      color_rgb: cfg.color_rgb,
-      button: modMenuButton === null ? null : {
-        x: modMenuButton.x,
-        y: modMenuButton.y,
-        ptr: str(modMenuButton.ptr),
-        clip: str(modMenuButton.clip)
-      },
-      bindings: (function () {
-        const out = {};
-        for (const k in bindings) out[k] = str(bindings[k]);
-        return out;
-      })(),
-      rva: cfg.rva
-    };
-  },
+  run: function () { run(); return true; },
   paths: function () {
     return {
-      documents: docsPath,
+      docs: docsPath,
       updated: updatedPath,
       log: logPath,
-      uuid: uuidIn(docsPath),
-      uuids: uuidsIn(docsPath),
       bundle: bundlePath(),
-      candidates: pathReport
+      uuid: uuidIn(docsPath)
     };
   },
-  positions: function () { return POSITIONS.slice(0); }
+  module: function () {
+    if (gameModule === null) findGameModule();
+    return {
+      name: gameModule.name,
+      base: gameModule.base.toString(),
+      size: gameModule.size,
+      path: gameModule.path
+    };
+  },
+  modules: function () {
+    const out = [];
+    const modules = Process.enumerateModules();
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      if ((m.path || "").indexOf("/usr/lib/") === 0) continue;
+      if ((m.path || "").indexOf("/System/") === 0) continue;
+      out.push({ name: m.name, base: m.base.toString(), size: m.size, path: m.path });
+    }
+    return out;
+  },
+  findExport: function (name) {
+    const hits = [];
+    const modules = Process.enumerateModules();
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      if (skipModule(m)) continue;
+      let addr = null;
+      try { addr = Module.findExportByName(m.name, name); } catch (e) {}
+      if (addr === null) continue;
+      hits.push({
+        module: m.name,
+        abs: addr.toString(),
+        rva: "0x" + addr.sub(m.base).toString(16)
+      });
+    }
+    return hits;
+  },
+  symbols: function (pattern) {
+    const out = [];
+    const modules = Process.enumerateModules();
+    for (let i = 0; i < modules.length; i++) {
+      const m = modules[i];
+      if (skipModule(m)) continue;
+      if (m.size < 2 * 1024 * 1024) continue;
+      let syms = [];
+      try { syms = Module.enumerateSymbols(m.name); } catch (e) { continue; }
+      for (let s = 0; s < syms.length; s++) {
+        const sym = syms[s];
+        if (pattern && (sym.name || "").indexOf(pattern) === -1) continue;
+        out.push({
+          module: m.name,
+          name: sym.name,
+          type: sym.type,
+          abs: sym.address.toString(),
+          rva: "0x" + sym.address.sub(m.base).toString(16)
+        });
+        if (out.length > 400) return out;
+      }
+    }
+    return out;
+  }
 };
 
-start("top-level", {});
+setTimeout(run, 0);
