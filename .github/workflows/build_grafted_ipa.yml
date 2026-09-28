@@ -32,15 +32,25 @@ jobs:
           set -euo pipefail
           echo "downloading ${FLORIDA_URL}"
           curl -fL --retry 3 -o W.stock.dylib "${FLORIDA_URL}"
+          echo "=== file ==="
           file W.stock.dylib
-          lipo -info W.stock.dylib
+          echo "=== lipo ==="
+          lipo -info W.stock.dylib || true
+          echo "=== arch ==="
+          otool -hv W.stock.dylib | head -5
 
-      - name: Extract arm64e slice
+      - name: Prepare binary
         run: |
           set -euo pipefail
-          lipo -thin arm64e -output W.thin.dylib W.stock.dylib
+          if lipo -info W.stock.dylib 2>/dev/null | grep -q "Non-fat"; then
+            echo "already thin, using as-is"
+            cp W.stock.dylib W.thin.dylib
+          else
+            echo "fat binary, extracting arm64e"
+            lipo -thin arm64e -output W.thin.dylib W.stock.dylib
+          fi
           file W.thin.dylib
-          echo "arm64e slice extracted"
+          lipo -info W.thin.dylib || true
 
       - name: Verify no frida strings
         run: |
@@ -50,6 +60,12 @@ jobs:
             echo "::warning::Frida strings still present"
           else
             echo "OK: no frida strings found"
+          fi
+          echo "=== check brk #0x539 ==="
+          if xxd -p W.thin.dylib | tr -d '\n' | grep -q "20a720d4"; then
+            echo "::warning::BRK #0x539 present"
+          else
+            echo "OK: no BRK #0x539"
           fi
 
       - name: Assemble Frida.framework
