@@ -4,9 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Nulls Brawl'
-      - 'scripts/frida-scripts/agent.js'
-      - '.github/workflows/build-patched.yml'
+      - "Nulls Brawl"
+      - "scripts/frida-scripts/agent.js"
+      - ".github/workflows/build-patched.yml"
   workflow_dispatch:
 
 permissions:
@@ -21,9 +21,9 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     env:
-      FRIDA_VERSION: '17.19.0'
-      GUM_GRAFT_VERSION: '17.19.0'
-      LDID_VERSION: 'v2.1.5-procursus7'
+      FRIDA_VERSION: "17.19.0"
+      GUM_GRAFT_VERSION: "17.19.0"
+      LDID_VERSION: "v2.1.5-procursus7"
 
     steps:
       - uses: actions/checkout@v4
@@ -31,26 +31,21 @@ jobs:
           lfs: true
           fetch-depth: 1
 
-      - name: Debug: list repo root
+      - name: Debug repo
         run: |
           set -euo pipefail
-          echo "=== pwd ==="
           pwd
-          echo "=== ls -la ==="
           ls -la
-          echo "=== find *nulls* (case-insensitive, depth 3) ==="
-          find . -maxdepth 3 -iname "*nulls*" -not -path "./.git/*" || echo "nothing found"
-          echo "=== git ls-files | grep -i nulls ==="
-          git ls-files | grep -i nulls || echo "nothing tracked"
-          echo "=== check-ignore ==="
-          git check-ignore -v "Nulls Brawl" || echo "not ignored"
+          find . -maxdepth 3 -iname "*nulls*" -not -path "./.git/*" || true
+          git ls-files | grep -i nulls || true
+          git check-ignore -v "Nulls Brawl" || true
 
       - name: Verify binary
         run: |
           set -euo pipefail
-          test -f "Nulls Brawl" || { echo "ERROR: 'Nulls Brawl' not found"; exit 1; }
+          test -f "Nulls Brawl"
           file "Nulls Brawl"
-          echo "size: $(stat -f%z "Nulls Brawl")"
+          stat -f%z "Nulls Brawl"
 
       - name: Cache gum-graft
         id: cache-gum-graft
@@ -68,28 +63,21 @@ jobs:
           chmod +x gum-graft
           file gum-graft
 
-      - name: Graft Nulls Brawl binary
+      - name: Graft Nulls Brawl
         run: |
           set -euo pipefail
           cp "Nulls Brawl" "Nulls Brawl.orig"
           echo "before: $(stat -f%z "Nulls Brawl")"
           set +e
-          ./gum-graft \
-            -m \
-            -i 0xd93d80 \
-            -i 0xb24820 \
-            -i 0xb24244 \
-            -i 0x9b5afc \
-            -i 0x62d890 \
-            "Nulls Brawl" 2>&1 | tail -40
+          ./gum-graft -m -i 0xd93d80 -i 0xb24820 -i 0xb24244 -i 0x9b5afc -i 0x62d890 "Nulls Brawl" 2>&1 | tail -40
           rc=$?
           set -e
-          echo "gum-graft exit code: $rc"
+          echo "exit code: $rc"
           echo "after: $(stat -f%z "Nulls Brawl")"
           otool -l "Nulls Brawl" | grep -iE "graft|__FRIDA" || echo "no graft sections"
           if [ "$rc" -ne 0 ]; then
-            echo "WARNING: gum-graft failed, reverting"
             cp "Nulls Brawl.orig" "Nulls Brawl"
+            echo "reverted"
           fi
           rm -f "Nulls Brawl.orig"
 
@@ -100,7 +88,7 @@ jobs:
           path: W.thin.dylib
           key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin
 
-      - name: Download and thin Frida Gadget
+      - name: Download Frida Gadget
         if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
@@ -111,11 +99,12 @@ jobs:
           rm -f W.fat.dylib
           echo "thin: $(stat -f%z W.thin.dylib)"
 
-      - name: Install ldid runtime deps
+      - name: Install ldid deps
         run: brew install pkg-config libplist openssl@3
 
-      - uses: actions/cache@v4
+      - name: Cache ldid
         id: cache-ldid
+        uses: actions/cache@v4
         with:
           path: ldid-bin
           key: ldid-${{ env.LDID_VERSION }}-macos-arm64
@@ -132,10 +121,9 @@ jobs:
           export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
           git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null || git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
           cd ldid-src
-          make CXXFLAGS="-O2 -pipe" -j$(sysctl -n hw.ncpu)
+          make CXXFLAGS="-O2 -pipe" -j"$(sysctl -n hw.ncpu)"
           cp ldid ../ldid-bin/ldid
           chmod +x ../ldid-bin/ldid
-          otool -L ../ldid-bin/ldid
 
       - name: Build Frida.framework
         run: |
@@ -191,24 +179,13 @@ jobs:
           xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
           cp build/Release/insert_dylib "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
           chmod +x "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
-          file "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
 
       - name: Inject load command
         run: |
           set -euo pipefail
-          echo "=== before inject ==="
-          ls -la "Nulls Brawl"
-          otool -L "Nulls Brawl" | grep -i frida || echo "no frida load command yet"
-
-          ./insert_dylib-bin/insert_dylib \
-            --weak --all-yes \
-            "@executable_path/Frameworks/Frida.framework/W.dylib" \
-            "Nulls Brawl" "Nulls Brawl.patched"
-
+          ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl" "Nulls Brawl.patched"
           mv "Nulls Brawl.patched" "Nulls Brawl"
           chmod +x "Nulls Brawl"
-
-          echo "=== after inject ==="
           otool -L "Nulls Brawl" | grep -i frida
 
       - name: Sign
@@ -216,9 +193,6 @@ jobs:
           set -euo pipefail
           ./ldid-bin/ldid -S Frida.framework/W.dylib
           ./ldid-bin/ldid -S "Nulls Brawl"
-          echo "=== signed ==="
-          ls -la "Nulls Brawl"
-          ls -la Frida.framework/W.dylib
 
       - uses: actions/upload-artifact@v4
         with:
