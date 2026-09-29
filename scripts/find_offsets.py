@@ -7,13 +7,11 @@ import time
 import traceback
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
-OFF_OUT = os.path.join(WS, "offsets_resolved.js")
+OUT = os.path.join(WS, "offsets_resolved.js")
 REPORT = os.path.join(WS, "debug_menu_report.txt")
-BUDGET_SEC = 1800
-START = time.time()
 BASE = 0x100000000
-
-L = []
+BUDGET = 1500
+START = time.time()
 
 def log(m):
     sys.stdout.write(m + "\n")
@@ -28,13 +26,13 @@ def rva(a):
 def to_addr(r):
     return toAddr(BASE + r)
 
-def build_string_index():
+def build_index():
     listing = currentProgram.getListing()
     idx = {}
     it = listing.getDefinedData(True)
     total = 0
     while it.hasNext():
-        if time.time() - START > BUDGET_SEC - 300:
+        if time.time() - START > BUDGET - 300:
             break
         try:
             d = it.next()
@@ -50,10 +48,10 @@ def build_string_index():
             idx.setdefault(s, []).append(d.getAddress())
         except:
             continue
-    log("[*] indexed strings: %d (unique: %d)" % (total, len(idx)))
+    log("[*] strings: %d unique: %d" % (total, len(idx)))
     return idx
 
-def strings_containing(idx, needle, limit=20):
+def strings_with(idx, needle, limit=30):
     out = []
     for s, addrs in idx.items():
         if needle in s:
@@ -63,18 +61,18 @@ def strings_containing(idx, needle, limit=20):
                     return out
     return out
 
-def find_refs(addr):
+def find_refs(a):
     out = []
     try:
         rm = currentProgram.getReferenceManager()
-        it = rm.getReferencesTo(addr).iterator()
+        it = rm.getReferencesTo(a).iterator()
         while it.hasNext():
             out.append(it.next().getFromAddress())
     except:
         pass
     return out
 
-def dump_func(f):
+def dump_func(f, max_instr=60):
     if f is None:
         log("    <no function>")
         return
@@ -88,7 +86,7 @@ def dump_func(f):
         if i is None:
             continue
         n += 1
-        if n > 40:
+        if n > max_instr:
             log("    ...")
             break
         try:
@@ -96,88 +94,80 @@ def dump_func(f):
         except:
             continue
 
-def analyze(entry):
+def analyze_entry(entry):
     f = getFunctionAt(entry)
     if f is None:
         return
-    log("    --- body of 0x%x %s ---" % (rva(entry), f.getName()))
+    log("    --- 0x%x %s ---" % (rva(entry), f.getName()))
     dump_func(f)
 
 def main():
-    log("=== find_offsets_v6 ===")
+    log("=== find_debug_menu ===")
     log("program: %s" % currentProgram.getName())
 
-    idx = build_string_index()
+    idx = build_index()
     if not idx:
-        log("[!] string index empty")
+        log("[!] empty index")
         return
 
-    targets = {}
+    # ТОЛЬКО реальные якоря Brawl Stars из SCRE
+    ANCHORS = [
+        "sc/debug.sc",
+        "debug.sc",
+        "debug_tex.sc",
+        "debug_menu_button",
+        "debug_menu_text",
+        "addResourcesToLoad",
+        "TID_CONNECTING_TO_SERVER",
+        "OfflineMode",
+        "OFFLINE_MODE",
+        "GameMode",
+    ]
 
-    log("")
-    log("[*] getBool via DisableIngameFriends")
-    hits = strings_containing(idx, "DisableIngameFriends", 5)
-    for s, a in hits:
-        log("  string %r @ 0x%x" % (s[:40], rva(a)))
-        for ra in find_refs(a):
-            f = getFunctionContaining(ra)
-            if f is None:
-                continue
-            fr = rva(f.getEntryPoint())
-            log("    used in 0x%x %s" % (fr, f.getName()))
-            targets.setdefault("getBool", set()).add(fr)
-
-    for key in ["isDevBuild", "isDeveloperBuild", "isDev", "isProduction", "isProd"]:
-        log("")
-        log("[*] %s" % key)
-        hits = strings_containing(idx, key, 10)
+    candidates = {}
+    for key in ANCHORS:
+        hits = strings_with(idx, key, 20)
         if not hits:
-            log("  no strings")
+            log("")
+            log("[*] %s: NOT FOUND" % key)
             continue
+        log("")
+        log("[*] %s: %d string(s)" % (key, len(hits)))
         for s, a in hits:
-            log("  string %r @ 0x%x" % (s[:60], rva(a)))
+            log("  %r @ 0x%x" % (s[:80], rva(a)))
             for ra in find_refs(a):
                 f = getFunctionContaining(ra)
                 if f is None:
                     continue
                 fr = rva(f.getEntryPoint())
-                log("    used in 0x%x %s" % (fr, f.getName()))
-                targets.setdefault(key, set()).add(fr)
+                candidates.setdefault(fr, set()).add(key)
+                log("    xref 0x%x -> func 0x%x %s" % (rva(ra), fr, f.getName()))
 
     log("")
-    log("=== BODIES OF OLD OFFSETS ===")
-    for name, val in [("old_getBool", 0xb24820), ("old_isDev", 0xd93d80), ("old_isDevBuild", 0xd93da0)]:
+    log("=== BODIES ===")
+    for fr in sorted(candidates.keys()):
         log("")
-        log("--- %s @ 0x%x ---" % (name, val))
-        analyze(to_addr(val))
-
-    log("")
-    log("=== BODIES OF CANDIDATES ===")
-    for key, entries in sorted(targets.items()):
-        for fr in sorted(entries):
-            log("")
-            log("--- %s candidate @ 0x%x ---" % (key, fr))
-            analyze(to_addr(fr))
+        log("--- 0x%x  keys=%s ---" % (fr, ",".join(sorted(candidates[fr]))))
+        analyze_entry(to_addr(fr))
 
     log("")
     log("=== SUMMARY ===")
-    for key, entries in sorted(targets.items()):
-        for fr in sorted(entries):
-            log("  %s: 0x%x" % (key, fr))
+    for fr in sorted(candidates.keys()):
+        log("  0x%x  %s" % (fr, ",".join(sorted(candidates[fr]))))
 
-    with open(OFF_OUT, "w") as fh:
+    with open(OUT, "w") as fh:
         fh.write("export const offsets = Object.freeze({\n")
-        for key, entries in sorted(targets.items()):
-            fr = sorted(entries)[0]
-            fh.write("  %s: 0x%x,\n" % (key, fr))
+        for fr in sorted(candidates.keys()):
+            keys = "_".join(sorted(candidates[fr])).replace("/", "_").replace(" ", "_")
+            fh.write("  hook_%s: 0x%x,\n" % (keys, fr))
         fh.write("});\n")
 
     with open(REPORT, "w") as fh:
-        for line in L:
-            fh.write(line + "\n")
+        fh.write("candidates: %d\n" % len(candidates))
+        for fr in sorted(candidates.keys()):
+            fh.write("  0x%x  %s\n" % (fr, ",".join(sorted(candidates[fr]))))
 
-    log("")
-    log("[+] wrote %s" % OFF_OUT)
+    log("[+] wrote %s" % OUT)
 
 try:
     main()
