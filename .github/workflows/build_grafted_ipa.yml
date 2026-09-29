@@ -1,24 +1,15 @@
-name: Build Patched Nulls Brawl (with Frida.framework)
+name: Build Patched Nulls Brawl
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Nulls Brawl'
-      - '.github/workflows/build-patched.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       FRIDA_VERSION: '17.19.0'
       GUM_GRAFT_VERSION: '17.19.0'
@@ -34,25 +25,7 @@ jobs:
           set -euo pipefail
           test -f "Nulls Brawl"
           file "Nulls Brawl"
-          stat -f%z "Nulls Brawl"
-
-      - name: Cache Frida Gadget thin
-        id: cache-gadget
-        uses: actions/cache@v4
-        with:
-          path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin
-
-      - name: Download and thin Frida Gadget
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          curl -fL --retry 3 -o gadget.xz "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
-          xz -d gadget.xz
-          mv gadget W.fat.dylib
-          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          rm -f W.fat.dylib
-          echo "thin: $(stat -f%z W.thin.dylib)"
+          echo "size: $(stat -f%z "Nulls Brawl")"
 
       - name: Cache gum-graft
         id: cache-gum-graft
@@ -69,7 +42,7 @@ jobs:
           xz -d gum-graft.xz
           chmod +x gum-graft
 
-      - name: Graft binary
+      - name: Graft Nulls Brawl binary
         run: |
           set -euo pipefail
           cp "Nulls Brawl" "Nulls Brawl.orig"
@@ -82,16 +55,35 @@ jobs:
             -i 0xb24244 \
             -i 0x9b5afc \
             -i 0x62d890 \
-            "Nulls Brawl" 2>&1 | tail -30
+            "Nulls Brawl" 2>&1 | tail -40
           rc=$?
           set -e
-          echo "gum-graft exit code: $rc"
+          echo "exit code: $rc"
           echo "after: $(stat -f%z "Nulls Brawl")"
           otool -l "Nulls Brawl" | grep -iE "graft|__FRIDA" || echo "no graft sections"
           if [ "$rc" -ne 0 ]; then
             cp "Nulls Brawl.orig" "Nulls Brawl"
-            echo "reverted to original (gum-graft failed)"
+            echo "reverted (gum-graft failed)"
           fi
+          rm -f "Nulls Brawl.orig"
+
+      - name: Cache Frida Gadget
+        id: cache-gadget
+        uses: actions/cache@v4
+        with:
+          path: W.thin.dylib
+          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin
+
+      - name: Download and thin Frida Gadget
+        if: steps.cache-gadget.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o gadget.xz "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          xz -d gadget.xz
+          mv gadget W.fat.dylib
+          lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+          rm -f W.fat.dylib
+          echo "thin: $(stat -f%z W.thin.dylib)"
 
       - name: Install ldid runtime deps
         run: brew install pkg-config libplist openssl@3
