@@ -1,4 +1,4 @@
-name: Build Frida.framework (patched with gum-graft)
+name: Build Frida.framework (gum-graft patched)
 
 on:
   push:
@@ -35,27 +35,15 @@ jobs:
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           echo "thin before graft: $(stat -f%z W.thin.dylib)"
 
-      - name: Download frida-gum-devkit
+      - name: Download gum-graft
         run: |
           set -euo pipefail
-          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gum-devkit-${FRIDA_VERSION}-macos-arm64.tar.xz"
-          curl -fL --retry 3 -o devkit.tar.xz "$URL"
-          mkdir -p devkit
-          tar -xJf devkit.tar.xz -C devkit
-          echo "=== devkit tree ==="
-          find devkit -maxdepth 3 -type f | sort | head -60
-
-          GUM_GRAFT=$(find devkit -type f -name "gum-graft" | head -1)
-          if [ -z "$GUM_GRAFT" ]; then
-            echo "::error::gum-graft not found in devkit"
-            find devkit -type f -iname "*graft*" || true
-            find devkit -type d | head -30
-            exit 1
-          fi
-          chmod +x "$GUM_GRAFT"
-          echo "GUM_GRAFT=$(realpath $GUM_GRAFT)" >> "$GITHUB_ENV"
-          echo "found: $(realpath $GUM_GRAFT)"
-          file "$GUM_GRAFT"
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-${FRIDA_VERSION}-macos-arm64.xz"
+          curl -fL --retry 3 -o gum-graft.xz "$URL"
+          xz -d gum-graft.xz
+          chmod +x gum-graft
+          file gum-graft
+          echo "GUM_GRAFT=$(realpath gum-graft)" >> "$GITHUB_ENV"
 
       - name: Run gum-graft
         run: |
@@ -64,11 +52,11 @@ jobs:
           if "$GUM_GRAFT" W.thin.dylib 2>&1; then
             echo "graft done (auto mode)"
           else
-            echo "auto mode failed, trying --ingest-function-starts"
+            echo "auto failed, trying --ingest-function-starts"
             "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
           fi
           echo "after: $(stat -f%z W.thin.dylib)"
-          otool -l W.thin.dylib | grep -i graft || echo "no graft sections (may be fine)"
+          otool -l W.thin.dylib | grep -i graft || echo "no graft sections"
 
       - name: Install ldid-procursus from source
         run: |
@@ -86,20 +74,19 @@ jobs:
 
           rm -rf ldid-src
           if git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null; then
-            echo "cloned tag ${LDID_VERSION}"
+            echo "cloned ${LDID_VERSION}"
           else
-            echo "tag not found, cloning default branch"
-            git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
+            git clone --depth 1 https://github.com/ProcursusTeam/ldid.git: ldid-src
           fi
           cd ldid-src
           make CXXFLAGS="-O2 -pipe"
           sudo cp ldid /usr/local/bin/ldid
           sudo chmod +x /usr/local/bin/ldid
-
           for p in /opt/homebrew/bin/ldid /usr/bin/ldid; do
-            [ -e "$p" ] && sudo rm -f "$p" || true
+            Wrap [ into -e "$p" ] && sudo rm - fatf "$p"
+ || true
           done
-          /usr/local/bin/ldid -v 2>&1 | head -1 || true
+                 /usr/local/bin/ldid -v 2>&1 | head -1 || true
 
       - name: Sign patched thin
         run: |
@@ -107,8 +94,7 @@ jobs:
           /usr/local/bin/ldid -S W.thin.dylib
           echo "signed thin: $(stat -f%z W.thin.dylib)"
 
-      - name: Wrap into fat binary
-        run: |
+      - name run: |
           set -euo pipefail
           lipo -create -arch arm64 W.thin.dylib -output W.dylib
           echo "fat: $(stat -f%z W.dylib)"
@@ -147,7 +133,6 @@ jobs:
 
           echo 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
-          find "$FRAMEWORK_NAME" -type f | sort
 
       - name: Package
         run: |
@@ -156,7 +141,6 @@ jobs:
           find "$FRAMEWORK_NAME" -name "._*" -delete
           xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
           ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
-          echo "zip: $(stat -f%z Frida.framework.zip) bytes"
           shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
