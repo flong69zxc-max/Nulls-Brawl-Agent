@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -f "Nulls Brawl" ]; then
-            echo "ERROR: file 'Nulls Brawl' not found in repo root"
+            echo "ERROR: file not found"
             exit 1
           fi
           file "Nulls Brawl"
@@ -43,21 +43,14 @@ jobs:
       - name: Install toolchain
         run: |
           set -euo pipefail
-          npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts \
-            "esbuild@0.28.2" \
-            "frida-objc-bridge@8.0.6"
+          npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts esbuild@0.28.2 frida-objc-bridge@8.0.6
 
       - name: Compile agent.js
         run: |
           set -euo pipefail
           mkdir -p build
-          ./node_modules/.bin/esbuild scripts/frida-scripts/agent.js \
-            --bundle --format=esm --target=es2020 --minify \
-            --legal-comments=none \
-            --banner:js='"use strict";' \
-            --outfile=build/agent.js
+          ./node_modules/.bin/esbuild scripts/frida-scripts/agent.js --bundle --format=esm --target=es2020 --minify --legal-comments=none --banner:js='"use strict";' --outfile=build/agent.js
           ls -la build/agent.js
-          head -c 200 build/agent.js
 
       - name: Download Frida Gadget
         run: |
@@ -93,53 +86,48 @@ jobs:
           otool -L ../ldid-bin/ldid
 
       - name: Build Frida.framework
-        run
-: |
+        run: |
           set -euo pipefail
-          rm -rf Frida.framework          mkdir -p Frida.framework
+          rm -rf Frida.framework
+          mkdir -p Frida.framework
           cp W.thin.dylib Frida.framework/W.dylib
           cp build/agent.js Frida.framework/agent.js
-
-          cat > Frida.framework/Info.plist <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>W.dylib</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.19.0</string>
-              <key>CFBundleVersion</key>
-              <string>17.19.0</string>
-              <key>CFBundleName</key>
-              <string>Frida</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleSupportedPlatforms</key>
-              <array>
-                  <string>iPhoneOS</string>
-              </array>
-              <key>DTPlatformName</key>
-              <string>iphoneos</string>
-              <key>MinimumOSVersion</key>
-              <string>12.0</string>
-          </dict>
-          </plist>
-          PLIST
-
-          cat > Frida.framework/W.config <<'CONFIG'
-          {
-            "interaction": {
-              "type": "script",
-              "path": "agent.js",
-              "on_change": "ignore"
-            },
-            "code_signing": "required"
-          }
-          CONFIG
-
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>CFBundleExecutable</key>' \
+            '    <string>W.dylib</string>' \
+            '    <key>CFBundleIdentifier</key>' \
+            '    <string>re.frida.gadget</string>' \
+            '    <key>CFBundleShortVersionString</key>' \
+            '    <string>17.19.0</string>' \
+            '    <key>CFBundleVersion</key>' \
+            '    <string>17.19.0</string>' \
+            '    <key>CFBundleName</key>' \
+            '    <string>Frida</string>' \
+            '    <key>CFBundlePackageType</key>' \
+            '    <string>FMWK</string>' \
+            '    <key>CFBundleSupportedPlatforms</key>' \
+            '    <array><string>iPhoneOS</string></array>' \
+            '    <key>DTPlatformName</key>' \
+            '    <string>iphoneos</string>' \
+            '    <key>MinimumOSVersion</key>' \
+            '    <string>12.0</string>' \
+            '</dict>' \
+            '</plist>' \
+            > Frida.framework/Info.plist
+          printf '%s\n' \
+            '{' \
+            '  "interaction": {' \
+            '    "type": "script",' \
+            '    "path": "agent.js",' \
+            '    "on_change": "ignore"' \
+            '  },' \
+            '  "code_signing": "required"' \
+            '}' \
+            > Frida.framework/W.config
           plutil -lint Frida.framework/Info.plist
           ls -la Frida.framework/
 
@@ -158,19 +146,14 @@ jobs:
         run: |
           set -euo pipefail
           cp "Nulls Brawl" "Nulls Brawl.orig"
-
           ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl.orig" "Nulls Brawl"
           chmod +x "Nulls Brawl"
           rm -f "Nulls Brawl.orig"
-
           echo "=== LC_RPATH before ==="
           otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
-
-          echo "=== adding rpath ==="
-          install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl" || echo "rpath may already exist"
-
+          install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl" || echo "rpath already exists"
           echo "=== LC_RPATH after ==="
-          otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
+          otool -l "Nulls Brawl" | grep -A2 LC_RPATH
           otool -L "Nulls Brawl" | grep -i frida || echo "no frida dylib in LC_LOAD_DYLIB"
 
       - name: Sign
