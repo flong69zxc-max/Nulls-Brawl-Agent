@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 30
     env:
       FRIDA_VERSION: "17.19.0"
+      GUM_GRAFT_VERSION: "17.19.0"
       LDID_VERSION: "v2.1.5-procursus7"
 
     steps:
@@ -66,7 +67,69 @@ jobs:
             --banner:js='"use strict";' \
             --outfile=build/agent.js
           ls -la build/agent.js
-          head -c 200 build/agent.js
+
+      - name: Cache gum-graft
+        id: cache-gum-graft
+        uses: actions/cache@v4
+        with:
+          path: gum-graft
+          key: gum-graft-${{ env.GUM_GRAFT_VERSION }}-macos-arm64
+
+      - name: Download gum-graft
+        if: steps.cache-gum-graft.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o gum-graft.xz "https://github.com/frida/frida/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.xz"
+          xz -d gum-graft.xz
+          chmod +x gum-graft
+          file gum-graft
+
+      - name: Show gum-graft help
+        run: |
+          set -euo pipefail
+          ./gum-graft --help 2>&1 | head -40
+
+      - name: Try graft (user syntax)
+        run: |
+          set -euo pipefail
+          cp "Nulls Brawl" "Nulls Brawl.orig"
+          echo "before: $(stat -f%z "Nulls Brawl")"
+          set +e
+          ./gum-graft \
+            --ingest-function-starts \
+            --offset 0xb24820 \
+            --offset 0xd93d80 \
+            "Nulls Brawl" 2>&1 | tail -40
+          rc=$?
+          set -e
+          echo "exit code: $rc"
+          echo "after: $(stat -f%z "Nulls Brawl")"
+          if [ "$rc" -ne 0 ]; then
+            echo "user syntax failed, trying -i syntax"
+            cp "Nulls Brawl.orig" "Nulls Brawl"
+            set +e
+            ./gum-graft \
+              -s \
+              -i 0xb24820 \
+              -i 0xd93d80 \
+              "Nulls Brawl" 2>&1 | tail -40
+            rc=$?
+            set -e
+            echo "second exit code: $rc"
+            echo "after2: $(stat -f%z "Nulls Brawl")"
+            if [ "$rc" -ne 0 ]; then
+              cp "Nulls Brawl.orig" "Nulls Brawl"
+              echo "reverted"
+            fi
+          fi
+          rm -f "Nulls Brawl.orig"
+          otool -l "Nulls Brawl" | grep -iE "graft|__FRIDA|__TEXT" | head -20
+
+      - name: Codesign binary after graft
+        run: |
+          set -euo pipefail
+          codesign --force --sign - "Nulls Brawl" 2>&1 || true
+          codesign -dv "Nulls Brawl" 2>&1 | head -10 || true
 
       - name: Cache Frida Gadget
         id: cache-gadget
@@ -180,6 +243,7 @@ jobs:
           set -euo pipefail
           ./ldid-bin/ldid -S Frida.framework/W.dylib
           ./ldid-bin/ldid -S "Nulls Brawl"
+          codesign --force --sign - "Nulls Brawl" 2>&1 || true
           echo "signed"
 
       - uses: actions/upload-artifact@v4
