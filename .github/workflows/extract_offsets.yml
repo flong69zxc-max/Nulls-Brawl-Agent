@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHE_EPOCH: r2-v3
+  CACHE_EPOCH: r2-v4
   R2_VER: "5.9.8"
 
 jobs:
@@ -118,30 +118,35 @@ jobs:
         id: cache-r2
         with:
           path: r2_build
-          key: r2-build-${{ env.R2_VER }}-arm64-v2
+          key: r2-build-${{ env.R2_VER }}-arm64-${{ env.CACHE_EPOCH }}
 
       - name: Build radare2
-        if: steps.cache-r2.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          rm -rf /tmp/r2src /tmp/r2-install r2_build
+          if [ -x "$GITHUB_WORKSPACE/r2_build/bin/r2" ]; then
+            echo "radare2 already present in r2_build, skipping build"
+            "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
+            exit 0
+          fi
+          echo "no r2_build/bin/r2 -- building from source"
+          rm -rf /tmp/r2src /tmp/r2-install "$GITHUB_WORKSPACE/r2_build"
           git clone --depth 1 --branch ${{ env.R2_VER }} \
             https://github.com/radareorg/radare2.git /tmp/r2src
           cd /tmp/r2src
-          ./configure --prefix=/tmp/r2-install --with-rpath
+          ./configure --prefix=/tmp/r2-install
           make -j$(nproc)
           make install
-          mkdir -p r2_build
-          cp -aL /tmp/r2-install/. r2_build/
-          ls -la r2_build/bin/ | head
-          r2_build/bin/r2 -v
+          mkdir -p "$GITHUB_WORKSPACE/r2_build"
+          cp -aL /tmp/r2-install/. "$GITHUB_WORKSPACE/r2_build/"
+          ls -la "$GITHUB_WORKSPACE/r2_build/bin/" | head
+          "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
 
       - name: Setup radare2 PATH
         run: |
           set -euo pipefail
+          test -x "$GITHUB_WORKSPACE/r2_build/bin/r2"
           echo "$GITHUB_WORKSPACE/r2_build/bin" >> "$GITHUB_PATH"
           echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64" >> "$GITHUB_ENV"
-          ls -la "$GITHUB_WORKSPACE/r2_build/bin/" | head
 
       - uses: actions/setup-python@v5
         with:
