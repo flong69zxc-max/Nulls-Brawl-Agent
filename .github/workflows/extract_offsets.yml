@@ -118,27 +118,29 @@ jobs:
         id: cache-r2
         with:
           path: r2_build
-          key: r2-build-${{ env.R2_VER }}-arm64-v1
+          key: r2-build-${{ env.R2_VER }}-arm64-v2
 
       - name: Build radare2
         if: steps.cache-r2.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          rm -rf /tmp/r2src
+          rm -rf /tmp/r2src /tmp/r2-install r2_build
           git clone --depth 1 --branch ${{ env.R2_VER }} \
             https://github.com/radareorg/radare2.git /tmp/r2src
           cd /tmp/r2src
-          ./sys/user.sh --without-pull --prefix=/tmp/r2-install
-          rm -rf r2_build
+          ./configure --prefix=/tmp/r2-install --with-rpath
+          make -j$(nproc)
+          make install
           mkdir -p r2_build
-          cp -a /tmp/r2-install/. r2_build/
+          cp -aL /tmp/r2-install/. r2_build/
+          ls -la r2_build/bin/ | head
           r2_build/bin/r2 -v
 
       - name: Setup radare2 PATH
         run: |
           set -euo pipefail
           echo "$GITHUB_WORKSPACE/r2_build/bin" >> "$GITHUB_PATH"
-          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:$GITHUB_WORKSPACE/r2_build/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64" >> "$GITHUB_ENV"
           ls -la "$GITHUB_WORKSPACE/r2_build/bin/" | head
 
       - uses: actions/setup-python@v5
@@ -182,8 +184,8 @@ jobs:
           set -euo pipefail
           which r2
           r2 -v
-          r2 -N -q -c 'q' "$GITHUB_WORKSPACE/r2_session/brawl_bin" || true
-          echo "r2 on binary: exit=$?"
+          r2 -N -q -c 'q' "$GITHUB_WORKSPACE/r2_session/brawl_bin"
+          echo "r2 on binary: ok"
 
       - name: Run find_offsets_r2
         env:
