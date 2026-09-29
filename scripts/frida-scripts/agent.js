@@ -233,27 +233,38 @@ function findGrafterExports() {
   ];
   const found = {};
   const mods = Process.enumerateModules();
+
   for (let i = 0; i < mods.length; i++) {
     const m = mods[i];
-    if (m.name.indexOf("Frida") === -1 && m.name.indexOf("frida") === -1) continue;
+    if (!m.path) continue;
+    const p = m.path.toLowerCase();
+    if (p.indexOf("frida") === -1 && p.indexOf("gadget") === -1 && p.indexOf("gum") === -1) continue;
+
     for (let j = 0; j < names.length; j++) {
       const n = names[j];
       if (found[n]) continue;
       try {
         const addr = Module.findExportByName(m.name, n);
-        if (addr) found[n] = addr;
+        if (addr) {
+          found[n] = addr;
+          log("graft: found " + n + " in " + m.name + " @ " + addr);
+        }
       } catch (e) {}
     }
   }
-  if (!found["gum_darwin_grafter_new_from_file"]) {
-    try { found["gum_darwin_grafter_new_from_file"] = Module.getGlobalExportByName("gum_darwin_grafter_new_from_file"); } catch (e) {}
+
+  for (let j = 0; j < names.length; j++) {
+    const n = names[j];
+    if (found[n]) continue;
+    try {
+      const addr = Module.getGlobalExportByName(n);
+      if (addr) {
+        found[n] = addr;
+        log("graft: found " + n + " globally @ " + addr);
+      }
+    } catch (e) {}
   }
-  if (!found["gum_darwin_grafter_add"]) {
-    try { found["gum_darwin_grafter_add"] = Module.getGlobalExportByName("gum_darwin_grafter_add"); } catch (e) {}
-  }
-  if (!found["gum_darwin_grafter_graft"]) {
-    try { found["gum_darwin_grafter_graft"] = Module.getGlobalExportByName("gum_darwin_grafter_graft"); } catch (e) {}
-  }
+
   return found;
 }
 
@@ -263,7 +274,7 @@ function graftTrampolines(binaryPath) {
 
   const ex = findGrafterExports();
   if (!ex["gum_darwin_grafter_new_from_file"] || !ex["gum_darwin_grafter_add"] || !ex["gum_darwin_grafter_graft"]) {
-    log("graft: gum_* not found");
+    log("graft: gum_* not found in any loaded module");
     return "unavailable";
   }
 
