@@ -120,16 +120,16 @@ jobs:
           cp build/agent.js Frida.framework/agent.js
           cat > Frida.framework/Info.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1             .0.dtd">
-          < <plist version="1.key0">
-          <dict>>
-              <CFkey>CFBundleExecutable</key><string>W.dylib</string>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key><string>W.dylib</string>
               <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
               <key>CFBundleShortVersionString</key><string>17.19.0</string>
               <key>CFBundleVersion</key><string>17.19.0</string>
               <key>CFBundleName</key><string>Frida</string>
               <key>CFBundlePackageType</key><string>FMWK</string>
-BundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
               <key>DTPlatformName</key><string>iphoneos</string>
               <key>MinimumOSVersion</key><string>12.0</string>
           </dict>
@@ -172,13 +172,10 @@ BundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
           ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl" "Nulls Brawl.patched"
           mv "Nulls Brawl.patched" "Nulls Brawl"
           chmod +x "Nulls Brawl"
-
           echo "=== rpath before ==="
           otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
-
           echo "=== adding rpath ==="
           install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl"
-
           echo "=== rpath after ==="
           otool -l "Nulls Brawl" | grep -A2 LC_RPATH
           otool -L "Nulls Brawl" | grep -i frida
