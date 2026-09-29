@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHE_EPOCH: v6
+  CACHE_EPOCH: v8
   GHIDRA_VER: "11.4.3"
   GHIDRA_URL: "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip"
 
@@ -136,6 +136,57 @@ jobs:
           mv "$GITHUB_WORKSPACE/ghidra_${GHIDRA_VER}_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           rm -f /tmp/g.zip
 
+      - name: Write ExportToGzf script
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/scripts"
+          cat > "$GITHUB_WORKSPACE/scripts/ExportToGzf.java" <<'JAVA_EOF'
+          //This script pack the project in a gzf archive. Based on beigela post on GitHub.
+          //@author Federico Dotta
+          //@category Export
+          //@keybinding E
+          //@menupath Tools.ExportToGzf
+          //@toolbar
+
+          import java.io.File;
+          import ghidra.app.script.GhidraScript;
+          import ghidra.framework.model.DomainFile;
+          import ghidra.program.model.listing.Program;
+          import ghidra.util.SystemUtilities;
+          import ghidra.util.exception.CancelledException;
+
+          public class ExportToGzf extends GhidraScript {
+              @Override
+              protected void run() throws Exception {
+                  String outputPath;
+                  if (SystemUtilities.isInHeadlessMode()) {
+                      String[] args = getScriptArgs();
+                      if (args.length > 0) {
+                          outputPath = args[0];
+                          printf("*** Archive output path: %s\n", outputPath);
+                      } else {
+                          outputPath = "ghidraProject.gzf";
+                          printf("*** Output path not supplied. Output in the current directory, filename: %s\n", outputPath);
+                      }
+                  } else {
+                      try {
+                          outputPath = askString("Please enter the path", "Please enter the output path for the archive").trim();
+                      } catch (CancelledException e) {
+                          printf("*** Output path not supplied. Quitting.\n");
+                          return;
+                      }
+                  }
+                  Program program = getCurrentProgram();
+                  DomainFile domainFile = program.getDomainFile();
+                  File outFile = new File(outputPath);
+                  end(true);
+                  domainFile.packFile(outFile, monitor);
+              }
+          }
+          JAVA_EOF
+          echo "=== ExportToGzf.java written ==="
+          wc -l "$GITHUB_WORKSPACE/scripts/ExportToGzf.java"
+
       - uses: actions/cache/restore@v4
         id: cache-gzf
         with:
@@ -169,7 +220,8 @@ jobs:
             -loader MachoLoader \
             -analysisTimeoutPerFile 3600 \
             -max-cpu "$JOBS" \
-            -export "$GITHUB_WORKSPACE/brawl_bin.gzf" 2>&1 | tee cold.log | tail -80
+            -postScript ExportToGzf.java "$GITHUB_WORKSPACE/brawl_bin.gzf" \
+            -scriptPath "$GITHUB_WORKSPACE/scripts" 2>&1 | tee cold.log | tail -80
           echo "=== after cold ==="
           ls -la "$GITHUB_WORKSPACE/brawl_bin.gzf" || true
           test -s "$GITHUB_WORKSPACE/brawl_bin.gzf"
