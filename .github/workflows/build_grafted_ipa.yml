@@ -22,7 +22,6 @@ jobs:
     env:
       FRIDA_VERSION: "17.19.0"
       LDID_VERSION: "v2.1.5-procursus7"
-      GUM_GRAFT_VERSION: "17.19.0"
 
     steps:
       - uses: actions/checkout@v4
@@ -152,7 +151,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: gum-graft-bin
-          key: gum-graft-${{ env.GUM_GRAFT_VERSION }}-macos-arm64
+          key: gum-graft-${{ env.FRIDA_VERSION }}-macos-arm64
 
       - name: Download gum-graft
         if: steps.cache-gumgraft.outputs.cache-hit != 'true'
@@ -160,11 +159,12 @@ jobs:
           set -euo pipefail
           mkdir -p gum-graft-bin
           curl -fL --retry 3 \
-            -o gum-graft.tar.xz \
-            "https://github.com/frida/frida/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.tar.xz"
-          tar -xJf gum-graft.tar.xz -C gum-graft-bin
+            -o gum-graft.xz \
+            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-${FRIDA_VERSION}-macos-arm64.xz"
+          xz -d gum-graft.xz
+          mv gum-graft gum-graft-bin/gum-graft
           chmod +x gum-graft-bin/gum-graft
-          rm -f gum-graft.tar.xz
+          rm -f gum-graft.xz
 
       - name: Graft binary (all offsets)
         run: |
