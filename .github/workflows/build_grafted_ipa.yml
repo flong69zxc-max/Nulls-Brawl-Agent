@@ -1,10 +1,20 @@
 name: Build Patched Nulls Brawl
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'Nulls Brawl'
+      - 'scripts/frida-scripts/agent.js'
+      - '.github/workflows/build-patched.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -19,11 +29,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
+          fetch-depth: 1
 
-      - name: Verify local binary
+      - name: Debug: list repo root
         run: |
           set -euo pipefail
-          test -f "Nulls Brawl"
+          echo "=== pwd ==="
+          pwd
+          echo "=== ls -la ==="
+          ls -la
+          echo "=== find *nulls* (case-insensitive, depth 3) ==="
+          find . -maxdepth 3 -iname "*nulls*" -not -path "./.git/*" || echo "nothing found"
+          echo "=== git ls-files | grep -i nulls ==="
+          git ls-files | grep -i nulls || echo "nothing tracked"
+          echo "=== check-ignore ==="
+          git check-ignore -v "Nulls Brawl" || echo "not ignored"
+
+      - name: Verify binary
+        run: |
+          set -euo pipefail
+          test -f "Nulls Brawl" || { echo "ERROR: 'Nulls Brawl' not found"; exit 1; }
           file "Nulls Brawl"
           echo "size: $(stat -f%z "Nulls Brawl")"
 
@@ -41,6 +66,7 @@ jobs:
           curl -fL --retry 3 -o gum-graft.xz "https://github.com/frida/frida/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.xz"
           xz -d gum-graft.xz
           chmod +x gum-graft
+          file gum-graft
 
       - name: Graft Nulls Brawl binary
         run: |
@@ -58,12 +84,12 @@ jobs:
             "Nulls Brawl" 2>&1 | tail -40
           rc=$?
           set -e
-          echo "exit code: $rc"
+          echo "gum-graft exit code: $rc"
           echo "after: $(stat -f%z "Nulls Brawl")"
           otool -l "Nulls Brawl" | grep -iE "graft|__FRIDA" || echo "no graft sections"
           if [ "$rc" -ne 0 ]; then
+            echo "WARNING: gum-graft failed, reverting"
             cp "Nulls Brawl.orig" "Nulls Brawl"
-            echo "reverted (gum-graft failed)"
           fi
           rm -f "Nulls Brawl.orig"
 
@@ -109,6 +135,7 @@ jobs:
           make CXXFLAGS="-O2 -pipe" -j$(sysctl -n hw.ncpu)
           cp ldid ../ldid-bin/ldid
           chmod +x ../ldid-bin/ldid
+          otool -L ../ldid-bin/ldid
 
       - name: Build Frida.framework
         run: |
@@ -145,16 +172,43 @@ jobs:
           CONFIG
           cp scripts/frida-scripts/agent.js Frida.framework/agent.js
           plutil -lint Frida.framework/Info.plist
+          ls -la Frida.framework/
+
+      - name: Cache insert_dylib
+        id: cache-insert-dylib
+        uses: actions/cache@v4
+        with:
+          path: insert_dylib-bin
+          key: insert_dylib-macos-arm64-v1
+
+      - name: Build insert_dylib
+        if: steps.cache-insert-dylib.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p insert_dylib-bin
+          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
+          cp build/Release/insert_dylib "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
+          chmod +x "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
+          file "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
 
       - name: Inject load command
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -3
-          /tmp/insert_dylib/build/Release/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl" "Nulls Brawl.patched"
+          echo "=== before inject ==="
+          ls -la "Nulls Brawl"
+          otool -L "Nulls Brawl" | grep -i frida || echo "no frida load command yet"
+
+          ./insert_dylib-bin/insert_dylib \
+            --weak --all-yes \
+            "@executable_path/Frameworks/Frida.framework/W.dylib" \
+            "Nulls Brawl" "Nulls Brawl.patched"
+
           mv "Nulls Brawl.patched" "Nulls Brawl"
           chmod +x "Nulls Brawl"
+
+          echo "=== after inject ==="
           otool -L "Nulls Brawl" | grep -i frida
 
       - name: Sign
@@ -162,6 +216,9 @@ jobs:
           set -euo pipefail
           ./ldid-bin/ldid -S Frida.framework/W.dylib
           ./ldid-bin/ldid -S "Nulls Brawl"
+          echo "=== signed ==="
+          ls -la "Nulls Brawl"
+          ls -la Frida.framework/W.dylib
 
       - uses: actions/upload-artifact@v4
         with:
@@ -170,3 +227,4 @@ jobs:
             Nulls Brawl
             Frida.framework/
           retention-days: 30
+          if-no-files-found: error
