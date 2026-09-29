@@ -148,9 +148,9 @@ jobs:
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-brawl-project-
+            ghidra-brawl-project-11.4.3-
 
       - uses: actions/download-artifact@v4
         if: steps.cache-project.outputs.cache-hit != 'true'
@@ -180,7 +180,7 @@ jobs:
         if: steps.cache-project.outputs.cache-hit != 'true'
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
 
   warm:
     needs: [prepare, cold]
@@ -224,9 +224,9 @@ jobs:
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-brawl-project-
+            ghidra-brawl-project-11.4.3-
 
       - name: Fail if no project cache
         if: steps.cache-project.outputs.cache-hit != 'true'
