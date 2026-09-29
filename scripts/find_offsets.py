@@ -25,154 +25,151 @@ def rva(a):
     except:
         return -1
 
-def to_addr(rva_val):
-    return toAddr(BASE + rva_val)
+def to_addr(r):
+    return toAddr(BASE + r)
 
-def find_strings(needle, limit=50):
-    out = []
-    mem = currentProgram.getMemory()
-    nb = needle.encode()
-    for block in mem.getBlocks():
-        if not block.isInitialized():
-            continue
+def build_string_index():
+    listing = currentProgram.getListing()
+    idx = {}
+    it = listing.getDefinedData(True)
+    total = 0
+    while it.hasNext():
+        if time.time() - START > BUDGET_SEC - 300:
+            break
         try:
-            sz = int(block.getSize())
-            if sz > 64 * 1024 * 1024:
+            d = it.next()
+        except:
+            break
+        try:
+            if d is None or not d.hasStringValue():
                 continue
-            start = block.getStart()
-            data = bytes(mem.getBytes(start, sz))
-            pos = 0
-            while pos < len(data):
-                p = data.find(nb, pos)
-                if p < 0:
-                    break
-                end_idx = p + len(nb)
-                if end_idx < len(data) and data[end_idx:end_idx+1] == b"\x00":
-                    out.append(start.add(p))
-                    if len(out) >= limit:
-                        return out
-                pos = p + 1
+            s = str(d.getValue())
+            if not s:
+                continue
+            total += 1
+            idx.setdefault(s, []).append(d.getAddress())
         except:
             continue
+    log("[*] indexed strings: %d (unique: %d)" % (total, len(idx)))
+    return idx
+
+def strings_containing(idx, needle, limit=20):
+    out = []
+    for s, addrs in idx.items():
+        if needle in s:
+            for a in addrs:
+                out.append((s, a))
+                if len(out) >= limit:
+                    return out
     return out
 
-def find_refs(target):
+def find_refs(addr):
     out = []
     try:
         rm = currentProgram.getReferenceManager()
-        it = rm.getReferencesTo(target).iterator()
+        it = rm.getReferencesTo(addr).iterator()
         while it.hasNext():
             out.append(it.next().getFromAddress())
     except:
         pass
     return out
 
-def containing(addr):
-    return getFunctionContaining(addr)
-
-def scan_data_refs(func):
-    """Проходит по всем инструкциям функции и собирает адреса данных из LDR/STR."""
-    out = set()
-    body = func.getBody()
-    it = body.getAddresses(True)
+def dump_func(f):
+    if f is None:
+        log("    <no function>")
+        return
+    body = f.getBody()
     listing = currentProgram.getListing()
+    it = body.getAddresses(True)
+    n = 0
     while it.hasNext():
         a = it.next()
-        instr = listing.getInstructionAt(a)
-        if instr is None:
+        i = listing.getInstructionAt(a)
+        if i is None:
             continue
-        mn = instr.getMnemonicString().lower()
-        if mn.startswith("ldr") or mn.startswith("str") or mn.startswith("adrp"):
-            try:
-                for i in range(instr.getNumOperands()):
-                    objs = instr.getOpObjects(i)
-                    for o in objs:
-                        s = str(o)
-                        if s.startswith("0x"):
-                            addr = toAddr(s)
-                            blk = currentProgram.getMemory().getBlock(addr)
-                            if blk is not None and ("DATA" in blk.getName() or "BSS" in blk.getName()):
-                                out.add(addr)
-            except:
-                continue
-    return out
+        n += 1
+        if n > 40:
+            log("    ...")
+            break
+        try:
+            log("      +0x%04x  %s" % (rva(a) - rva(f.getEntryPoint()), i.toString()))
+        except:
+            continue
+
+def analyze(entry):
+    f = getFunctionAt(entry)
+    if f is None:
+        return
+    log("    --- body of 0x%x %s ---" % (rva(entry), f.getName()))
+    dump_func(f)
 
 def main():
-    log("=== find_flags_v5 ===")
+    log("=== find_offsets_v6 ===")
     log("program: %s" % currentProgram.getName())
 
-    # 1) getBool
-    log("")
-    log("[*] getBool via DisableIngameFriends...")
-    gb_addrs = find_strings("DisableIngameFriends")
-    getBool_rva = None
-    for sa in gb_addrs:
-        for ra in find_refs(sa):
-            f = containing(ra)
-            if f is not None:
-                getBool_rva = rva(f.getEntryPoint())
-                log("    func 0x%x  %s" % (getBool_rva, f.getName()))
-                break
-        if getBool_rva:
-            break
+    idx = build_string_index()
+    if not idx:
+        log("[!] string index empty")
+        return
 
-    # 2) строки флагов
-    FLAG_KEYS = ["isDev", "isDevBuild", "isProd", "isDeveloperBuild", "isProduction"]
-    flag_funcs = {}
-    for key in FLAG_KEYS:
-        saddrs = find_strings(key)
+    targets = {}
+
+    log("")
+    log("[*] getBool via DisableIngameFriends")
+    hits = strings_containing(idx, "DisableIngameFriends", 5)
+    for s, a in hits:
+        log("  string %r @ 0x%x" % (s[:40], rva(a)))
+        for ra in find_refs(a):
+            f = getFunctionContaining(ra)
+            if f is None:
+                continue
+            fr = rva(f.getEntryPoint())
+            log("    used in 0x%x %s" % (fr, f.getName()))
+            targets.setdefault("getBool", set()).add(fr)
+
+    for key in ["isDevBuild", "isDeveloperBuild", "isDev", "isProduction", "isProd"]:
         log("")
-        log("--- %s : %d string(s) ---" % (key, len(saddrs)))
-        for sa in saddrs:
-            for ra in find_refs(sa):
-                f = containing(ra)
+        log("[*] %s" % key)
+        hits = strings_containing(idx, key, 10)
+        if not hits:
+            log("  no strings")
+            continue
+        for s, a in hits:
+            log("  string %r @ 0x%x" % (s[:60], rva(a)))
+            for ra in find_refs(a):
+                f = getFunctionContaining(ra)
                 if f is None:
                     continue
-                fe = f.getEntryPoint()
-                if fe not in flag_funcs:
-                    flag_funcs[fe] = set()
-                flag_funcs[fe].add(key)
-                log("    func 0x%x  %s  (key=%s)" % (rva(fe), f.getName(), key))
+                fr = rva(f.getEntryPoint())
+                log("    used in 0x%x %s" % (fr, f.getName()))
+                targets.setdefault(key, set()).add(fr)
 
-    # 3) для каждой такой функции — кандидаты на адреса флагов
     log("")
-    log("=== DATA CANDIDATES ===")
-    candidates = {}
-    for fe, keys in flag_funcs.items():
-        f = getFunctionAt(fe)
-        if f is None:
-            continue
-        data_refs = scan_data_refs(f)
-        for dr in data_refs:
-            dr_rva = rva(dr)
-            if dr_rva <= 0:
-                continue
-            candidates.setdefault(dr_rva, set()).update(keys)
-    for dr_rva in sorted(candidates.keys()):
-        keys = ",".join(sorted(candidates[dr_rva]))
-        log("  0x%x  keys=%s" % (dr_rva, keys))
-
-    # 4) проверка старых
-    log("")
-    log("=== OLD OFFSETS ===")
+    log("=== BODIES OF OLD OFFSETS ===")
     for name, val in [("old_getBool", 0xb24820), ("old_isDev", 0xd93d80), ("old_isDevBuild", 0xd93da0)]:
-        a = to_addr(val)
-        f = getFunctionAt(a)
-        blk = currentProgram.getMemory().getBlock(a)
-        if f is not None:
-            log("  0x%x %s -> func %s" % (val, name, f.getName()))
-        elif blk is not None:
-            log("  0x%x %s -> block %s" % (val, name, blk.getName()))
-        else:
-            log("  0x%x %s -> ?" % (val, name))
+        log("")
+        log("--- %s @ 0x%x ---" % (name, val))
+        analyze(to_addr(val))
 
-    # 5) запись
+    log("")
+    log("=== BODIES OF CANDIDATES ===")
+    for key, entries in sorted(targets.items()):
+        for fr in sorted(entries):
+            log("")
+            log("--- %s candidate @ 0x%x ---" % (key, fr))
+            analyze(to_addr(fr))
+
+    log("")
+    log("=== SUMMARY ===")
+    for key, entries in sorted(targets.items()):
+        for fr in sorted(entries):
+            log("  %s: 0x%x" % (key, fr))
+
     with open(OFF_OUT, "w") as fh:
         fh.write("export const offsets = Object.freeze({\n")
-        if getBool_rva:
-            fh.write("  getBool: 0x%x,\n" % getBool_rva)
-        for dr_rva in sorted(candidates.keys()):
-            fh.write("  flag_0x%x: 0x%x, // keys=%s\n" % (dr_rva, dr_rva, ",".join(sorted(candidates[dr_rva]))))
+        for key, entries in sorted(targets.items()):
+            fr = sorted(entries)[0]
+            fh.write("  %s: 0x%x,\n" % (key, fr))
         fh.write("});\n")
 
     with open(REPORT, "w") as fh:
