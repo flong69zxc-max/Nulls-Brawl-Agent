@@ -382,7 +382,8 @@ def main():
                 fh.write("  vtable: rva=0x%08x  slots=%d\n" % (
                     r["vtable"], len(r.get("slots", []))))
             if r.get("ctor"):
-                fh.write("  ctor:   rva=0x%08x  score=%d  %s\n" % r["ctor"])
+                c = r["ctor"]
+                fh.write("  ctor:   rva=0x%08x  score=%d  %s\n" % (c[0], c[2], c[1]))
             for i, (sa, ta) in enumerate(r.get("slots", [])):
                 fh.write("    [%3d] 0x%08x -> 0x%08x\n" % (i, sa, ta))
             fh.write("\n")
