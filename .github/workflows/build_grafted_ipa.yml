@@ -53,37 +53,59 @@ jobs:
         id: resolve
         run: |
           set -euo pipefail
-          LOC=$(curl -sIL -A "Mozilla/5.0" "https://nulls.ee/bs_latest_i" \
-            | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\r\n')
-          test -n "$LOC"
+          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+          LOC=$(curl -sIL -A "$UA" "https://nulls.ee/bs_latest_i" \
+            | tr -d '\r' \
+            | awk 'tolower($1)=="location:"{print $2}' \
+            | tail -1)
+          test -n "$LOC" || { echo "::error::Failed to resolve URL"; exit 1; }
+          case "$LOC" in
+            http*) ;;
+            /*)    LOC="https://nulls.ee$LOC" ;;
+            *)     LOC="https://nulls.ee/$LOC" ;;
+          esac
           echo "URL=$LOC" >> "$GITHUB_OUTPUT"
-          VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')
-          echo "VER=$VER" >> "$GITHUB_OUTPUT"
-          echo "resolved: $LOC (version $VER)"
+          VER=$(basename "${LOC%%\?*}" | sed -nE 's/.*nb[_-]?([0-9]+(\.[0-9]+)+).*/\1/p')
+          echo "VER=${VER:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "resolved: $LOC (version ${VER:-unknown})"
 
       - uses: actions/cache@v4
         id: cache-ipa
         with:
           path: ipa_cache
-          key: nulls-brawl-ipa-${{ steps.resolve.outputs.VER }}
+          key: nulls-brawl-ipa-v2-${{ steps.resolve.outputs.VER }}
 
       - name: Download IPA
         if: steps.cache-ipa.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ipa_cache
+          rm -f ipa_cache/bs.ipa
           curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
             --max-time 900 \
-            -A "Mozilla/5.0" \
+            -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" \
+            -H "Accept: */*" \
             -o ipa_cache/bs.ipa \
             "${{ steps.resolve.outputs.URL }}"
           test -s ipa_cache/bs.ipa
-          file ipa_cache/bs.ipa
+          file ipa_cache/bs.ipa || true
+          if ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
+            echo "::error::Downloaded file is not a valid zip"
+            head -c 512 ipa_cache/bs.ipa | xxd | head -20 || true
+            rm -f ipa_cache/bs.ipa
+            exit 1
+          fi
+          echo "IPA downloaded and validated OK"
 
       - name: Extract IPA
         id: extract
         run: |
           set -euo pipefail
+          if [ ! -s ipa_cache/bs.ipa ] || ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
+            echo "::error::Cached IPA is missing or corrupt — invalidating cache"
+            rm -f ipa_cache/bs.ipa
+            exit 1
+          fi
           rm -rf extract
           mkdir -p extract
           unzip -q ipa_cache/bs.ipa -d extract
@@ -91,7 +113,7 @@ jobs:
           test -n "$APP_DIR"
           BIN="$APP_DIR/Nulls Brawl"
           if [ ! -f "$BIN" ]; then
-            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm +111 ! -name "*.dylib" ! -name "*.png" | head -n1)
+            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm /111 ! -name "*.dylib" ! -name "*.png" | head -n1)
           fi
           test -f "$BIN"
           file "$BIN"
