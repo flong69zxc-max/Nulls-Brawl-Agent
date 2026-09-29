@@ -138,10 +138,13 @@ jobs:
           make install
           mkdir -p "$GITHUB_WORKSPACE/r2_build"
           cp -aL /tmp/r2-install/. "$GITHUB_WORKSPACE/r2_build/"
-          ls -la "$GITHUB_WORKSPACE/r2_build/bin/" | head
+          ls -la "$GITHUB_WORKSPACE/r2_build/bin/" > /tmp/r2_bins.txt || true
+          head -20 /tmp/r2_bins.txt || true
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
-          find "$GITHUB_WORKSPACE/r2_build/lib" -maxdepth 2 -name "libr_*.so*" | head
+          find "$GITHUB_WORKSPACE/r2_build/lib" -maxdepth 2 -name "libr_*.so*" > /tmp/r2_libs.txt || true
+          head -20 /tmp/r2_libs.txt || true
+          true
 
       - name: Setup radare2 PATH
         run: |
@@ -192,7 +195,8 @@ jobs:
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           which r2
           r2 -v
-          ls -la "$GITHUB_WORKSPACE/r2_build/lib" | head
+          ls -la "$GITHUB_WORKSPACE/r2_build/lib" > /tmp/r2_libs_verify.txt || true
+          head -20 /tmp/r2_libs_verify.txt || true
           r2 -N -q -c 'q' "$GITHUB_WORKSPACE/r2_session/brawl_bin"
           echo "r2 on binary: ok"
 
@@ -203,7 +207,7 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/r2_build/lib:${{ github.workspace }}/r2_build/lib64
         run: |
           set -euo pipefail
-          python scripts/find_offsets_r2.py 2>&1 | tee r2.log | tail -120
+          python scripts/find_offsets_r2.py 2>&1 | tee r2.log | tail -120 || true
 
       - name: Validate outputs
         run: |
