@@ -24,13 +24,50 @@ let isDevAddr = null;
 let getBoolCalls = 0;
 let isDevCalls = 0;
 
-function str(v) { try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; } }
+function str(v) {
+  try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
+}
+
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
-function mkdir(p) { try { fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(p, true, null, null); return true; } catch (e) { return false; } }
-function exists(p) { try { return fileManager().fileExistsAtPath_(p) === true; } catch (e) { return false; } }
-function readText(p) { try { const f = new File(p, "r"); const t = f.readText(); f.close(); return t; } catch (e) { return null; } }
-function writeText(p, t) { try { const f = new File(p, "w"); f.write(t); f.flush(); f.close(); return true; } catch (e) { return false; } }
-function fileSize(p) { try { const f = new File(p, "r"); const b = f.readAllBytes(); f.close(); return b.length; } catch (e) { return -1; } }
+
+function mkdir(p) {
+  try {
+    fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(p, true, null, null);
+    return true;
+  } catch (e) { return false; }
+}
+
+function exists(p) {
+  try { return fileManager().fileExistsAtPath_(p) === true; } catch (e) { return false; }
+}
+
+function readText(p) {
+  try {
+    const f = new File(p, "r");
+    const t = f.readText();
+    f.close();
+    return t;
+  } catch (e) { return null; }
+}
+
+function writeText(p, t) {
+  try {
+    const f = new File(p, "w");
+    f.write(t);
+    f.flush();
+    f.close();
+    return true;
+  } catch (e) { return false; }
+}
+
+function fileSize(p) {
+  try {
+    const f = new File(p, "r");
+    const b = f.readAllBytes();
+    f.close();
+    return b.length;
+  } catch (e) { return -1; }
+}
 
 function writable(p) {
   if (!p) return false;
@@ -51,10 +88,13 @@ function containerLike(p) {
   return false;
 }
 
-function bundlePath() { try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; } }
+function bundlePath() {
+  try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
+}
 
 function filesystemDir() {
-  const list = [], seen = {};
+  const list = [];
+  const seen = {};
   const add = function (p) {
     if (!p) return;
     const x = String(p).replace(/\/+$/, "");
@@ -62,14 +102,17 @@ function filesystemDir() {
     seen[x] = true;
     list.push(x);
   };
+
   try {
     const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
     if (urls !== null && urls.count() > 0) add(str(urls.firstObject().path()));
   } catch (e) {}
+
   try {
     const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
     add(fn().readUtf8String() + "/Documents");
   } catch (e) {}
+
   const bundle = bundlePath();
   if (bundle) {
     const parts = bundle.replace(/\/+$/, "").split("/");
@@ -81,7 +124,9 @@ function filesystemDir() {
       add(grand + "/Data/Application/" + folder + "/Documents");
     }
   }
+
   add("/tmp");
+
   let loose = null;
   for (let i = 0; i < list.length; i++) {
     let p = list[i];
@@ -98,21 +143,24 @@ function initPaths() {
   docsPath = filesystemDir();
   updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
   if (updatedPath !== null) mkdir(updatedPath);
+
   const chain = [];
   if (updatedPath !== null) chain.push(updatedPath + "/" + LOG_NAME);
   if (docsPath !== null) chain.push(docsPath + "/" + LOG_NAME);
   chain.push("/tmp/" + LOG_NAME);
+
   for (let i = 0; i < chain.length; i++) {
     const c = chain[i];
     const cut = c.lastIndexOf("/");
-    const dir = cut < 1 ? null : c.substring(0, cut);
-    if (dir === null) continue;
+    if (cut < 1) continue;
+    const dir = c.substring(0, cut);
     if (!exists(dir)) mkdir(dir);
     if (!writable(dir)) continue;
     if (!writeText(c, "")) continue;
     logPath = c;
     break;
   }
+
   if (logPath !== null) log("log at " + logPath);
   else try { console.log("console only"); } catch (e) {}
 }
@@ -126,7 +174,9 @@ function log(line) {
       try { fileManager().removeItemAtPath_error_(logPath, null); } catch (e) {}
     }
     const f = new File(logPath, "a");
-    f.write(text + "\n"); f.flush(); f.close();
+    f.write(text + "\n");
+    f.flush();
+    f.close();
   } catch (e) {}
 }
 
@@ -153,17 +203,23 @@ function findGameModule() {
     try { return String(ObjC.classes.NSBundle.mainBundle().bundleIdentifier()).toLowerCase(); } catch (e) { return ""; }
   })();
   const needle = bundleId.replace(/\./g, "");
+
   for (let i = 0; i < mods.length; i++) {
     const m = mods[i];
     if (skipModule(m)) continue;
     const hay = ((m.name || "") + " " + (m.path || "")).toLowerCase().replace(/\./g, "");
-    if (needle && hay.indexOf(needle) !== -1) { gameModule = m; return m; }
+    if (needle && hay.indexOf(needle) !== -1) {
+      gameModule = m;
+      return m;
+    }
   }
+
   for (let i = 0; i < mods.length; i++) {
     const m = mods[i];
     if (skipModule(m)) continue;
     if (best === null || m.size > best.size) best = m;
   }
+
   gameModule = best || Process.mainModule;
   return gameModule;
 }
@@ -171,6 +227,7 @@ function findGameModule() {
 function readArgAsString(arg) {
   if (arg === null || arg === undefined) return null;
   if (arg.isNull()) return null;
+
   try {
     const obj = new ObjC.Object(arg);
     const cls = obj.$className;
@@ -179,12 +236,33 @@ function readArgAsString(arg) {
       if (s !== null && s.length > 0) return s;
     }
   } catch (e) {}
-  try { const s = arg.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } catch (e) {}
-  try { const p = arg.readPointer(); if (!p.isNull()) { const s = p.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } } catch (e) {}
+
   try {
-    const lenPtr = arg.add(0x4); const dataPtr = arg.add(0x8); const len = lenPtr.readU32();
-    if (len > 0 && len < 200) { const p2 = dataPtr.readPointer(); if (!p2.isNull()) { const s = p2.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } }
+    const s = arg.readUtf8String();
+    if (s !== null && s.length > 0 && s.length < 200) return s;
   } catch (e) {}
+
+  try {
+    const p = arg.readPointer();
+    if (!p.isNull()) {
+      const s = p.readUtf8String();
+      if (s !== null && s.length > 0 && s.length < 200) return s;
+    }
+  } catch (e) {}
+
+  try {
+    const lenPtr = arg.add(0x4);
+    const dataPtr = arg.add(0x8);
+    const len = lenPtr.readU32();
+    if (len > 0 && len < 200) {
+      const p2 = dataPtr.readPointer();
+      if (!p2.isNull()) {
+        const s = p2.readUtf8String();
+        if (s !== null && s.length > 0 && s.length < 200) return s;
+      }
+    }
+  } catch (e) {}
+
   return null;
 }
 
@@ -197,152 +275,77 @@ function shouldForceTrue(name) {
   return false;
 }
 
-function findGrafterExports() {
-  const names = [
-    "gum_darwin_grafter_new_from_file",
-    "gum_darwin_grafter_add",
-    "gum_darwin_grafter_graft"
-  ];
-  const found = {};
-  const mods = Process.enumerateModules();
-
-  for (let i = 0; i < mods.length; i++) {
-    const m = mods[i];
-    if (!m.path) continue;
-    const p = m.path.toLowerCase();
-    if (p.indexOf("frida") === -1 && p.indexOf("gadget") === -1 && p.indexOf("gum") === -1 && p.indexOf("w.dylib") === -1) continue;
-
-    try {
-      const exports = Module.enumerateExports(m.name);
-      for (let j = 0; j < exports.length; j++) {
-        const e = exports[j];
-        for (let k = 0; k < names.length; k++) {
-          const n = names[k];
-          if (found[n]) continue;
-          if (e.name === n || e.name.indexOf(n) !== -1 || e.name.indexOf("darwin_grafter") !== -1) {
-            if (e.type === "function") {
-              found[n] = e.address;
-              log("graft: found " + e.name + " in " + m.name + " @ " + e.address);
-            }
-          }
-        }
-      }
-    } catch (err) {}
-  }
-
-  for (let j = 0; j < names.length; j++) {
-    const n = names[j];
-    if (found[n]) continue;
-    try {
-      const addr = Module.getGlobalExportByName(n);
-      if (addr) { found[n] = addr; log("graft: found " + n + " globally @ " + addr); }
-    } catch (e) {}
-  }
-
-  return found;
-}
-
-function graftTrampolines(binaryPath) {
-  if (!binaryPath) return "no-path";
-  if (!exists(binaryPath)) return "no-file";
-
-  const ex = findGrafterExports();
-  if (!ex["gum_darwin_grafter_new_from_file"] || !ex["gum_darwin_grafter_add"] || !ex["gum_darwin_grafter_graft"]) {
-    log("graft: gum_* not found in any loaded module");
-    log("graft: use CLI: gum-graft --ingest-function-starts --offset 0xb24820 --offset 0xd93d80 <binary>");
-    log("graft: then codesign --force --sign - <binary>");
-    return "unavailable";
-  }
-
-  const fnNew = new NativeFunction(ex["gum_darwin_grafter_new_from_file"], "pointer", ["pointer", "uint"]);
-  const fnAdd = new NativeFunction(ex["gum_darwin_grafter_add"], "void", ["pointer", "uint"]);
-  const fnGraft = new NativeFunction(ex["gum_darwin_grafter_graft"], "bool", ["pointer", "pointer"]);
-
-  const INGEST_FUNCTION_STARTS = 1;
-  const pathPtr = Memory.allocUtf8String(binaryPath);
-
-  const grafter = fnNew(pathPtr, INGEST_FUNCTION_STARTS);
-  if (grafter.isNull()) { log("graft: new_from_file failed"); return "error"; }
-
-  fnAdd(grafter, RVA_GETBOOL);
-  fnAdd(grafter, RVA_ISDEV);
-
-  const ok = fnGraft(grafter, ptr(0));
-
-  try {
-    const unref = Module.getGlobalExportByName("g_object_unref");
-    if (unref) { const fnUnref = new NativeFunction(unref, "void", ["pointer"]); fnUnref(grafter); }
-  } catch (e) {}
-
-  log("graft: changed=" + ok);
-  return ok ? "applied" : "already";
-}
-
 function hookGetBool() {
-  const base = gameModule.base;
-  const addr = base.add(RVA_GETBOOL);
+  const addr = gameModule.base.add(RVA_GETBOOL);
   log("hooking getBool @ " + addr + " (rva 0x" + RVA_GETBOOL.toString(16) + ")");
   try {
     Interceptor.attach(addr, {
-      onEnter: function (args) { this.name = readArgAsString(args[0]); },
+      onEnter: function (args) {
+        this.name = readArgAsString(args[0]);
+      },
       onLeave: function (retval) {
         const n = this.name;
         if (n === null || n.length === 0) return;
         getBoolCalls++;
         const was = retval.toInt32();
         const force = shouldForceTrue(n);
-        if (getBoolCalls <= 500 || force) log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
+        if (getBoolCalls <= 500 || force) {
+          log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
+        }
         if (force && was !== 1) retval.replace(ptr(1));
       }
     });
     getBoolAddr = addr;
     log("getBool hook installed");
-  } catch (e) { log("getBool hook FAILED: " + e.message); }
+  } catch (e) {
+    log("getBool hook FAILED: " + e.message);
+  }
 }
 
 function hookIsDev() {
-  const base = gameModule.base;
-  const addr = base.add(RVA_ISDEV);
+  const addr = gameModule.base.add(RVA_ISDEV);
   log("hooking isDev @ " + addr + " (rva 0x" + RVA_ISDEV.toString(16) + ")");
   try {
     Interceptor.attach(addr, {
       onLeave: function (retval) {
         isDevCalls++;
         const was = retval.toInt32();
-        if (was !== 1) { retval.replace(ptr(1)); if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1"); }
-        else { if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1"); }
+        if (was !== 1) {
+          retval.replace(ptr(1));
+          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1");
+        } else {
+          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1");
+        }
       }
     });
     isDevAddr = addr;
     log("isDev hook installed");
-  } catch (e) { log("isDev hook FAILED: " + e.message); }
+  } catch (e) {
+    log("isDev hook FAILED: " + e.message);
+  }
 }
 
 function run() {
   gameModule = findGameModule();
   log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
-
-  const status = graftTrampolines(gameModule.path);
-  log("graft status: " + status);
-
-  if (status === "applied") {
-    log("=== graft applied, RESTART REQUIRED ===");
-    return;
-  }
-
   hookGetBool();
   hookIsDev();
   log("=== debug_menu armed ===");
 }
 
 setTimeout(run, 2000);
-setTimeout(function () { log("timer 10s: getBool=" + getBoolCalls + " isDev=" + isDevCalls); }, 12000);
-setTimeout(function () { log("timer 30s: getBool=" + getBoolCalls + " isDev=" + isDevCalls); }, 32000);
+
+setTimeout(function () {
+  log("timer 10s: getBool=" + getBoolCalls + " isDev=" + isDevCalls);
+}, 12000);
+
+setTimeout(function () {
+  log("timer 30s: getBool=" + getBoolCalls + " isDev=" + isDevCalls);
+}, 32000);
 
 rpc.exports = {
   getBool_addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
   isDev_addr: function () { return isDevAddr === null ? null : isDevAddr.toString(); },
   stats: function () { return { getBool: getBoolCalls, isDev: isDevCalls }; },
-  logPath: function () { return logPath; },
-  graft: function () { if (!gameModule) gameModule = findGameModule(); return graftTrampolines(gameModule.path); }
+  logPath: function () { return logPath; }
 };
