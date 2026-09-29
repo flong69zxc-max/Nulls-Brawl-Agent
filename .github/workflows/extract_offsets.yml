@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHE_EPOCH: r2-v1
+  CACHE_EPOCH: r2-v2
 
 jobs:
   prepare:
@@ -114,11 +114,9 @@ jobs:
       - name: Install radare2
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/r2.tar.xz \
-            https://github.com/radareorg/radare2/releases/download/5.9.8/radare2-5.9.8-linux-arm64.tar.xz
-          mkdir -p /tmp/r2
-          tar -xf /tmp/r2.tar.xz -C /tmp/r2 --strip-components=1
-          echo "/tmp/r2/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq radare2
+          r2 -v
 
       - uses: actions/setup-python@v5
         with:
@@ -162,7 +160,6 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          export PATH="/tmp/r2/bin:$PATH"
           r2 -v
           python scripts/find_offsets_r2.py 2>&1 | tee r2.log | tail -120
 
