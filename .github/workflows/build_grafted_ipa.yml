@@ -33,7 +33,13 @@ jobs:
           xz -d gadget.xz
           mv gadget W.fat.dylib
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          echo "thin before graft: $(stat -f%z W.thin.dylib)"
+          echo "thin before: $(stat -f%z W.thin.dylib)"
+
+      - name: Remove signature before graft
+        run: |
+          set -euo pipefail
+          codesign --remove-signature W.thin.dylib 2>&1 || true
+          echo "thin unsigned: $(stat -f%z W.thin.dylib)"
 
       - name: Download gum-graft
         run: |
@@ -43,15 +49,35 @@ jobs:
           xz -d gum-graft.xz
           chmod +x gum-graft
           file gum-graft
+          echo "=== gum-graft help ==="
+          ./gum-graft --help 2>&1 | head -40 || true
           echo "GUM_GRAFT=$(realpath gum-graft)" >> "$GITHUB_ENV"
 
       - name: Run gum-graft
         run: |
           set -euo pipefail
           echo "before: $(stat -f%z W.thin.dylib)"
-          "$GUM_GRAFT" W.thin.dylib || "$GUM_GRAFT" --ingest-function-starts W.thin.dylib
-          echo "after: $(stat -f%z W.thin.dylib)"
-          otool -l W.thin.dylib | grep -i graft || echo "no graft sections"
+          rc=0
+          "$GUM_GRAFT" W.thin.dylib 2>&1 | tee /tmp/graft1.log || rc=$?
+          echo "exit=$rc"
+          sz=$(stat -f%z W.thin.dylib)
+          echo "after default: $sz"
+          if [ "$sz" = "19236032" ]; then
+            echo "default did nothing, trying --verbose"
+            "$GUM_GRAFT" --verbose W.thin.dylib 2>&1 | tee /tmp/graft2.log || true
+            sz=$(stat -f%z W.thin.dylib)
+            echo "after verbose: $sz"
+          fi
+          if [ "$sz" = "19236032" ]; then
+            echo "still nothing, trying with --arch arm64"
+            "$GUM_GRAFT" --arch arm64 W.thin.dylib 2>&1 | tee /tmp/graft3.log || true
+            sz=$(stat -f%z W.thin.dylib)
+            echo "after --arch: $sz"
+          fi
+          echo "final size: $sz"
+          echo "=== graft log tail ==="
+          tail -40 /tmp/graft*.log 2>/dev/null || true
+          otool -l W.thin.dylib | grep -iE "graft|__FRIDA" || echo "no graft sections"
 
       - name: Install ldid-procursus from source
         run: |
