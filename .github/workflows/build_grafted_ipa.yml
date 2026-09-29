@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     env:
       FRIDA_VERSION: '17.19.0'
-      GUM_GRAFT_VERSION: '17.18.0'
+      GUM_GRAFT_VERSION: '17.19.0'
       FRAMEWORK_NAME: Frida.framework
       LDID_VERSION: 'v2.1.5-procursus7'
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
