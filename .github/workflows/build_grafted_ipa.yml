@@ -3,9 +3,6 @@ name: Build Patched Nulls Brawl IPA
 on:
   push:
     branches: [main]
-    paths:
-      - "scripts/frida-scripts/agent.js"
-      - ".github/workflows/build_grafted_ipa.yml"
   workflow_dispatch:
 
 permissions:
@@ -48,13 +45,12 @@ jobs:
             --legal-comments=none \
             --banner:js='"use strict";' \
             --outfile=build/agent.js
-          ls -la build/agent.js
 
       - uses: actions/cache@v4
         id: cache-ipa
         with:
           path: ipa_cache
-          key: nulls-brawl-ipa-v6-direct
+          key: nulls-brawl-ipa-v7-direct
 
       - name: Download IPA
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -69,21 +65,13 @@ jobs:
             -o ipa_cache/bs.ipa \
             "$IPA_URL"
           test -s ipa_cache/bs.ipa
-          file ipa_cache/bs.ipa || true
-          if ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
-            echo "::error::Downloaded file is not a valid zip"
-            head -c 512 ipa_cache/bs.ipa | xxd | head -20 || true
-            rm -f ipa_cache/bs.ipa
-            exit 1
-          fi
-          echo "IPA downloaded and validated OK"
+          unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1 || { rm -f ipa_cache/bs.ipa; exit 1; }
 
       - name: Extract IPA
         id: extract
         run: |
           set -euo pipefail
           if [ ! -s ipa_cache/bs.ipa ] || ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
-            echo "::error::Cached IPA is missing or corrupt — invalidating cache"
             rm -f ipa_cache/bs.ipa
             exit 1
           fi
@@ -97,9 +85,20 @@ jobs:
             BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm /111 ! -name "*.dylib" ! -name "*.png" | head -n1)
           fi
           test -f "$BIN"
-          file "$BIN"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Validate main binary
+        run: |
+          set -euo pipefail
+          echo "=== binary info ==="
+          file "$BIN"
+          echo "=== load commands ==="
+          otool -l "$BIN" | grep -E "LC_DYLD_CHAINED_FIXUPS|LC_DYLD_INFO|LC_FUNCTION_STARTS" || true
+          echo "=== code signature ==="
+          codesign -dv "$BIN" 2>&1 | head -5 || true
+          echo "=== frida presence ==="
+          otool -L "$BIN" | grep -i frida || echo "no frida dylib"
 
       - name: Cache gum-graft
         id: cache-gumgraft
@@ -121,42 +120,71 @@ jobs:
           chmod +x gum-graft-bin/gum-graft
           rm -f gum-graft.xz
 
-      - name: Graft main binary
+      - name: Check if main binary is grafted
+        id: check-graft
         run: |
           set -euo pipefail
-          echo "=== grafting main binary: $BIN ==="
-          BEFORE=$(stat -f%z "$BIN")
-          ./gum-graft-bin/gum-graft -s -m -z "$BIN" 2>&1 | tee /tmp/graft-main.log || true
-          AFTER=$(stat -f%z "$BIN")
-          echo "main binary: $BEFORE -> $AFTER bytes"
+          if otool -l "$BIN" | grep -q "__gum_graft"; then
+            echo "GRAFTED=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "GRAFTED=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Graft main binary
+        if: steps.check-graft.outputs.GRAFTED != 'true'
+        run: |
+          set -euo pipefail
+          cp "$BIN" "$BIN.orig"
+          SIZE0=$(stat -f%z "$BIN.orig")
+          echo "orig size: $SIZE0"
+
+          try() {
+            local name="$1"; shift
+            cp "$BIN.orig" "$BIN.test"
+            echo "--- $name ---"
+            ./gum-graft-bin/gum-graft "$@" "$BIN.test" 2>&1 | tee "/tmp/graft-$name.log" || true
+            local sz
+            sz=$(stat -f%z "$BIN.test" 2>/dev/null || echo 0)
+            if [ "$sz" != "$SIZE0" ] && [ "$sz" != "0" ]; then
+              echo "CHANGED: $SIZE0 -> $sz"
+              cp "$BIN.test" "$BIN"
+              chmod +x "$BIN"
+              rm -f "$BIN.test" "$BIN.orig"
+              return 0
+            fi
+            rm -f "$BIN.test"
+            return 1
+          }
+
+          try "s" -s && exit 0
+          try "sm" -s -m && exit 0
+          try "smz" -s -m -z && exit 0
+          try "m" -m && exit 0
+          try "z" -z && exit 0
+
+          echo "no variant changed binary — keeping original"
+          cp "$BIN.orig" "$BIN"
           chmod +x "$BIN"
+          rm -f "$BIN.orig"
 
       - name: Cache Frida Gadget
         id: cache-gadget
         uses: actions/cache@v4
         with:
           path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-grafted-v2
+          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-v3
 
       - name: Download and graft Frida Gadget
         if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          echo "=== downloading gadget ==="
           curl -fL --retry 3 -o gadget.xz \
             "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
           xz -d gadget.xz
           mv gadget W.fat.dylib
-
-          echo "=== thinning to arm64 ==="
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           rm -f W.fat.dylib
-
-          echo "=== grafting gadget ==="
-          BEFORE=$(stat -f%z W.thin.dylib)
-          ./gum-graft-bin/gum-graft -s -m -z W.thin.dylib 2>&1 | tee /tmp/graft-gadget.log || true
-          AFTER=$(stat -f%z W.thin.dylib)
-          echo "gadget: $BEFORE -> $AFTER bytes"
+          ./gum-graft-bin/gum-graft -s -m W.thin.dylib 2>&1 | tee /tmp/graft-gadget.log || true
 
       - name: Install ldid deps
         run: |
@@ -213,7 +241,6 @@ jobs:
           mkdir -p "$FW"
           cp W.thin.dylib "$FW/W.dylib"
           cp build/agent.js "$FW/agent.js"
-
           cat > "$FW/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -240,7 +267,6 @@ jobs:
           </dict>
           </plist>
           PLIST
-
           cat > "$FW/W.config" <<'CONFIG'
           {
             "interaction": {
@@ -251,9 +277,7 @@ jobs:
             "code_signing": "required"
           }
           CONFIG
-
           plutil -lint "$FW/Info.plist"
-          ls -la "$FW/"
 
       - name: Inject load command and fix rpath
         run: |
@@ -262,16 +286,15 @@ jobs:
           ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "$BIN.orig" "$BIN"
           chmod +x "$BIN"
           rm -f "$BIN.orig"
-          install_name_tool -add_rpath "@executable_path/Frameworks" "$BIN" || echo "rpath already exists"
-          otool -L "$BIN" | grep -i frida || echo "no frida dylib"
-          otool -l "$BIN" | grep -A2 LC_RPATH | head -20 || echo "no LC_RPATH"
+          install_name_tool -add_rpath "@executable_path/Frameworks" "$BIN" || true
+          otool -L "$BIN" | grep -i frida || true
 
       - name: Sign
         run: |
           set -euo pipefail
           ./ldid-bin/ldid -S "$APP_DIR/Frameworks/Frida.framework/W.dylib"
           ./ldid-bin/ldid -S "$BIN"
-          echo "signed"
+          codesign -dv "$BIN" 2>&1 | head -3 || true
 
       - name: Repack IPA
         run: |
@@ -281,7 +304,6 @@ jobs:
           zip -qry ../bs_patched.ipa Payload
           cd ..
           ls -la bs_patched.ipa
-          file bs_patched.ipa
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -289,7 +311,5 @@ jobs:
           name: patched-brawl-ipa
           path: |
             bs_patched.ipa
-            /tmp/graft-main.log
-            /tmp/graft-gadget.log
+            /tmp/graft-*.log
           retention-days: 30
-          if-no-files-found: warn
