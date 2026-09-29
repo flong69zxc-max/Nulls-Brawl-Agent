@@ -225,51 +225,77 @@ function shouldForceTrue(name) {
   return false;
 }
 
-/* ---------- GRAFT ---------- */
+function findGrafterExports() {
+  const names = [
+    "gum_darwin_grafter_new_from_file",
+    "gum_darwin_grafter_add",
+    "gum_darwin_grafter_graft"
+  ];
+  const found = {};
+  const mods = Process.enumerateModules();
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i];
+    if (m.name.indexOf("Frida") === -1 && m.name.indexOf("frida") === -1) continue;
+    for (let j = 0; j < names.length; j++) {
+      const n = names[j];
+      if (found[n]) continue;
+      try {
+        const addr = Module.findExportByName(m.name, n);
+        if (addr) found[n] = addr;
+      } catch (e) {}
+    }
+  }
+  if (!found["gum_darwin_grafter_new_from_file"]) {
+    try { found["gum_darwin_grafter_new_from_file"] = Module.getGlobalExportByName("gum_darwin_grafter_new_from_file"); } catch (e) {}
+  }
+  if (!found["gum_darwin_grafter_add"]) {
+    try { found["gum_darwin_grafter_add"] = Module.getGlobalExportByName("gum_darwin_grafter_add"); } catch (e) {}
+  }
+  if (!found["gum_darwin_grafter_graft"]) {
+    try { found["gum_darwin_grafter_graft"] = Module.getGlobalExportByName("gum_darwin_grafter_graft"); } catch (e) {}
+  }
+  return found;
+}
 
 function graftTrampolines(binaryPath) {
   if (!binaryPath) return "no-path";
   if (!exists(binaryPath)) return "no-file";
 
-  let grafter = null;
-  // Пробуем разные формы API — в зависимости от сборки Frida они отличаются.
-  try {
-    if (Gum.DarwinGrafter && typeof Gum.DarwinGrafter.new_from_file === "function") {
-      grafter = Gum.DarwinGrafter.new_from_file(binaryPath);
-    } else if (Gum.DarwinGrafter) {
-      grafter = new Gum.DarwinGrafter(binaryPath);
-    }
-  } catch (e) {
-    log("graft: ctor error: " + e.message);
-    return "error";
-  }
-
-  if (!grafter) {
-    log("graft: DarwinGrafter недоступен в этой сборке Frida");
+  const ex = findGrafterExports();
+  if (!ex["gum_darwin_grafter_new_from_file"] || !ex["gum_darwin_grafter_add"] || !ex["gum_darwin_grafter_graft"]) {
+    log("graft: gum_* not found");
     return "unavailable";
   }
 
-  try {
-    grafter.add(RVA_GETBOOL);
-    grafter.add(RVA_ISDEV);
-  } catch (e) {
-    log("graft: add error: " + e.message);
+  const fnNew = new NativeFunction(ex["gum_darwin_grafter_new_from_file"], "pointer", ["pointer", "uint"]);
+  const fnAdd = new NativeFunction(ex["gum_darwin_grafter_add"], "void", ["pointer", "uint"]);
+  const fnGraft = new NativeFunction(ex["gum_darwin_grafter_graft"], "bool", ["pointer", "pointer"]);
+
+  const INGEST_FUNCTION_STARTS = 1;
+  const pathPtr = Memory.allocUtf8String(binaryPath);
+
+  const grafter = fnNew(pathPtr, INGEST_FUNCTION_STARTS);
+  if (grafter.isNull()) {
+    log("graft: new_from_file failed");
     return "error";
   }
 
-  let changed = false;
-  try {
-    changed = grafter.graft();
-  } catch (e) {
-    log("graft: graft() error: " + e.message);
-    return "error";
-  }
+  fnAdd(grafter, RVA_GETBOOL);
+  fnAdd(grafter, RVA_ISDEV);
 
-  log("graft: changed=" + changed + " path=" + binaryPath);
-  return changed ? "applied" : "already";
+  const ok = fnGraft(grafter, ptr(0));
+
+  try {
+    const unref = Module.getGlobalExportByName("g_object_unref");
+    if (unref) {
+      const fnUnref = new NativeFunction(unref, "void", ["pointer"]);
+      fnUnref(grafter);
+    }
+  } catch (e) {}
+
+  log("graft: changed=" + ok);
+  return ok ? "applied" : "already";
 }
-
-/* ---------- HOOKS ---------- */
 
 function hookGetBool() {
   const base = gameModule.base;
@@ -325,29 +351,18 @@ function hookIsDev() {
   }
 }
 
-/* ---------- RUN ---------- */
-
 function run() {
   gameModule = findGameModule();
   log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
 
-  // --- Фаза graft ---
   const status = graftTrampolines(gameModule.path);
   log("graft status: " + status);
 
   if (status === "applied") {
-    log("=== graft применён, НУЖЕН ПЕРЕЗАПУСК приложения ===");
-    log("После перезапуска: codesign бинарник заново (если устройство этого требует),");
-    log("Gadget должен быть с \"code_signing\": \"required\".");
-    log("=== debug_menu paused (restart required) ===");
+    log("=== graft applied, RESTART REQUIRED ===");
     return;
   }
 
-  if (status === "error" || status === "unavailable") {
-    log("graft не удался — пробуем Interceptor напрямую (может упасть в code-signing policy)");
-  }
-
-  // --- Фаза хуков (после успешного graft на предыдущем запуске) ---
   hookGetBool();
   hookIsDev();
 
