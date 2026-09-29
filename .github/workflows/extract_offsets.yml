@@ -23,7 +23,6 @@ jobs:
     outputs:
       ver: ${{ steps.resolve.outputs.VER }}
       url: ${{ steps.resolve.outputs.URL }}
-      program_name: ${{ steps.extract.outputs.PROGRAM_NAME }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +72,6 @@ jobs:
           fi
 
       - name: Extract executable
-        id: extract
         run: |
           set -euo pipefail
           rm -rf extract
@@ -99,7 +97,6 @@ jobs:
           test -f "$BIN"
           file "$BIN"
           cp "$BIN" /tmp/brawl_bin
-          echo "PROGRAM_NAME=brawl_bin" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -130,9 +127,9 @@ jobs:
         id: cache-ghidra
         with:
           path: ghidra
-          key: ghidra-11.4.3-v1
+          key: ghidra-11.4.3-v2
           restore-keys: |
-            ghidra-11.4.3-
+            ghidra-11.4.3-v2
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
@@ -148,9 +145,9 @@ jobs:
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-v2-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-brawl-project-11.4.3-
+            ghidra-brawl-project-11.4.3-v2-
 
       - uses: actions/download-artifact@v4
         if: steps.cache-project.outputs.cache-hit != 'true'
@@ -176,21 +173,19 @@ jobs:
             -analysisTimeoutPerFile 3600 \
             -max-cpu "$JOBS" 2>&1 | tee cold.log | tail -60
 
-      - name: List programs in project
+      - name: Inspect project
         if: steps.cache-project.outputs.cache-hit != 'true'
-        continue-on-error: true
         run: |
-          "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
-            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
-            -process "brawl_bin" -noanalysis \
-            -postScript "print_programs.py" \
-            -scriptPath "$GITHUB_WORKSPACE/scripts" 2>&1 | tail -50
+          echo "=== project tree ==="
+          find ghidra_project -maxdepth 4 -type f | head -80
+          echo "=== .prp files ==="
+          find ghidra_project -name "*.prp" -o -name "*.rep" | head -40
 
       - uses: actions/cache/save@v4
         if: steps.cache-project.outputs.cache-hit != 'true'
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-v2-${{ needs.prepare.outputs.ver }}
 
   warm:
     needs: [prepare, cold]
@@ -216,9 +211,9 @@ jobs:
         id: cache-ghidra
         with:
           path: ghidra
-          key: ghidra-11.4.3-v1
+          key: ghidra-11.4.3-v2
           restore-keys: |
-            ghidra-11.4.3-
+            ghidra-11.4.3-v2
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
@@ -234,15 +229,20 @@ jobs:
         id: cache-project
         with:
           path: ghidra_project
-          key: ghidra-brawl-project-11.4.3-${{ needs.prepare.outputs.ver }}
+          key: ghidra-brawl-project-11.4.3-v2-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-brawl-project-11.4.3-
+            ghidra-brawl-project-11.4.3-v2-
 
       - name: Fail if no project cache
         if: steps.cache-project.outputs.cache-hit != 'true'
         run: |
           echo "ERROR: ghidra_project not found"
           exit 1
+
+      - name: Inspect restored project
+        run: |
+          echo "=== project tree ==="
+          find ghidra_project -maxdepth 4 -type f | head -80
 
       - name: Run WARM
         env:
@@ -255,7 +255,7 @@ jobs:
           git checkout -- offsets.js 2>/dev/null || true
           "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
             "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
-            -process "${{ needs.prepare.outputs.program_name }}" -noanalysis \
+            -process "*" -noanalysis \
             -postScript find_offsets.py \
             -scriptPath "$GITHUB_WORKSPACE/scripts" \
             -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -120
