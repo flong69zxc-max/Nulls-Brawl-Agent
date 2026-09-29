@@ -44,10 +44,9 @@ jobs:
           LOC=$(curl -sIL -A "Mozilla/5.0" "https://dnull.xyz/latest_bs_i" \
             | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\r\n')
           test -n "$LOC"
-          VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')
-          echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')" >> "$GITHUB_OUTPUT"
           echo "URL=$LOC" >> "$GITHUB_OUTPUT"
-          echo "resolved: $LOC (version $VER)"
+          echo "resolved: $LOC"
 
       - uses: actions/cache@v4
         id: cache-ipa
@@ -125,6 +124,7 @@ jobs:
           set -euo pipefail
           if [ -x "$GITHUB_WORKSPACE/r2_build/bin/r2" ]; then
             echo "radare2 already present in r2_build, skipping build"
+            export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
             "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
             exit 0
           fi
@@ -133,13 +133,15 @@ jobs:
           git clone --depth 1 --branch ${{ env.R2_VER }} \
             https://github.com/radareorg/radare2.git /tmp/r2src
           cd /tmp/r2src
-          ./configure --prefix=/tmp/r2-install
+          ./configure --prefix=/tmp/r2-install --with-rpath
           make -j$(nproc)
           make install
           mkdir -p "$GITHUB_WORKSPACE/r2_build"
           cp -aL /tmp/r2-install/. "$GITHUB_WORKSPACE/r2_build/"
           ls -la "$GITHUB_WORKSPACE/r2_build/bin/" | head
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
+          find "$GITHUB_WORKSPACE/r2_build/lib" -maxdepth 2 -name "libr_*.so*" | head
 
       - name: Setup radare2 PATH
         run: |
@@ -187,8 +189,10 @@ jobs:
       - name: Verify radare2 runs
         run: |
           set -euo pipefail
+          export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           which r2
           r2 -v
+          ls -la "$GITHUB_WORKSPACE/r2_build/lib" | head
           r2 -N -q -c 'q' "$GITHUB_WORKSPACE/r2_session/brawl_bin"
           echo "r2 on binary: ok"
 
@@ -196,6 +200,7 @@ jobs:
         env:
           R2_BIN: ${{ github.workspace }}/r2_session/brawl_bin
           GITHUB_WORKSPACE: ${{ github.workspace }}
+          LD_LIBRARY_PATH: ${{ github.workspace }}/r2_build/lib:${{ github.workspace }}/r2_build/lib64
         run: |
           set -euo pipefail
           python scripts/find_offsets_r2.py 2>&1 | tee r2.log | tail -120
