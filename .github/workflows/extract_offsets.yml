@@ -78,7 +78,7 @@ jobs:
           set -euo pipefail
           rm -rf extract
           mkdir -p extract
-          unzip -q ipa_cache/bs.ipa -d extract
+          unzip -oq ipa_cache/bs.ipa -d extract
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           test -n "$APP_DIR"
           BIN="$APP_DIR/Nulls Brawl"
@@ -130,22 +130,18 @@ jobs:
         id: cache-ghidra
         with:
           path: ghidra
-          key: ghidra-12.1.2-jython-v2
+          key: ghidra-11.4.3-v1
           restore-keys: |
-            ghidra-12.1.2-
-            ghidra-
+            ghidra-11.4.3-
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
-          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
-          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
-          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
-          test -n "$JYTHON_ZIP"
-          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
-          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip
+          unzip -oq /tmp/g.zip -d "$GITHUB_WORKSPACE"
+          rm -rf "$GITHUB_WORKSPACE/ghidra"
+          mv "$GITHUB_WORKSPACE/ghidra_11.4.3_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           rm -f /tmp/g.zip
 
       - uses: actions/cache/restore@v4
@@ -210,22 +206,18 @@ jobs:
         id: cache-ghidra
         with:
           path: ghidra
-          key: ghidra-12.1.2-jython-v2
+          key: ghidra-11.4.3-v1
           restore-keys: |
-            ghidra-12.1.2-
-            ghidra-
+            ghidra-11.4.3-
 
       - name: Install Ghidra
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip
-          unzip -q /tmp/g.zip -d "$GITHUB_WORKSPACE"
-          mv "$GITHUB_WORKSPACE/ghidra_12.1.2_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
-          JYTHON_ZIP=$(find "$GITHUB_WORKSPACE/ghidra/Extensions/Ghidra" -maxdepth 1 -name "*Jython*.zip" | head -n1)
-          test -n "$JYTHON_ZIP"
-          mkdir -p "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
-          unzip -q "$JYTHON_ZIP" -d "$GITHUB_WORKSPACE/ghidra/Ghidra/Extensions"
+          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip
+          unzip -oq /tmp/g.zip -d "$GITHUB_WORKSPACE"
+          rm -rf "$GITHUB_WORKSPACE/ghidra"
+          mv "$GITHUB_WORKSPACE/ghidra_11.4.3_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           rm -f /tmp/g.zip
 
       - uses: actions/cache/restore@v4
