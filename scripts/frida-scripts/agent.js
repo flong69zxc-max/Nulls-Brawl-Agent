@@ -15,11 +15,8 @@ let updatedPath = null;
 let gameModule = null;
 let getBoolAddr = null;
 
-const forceTrue = new Set([
-  // "isDeveloperBuild",
-  // "isProduction",
-]);
-const forceFalse = new Set();
+const forceTrue = new Set([]);
+const forceFalse = new Set([]);
 
 function str(v) { try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; } }
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
@@ -135,7 +132,6 @@ function log(line) {
 }
 
 initPaths();
-
 log("=== debug_menu start ===");
 log("frida=" + Frida.version + " arch=" + Process.arch + " pid=" + Process.id);
 
@@ -172,62 +168,112 @@ function findGameModule() {
   return gameModule;
 }
 
-function findStringInModule(mod, needle) {
+function findAllOccurrences(needle, limit) {
+  const out = [];
   const ranges = Process.enumerateRanges("r--");
-  for (let i = 0; i < ranges.length; i++) {
-    const r = ranges[i];
-    const inMod = r.base.compare(mod.base) >= 0 && r.base.compare(mod.base.add(mod.size)) < 0;
-    if (!inMod) continue;
-    try {
-      const res = Memory.scanSync(r.base, r.size, needle);
-      if (res.length > 0) return res[0].address;
-    } catch (e) {}
-  }
-  return null;
-}
-
-function findGetBool() {
-  if (gameModule === null) findGameModule();
-  log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
-
-  const strAddr = findStringInModule(gameModule, ANCHOR_STRING);
-  if (strAddr === null) {
-    log("anchor string not found: " + ANCHOR_STRING);
-    return null;
-  }
-  log("anchor @ " + strAddr);
-
-  const xrefs = [];
-  const ranges = Process.enumerateRanges("r-x");
   for (let i = 0; i < ranges.length; i++) {
     const r = ranges[i];
     const inMod = r.base.compare(gameModule.base) >= 0 && r.base.compare(gameModule.base.add(gameModule.size)) < 0;
     if (!inMod) continue;
     try {
-      const insns = Memory.scanSync(r.base, r.size, "?? ?? ?? ??");
-      // Настоящий поиск ADRP+ADD xref-ов - дорогая операция, но у Frida есть встроенный API:
+      const res = Memory.scanSync(r.base, r.size, needle);
+      for (let j = 0; j < res.length && out.length < limit; j++) out.push(res[j].address);
     } catch (e) {}
   }
-
-  // Frida не даёт встроенных xref-ов. Используем перебор всех функций модуля и проверку,
-  // ссылается ли их код на адрес строки через ADRP+ADD. Это медленно, но надёжно.
-  const fm = Process.getModuleByName(gameModule.name);
-  // Ищем только по известному RVA из прошлой сессии, если он есть
-  return null;
+  return out;
 }
 
-function tryKnownRva(rva) {
-  if (gameModule === null) findGameModule();
-  const addr = gameModule.base.add(rva);
-  const r = Process.findRangeByAddress(addr);
-  if (r === null || r.protection.indexOf("x") === -1) return null;
-  try { Interceptor.attach(addr, { onEnter() {} }).detach(); }
-  catch (e) { return null; }
+// Найти все ADRP+ADD пары, чей конечный адрес равен target
+function findXrefs(target, maxHits) {
+  const hits = [];
+  const modStart = gameModule.base;
+  const modEnd = modStart.add(gameModule.size);
+  const targetNum = target.toUInt32 ? parseInt(target.toString(), 16) : target;
+
+  const ranges = Process.enumerateRanges("r-x");
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
+    if (r.base.compare(modStart) < 0) continue;
+    if (r.base.compare(modEnd) >= 0) continue;
+
+    const size = Math.min(r.size, modEnd.sub(r.base).toInt32());
+    let offset = 0;
+    const CHUNK = 1024 * 1024;
+    while (offset < size && hits.length < maxHits) {
+      const take = Math.min(CHUNK, size - offset);
+      let buf = null;
+      try { buf = r.base.add(offset).readByteArray(take); } catch (e) { offset += take; continue; }
+      if (buf === null) { offset += take; continue; }
+      const dv = new DataView(buf);
+      const count = Math.floor(take / 4);
+      const regs = {};
+      const baseAddr = r.base.add(offset);
+      for (let k = 0; k < count; k++) {
+        const insn = dv.getUint32(k * 4, true);
+        const addr = baseAddr.add(k * 4);
+
+        const family = (insn & 0x9F000000) >>> 0;
+        if (family === 0x90000000) {
+          // ADRP
+          const rd = insn & 0x1F;
+          let imm = (((insn >>> 5) & 0x7FFFF) << 2) | ((insn >>> 29) & 3);
+          if (imm & 0x100000) imm -= 0x200000;
+          const pcPage = parseInt(addr.toString(), 16) & ~0xFFF;
+          const page = pcPage + (imm * 4096);
+          regs[rd] = page;
+          continue;
+        }
+
+        if (((insn & 0xFF800000) >>> 0) === 0x91000000) {
+          // ADD (immediate) 64-bit
+          const rn = (insn >>> 5) & 0x1F;
+          const rd = insn & 0x1F;
+          const shift = (insn >>> 22) & 3;
+          const imm12 = (insn >>> 10) & 0xFFF;
+          if (shift === 0 || shift === 1) {
+            const base = regs[rn];
+            if (base !== undefined) {
+              const value = base + (shift === 1 ? imm12 * 4096 : imm12);
+              if (value === targetNum) {
+                hits.push({ addr: addr, via: "add", value: value });
+              }
+            }
+          }
+          regs[rd] = undefined;
+          continue;
+        }
+
+        // Сброс regs не делаем целиком, это эвристика — оставляем значения между парами,
+        // что даёт ложные, но редкие срабатывания. Достаточно для нашей задачи.
+      }
+      offset += take;
+    }
+  }
+  return hits;
+}
+
+function findFunctionStart(addr) {
+  // Идём назад до пролога. Пролог ARM64:
+  //   STP x29, x30, [sp, #-N]! = 0xA9B?7BFD (маска 0xFFC07FFF == 0xA9807BFD)
+  //   PACIASP = 0xD503233F
+  //   SUB sp, sp, #imm = 0xD10?03FF (маска 0xFF8003FF == 0xD10003FF)
+  //   STP x19..., [sp, #-N]! = 0xA9B?7BFD с разными регистрами
+  const MAX_BACK = 4096;
+  let cur = addr;
+  for (let i = 0; i < MAX_BACK / 4; i++) {
+    let insn = null;
+    try { insn = cur.readU32(); } catch (e) { break; }
+    if ((insn & 0xFFC07FFF) === 0xA9807BFD) return cur;
+    if (insn === 0xD503233F) return cur;
+    if ((insn & 0xFF8003FF) === 0xD10003FF) return cur;
+    if ((insn & 0xFFE07FFF) === 0xA9807BFD) return cur;
+    cur = cur.sub(4);
+  }
   return addr;
 }
 
 function installHook(addr) {
-  log("installing hook @ " + addr);
+  log("installing hook @ " + addr + " (rva 0x" + addr.sub(gameModule.base).toString(16) + ")");
   try {
     Interceptor.attach(addr, {
       onEnter: function (args) {
@@ -268,25 +314,61 @@ function installHook(addr) {
   }
 }
 
-// Из прошлых прогонов известен RVA 0xb24998 для SCIDConfig::getBool.
-// Если он актуален — используем его. Если нет — хук не встанет, смотри лог.
-const KNOWN_RVA = 0xb24998;
+function run() {
+  if (gameModule === null) findGameModule();
+  log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
 
-setTimeout(function () {
-  const addr = tryKnownRva(KNOWN_RVA);
-  if (addr !== null) {
-    installHook(addr);
-  } else {
-    log("known RVA 0x" + KNOWN_RVA.toString(16) + " is not a valid function, need to find by string");
-    log("will try to find via anchor string (slow, not implemented in this pass)");
+  log("scanning for string " + ANCHOR_STRING);
+  const strAddrs = findAllOccurrences(ANCHOR_STRING, 8);
+  log("found " + strAddrs.length + " string occurrence(s)");
+  if (strAddrs.length === 0) {
+    log("anchor string not found, aborting");
+    return;
   }
-}, 2000);
+
+  let picked = null;
+  for (let i = 0; i < strAddrs.length; i++) {
+    log("string candidate " + i + ": " + strAddrs[i]);
+    picked = strAddrs[i];
+    break;
+  }
+
+  log("searching xrefs for " + picked + " (this may take 10-30s)");
+  const xrefs = findXrefs(picked, 64);
+  log("xrefs found: " + xrefs.length);
+
+  if (xrefs.length === 0) {
+    log("no direct ADRP+ADD xrefs. Probably chained fixups / literal pool. Aborting.");
+    return;
+  }
+
+  const seen = {};
+  const funcStarts = [];
+  for (let i = 0; i < xrefs.length; i++) {
+    const hit = xrefs[i];
+    const start = findFunctionStart(hit.addr);
+    const key = start.toString();
+    if (seen[key]) continue;
+    seen[key] = true;
+    funcStarts.push({ start: start, hit: hit.addr });
+    log("xref#" + i + " hit=" + hit.addr + " (rva 0x" + hit.addr.sub(gameModule.base).toString(16) + ") -> func@ " + start + " (rva 0x" + start.sub(gameModule.base).toString(16) + ")");
+  }
+
+  if (funcStarts.length === 0) {
+    log("no function starts resolved, aborting");
+    return;
+  }
+
+  installHook(funcStarts[0].start);
+}
+
+setTimeout(run, 2000);
 
 rpc.exports = {
   addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
   force_true: function (name) { forceTrue.add(name); return Array.from(forceTrue); },
   force_false: function (name) { forceFalse.add(name); return Array.from(forceFalse); },
-  list: function () { return { true: Array.from(forceTrue), false: Array.from(forceFalse) }; },
+  list: function () { return { t: Array.from(forceTrue), f: Array.from(forceFalse) }; },
   logPath: function () { return logPath; }
 };
 
