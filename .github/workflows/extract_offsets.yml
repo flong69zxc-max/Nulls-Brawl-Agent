@@ -176,6 +176,16 @@ jobs:
             -analysisTimeoutPerFile 3600 \
             -max-cpu "$JOBS" 2>&1 | tee cold.log | tail -60
 
+      - name: List programs in project
+        if: steps.cache-project.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
+            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+            -process "brawl_bin" -noanalysis \
+            -postScript "print_programs.py" \
+            -scriptPath "$GITHUB_WORKSPACE/scripts" 2>&1 | tail -50
+
       - uses: actions/cache/save@v4
         if: steps.cache-project.outputs.cache-hit != 'true'
         with:
