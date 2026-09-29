@@ -96,46 +96,6 @@ def addr_of(s, base):
     return 0
 
 
-def dump_bin_info(r2):
-    info = cmdj(r2, "ij")
-    if info:
-        log("ij: arch=%s bits=%s baddr=0x%x binsz=%s"
-            % (info.get("arch", "?"), info.get("bits", "?"),
-               info.get("baddr", 0), info.get("size", "?")))
-        log("ij: endian=%s os=%s type=%s"
-            % (info.get("endian", "?"), info.get("os", "?"), info.get("type", "?")))
-    else:
-        log("ij: no data")
-
-    log("iSj sections (first 30):")
-    secs = cmdj(r2, "iSj")
-    if secs:
-        for i, s in enumerate(secs[:30]):
-            log("  [%2d] name=%-32s vaddr=0x%x size=0x%x perm=%s"
-                % (i, s.get("name", ""), s.get("vaddr", 0),
-                   s.get("size", 0), s.get("perm", "")))
-        if len(secs) > 30:
-            log("  ... %d more sections" % (len(secs) - 30))
-    else:
-        log("iSj: no sections!")
-
-    log("config check:")
-    for opt in ("asm.arch", "asm.bits", "anal.arch", "anal.plugin", "asm.features"):
-        log("  %s = %s" % (opt, cmd(r2, "e %s" % opt).strip()))
-
-
-def get_text_bounds(r2):
-    sections = cmdj(r2, "iSj")
-    if not sections:
-        return None
-    for s in sections:
-        n = s.get("name", "") or ""
-        p = s.get("perm", "") or ""
-        if ("__text" in n or ".text" in n) and "x" in p:
-            return (s.get("vaddr", 0), s.get("vaddr", 0) + s.get("size", 0))
-    return None
-
-
 def build_string_index(r2, base):
     strings = cmdj(r2, "izj")
     if not strings:
@@ -156,9 +116,19 @@ def build_string_index(r2, base):
     return idx
 
 
-# --- ARM64 instruction decode ---
-# ADRP: bits 31=1, 30:29=immlo, 28:24=10000, 23:5=immhi, 4:0=Rd
-# ADD (imm, 64-bit, no flag): bits 31=1, 30=0, 29=0, 28:23=100010, 22=sh, 21:10=imm12, 9:5=Rn, 4:0=Rd
+def get_text_bounds(r2):
+    sections = cmdj(r2, "iSj")
+    if not sections:
+        return None
+    for s in sections:
+        n = s.get("name", "") or ""
+        p = s.get("perm", "") or ""
+        if ("__text" in n or ".text" in n) and "x" in p:
+            return (s.get("vaddr", 0), s.get("vaddr", 0) + s.get("size", 0))
+    return None
+
+
+# --- ARM64 decoders ---
 
 def is_adrp(w):
     return (w & 0x9F000000) == 0x90000000
@@ -174,7 +144,6 @@ def decode_adrp_imm(w, pc):
 
 
 def is_add_imm64(w):
-    # 0x91000000 base, sh bit varies: use mask ignoring sh
     return (w & 0xFF800000) == 0x91000000
 
 
@@ -188,9 +157,29 @@ def decode_add_imm(w):
     return (rd, rn, imm12)
 
 
+def is_stp_x29_x30_preindex(w):
+    # stp x29, x30, [sp, #imm]!  (64-bit, pre-index, signed offset)
+    return (w & 0xFFC07FFF) == 0xA9807BFD
+
+
+def is_stp_x29_x30_offset(w):
+    # stp x29, x30, [sp, #imm]  (64-bit, offset)
+    return (w & 0xFFC07FFF) == 0xA9007BFD
+
+
+def is_sub_sp_sp(w):
+    # sub sp, sp, #imm
+    return (w & 0xFF8003FF) == 0xD10003FF
+
+
+def is_pacibsp(w):
+    return w == 0xD503237F
+
+
+# --- text scan ---
+
 def scan_text_for_adrp_add(r2, text_start, text_end, target_set):
-    """Byte scan .text for ADRP+ADD pairs matching target_set."""
-    CHUNK = 0x100000  # 1 MB
+    CHUNK = 0x100000
     overlap = 32
     results = {}
     total_pairs = 0
@@ -204,8 +193,7 @@ def scan_text_for_adrp_add(r2, text_start, text_end, target_set):
             log("[!] adrp scan budget exhausted at 0x%x" % addr)
             break
         size = min(CHUNK, text_end - addr)
-        hx = cmd(r2, "p8 %d @ 0x%x" % (size, addr))
-        hx = hx.strip()
+        hx = cmd(r2, "p8 %d @ 0x%x" % (size, addr)).strip()
         if not hx:
             log("[!] p8 returned empty at 0x%x" % addr)
             addr += size
@@ -228,8 +216,6 @@ def scan_text_for_adrp_add(r2, text_start, text_end, target_set):
                 total_adrp += 1
                 rd_adrp = w & 0x1F
                 page = decode_adrp_imm(w, ia)
-                # look ahead up to 6 instrs for ADD xR, xR, #imm
-                found = False
                 for j in range(i + 1, min(i + 7, n)):
                     w2 = struct.unpack_from("<I", data, j * 4)[0]
                     if is_add_imm64(w2):
@@ -239,15 +225,11 @@ def scan_text_for_adrp_add(r2, text_start, text_end, target_set):
                             target = page + imm
                             if target in target_set:
                                 results.setdefault(target, []).append(ia)
-                                found = True
                             break
             i += 1
         carry = data[-overlap:] if len(data) > overlap else data
         carry_addr = addr + size - len(carry)
         addr += size
-        if (addr - text_start) % (8 * CHUNK) == 0:
-            log("[*] adrp scan progress: 0x%x / 0x%x (%d pairs)"
-                % (addr, text_end, sum(len(v) for v in results.values())))
     log("[*] adrp scan done: adrp=%d add=%d pairs-to-targets=%d"
         % (total_adrp, total_add, sum(len(v) for v in results.values())))
     return results
@@ -274,18 +256,87 @@ def load_mod_init_func(r2):
                     p = struct.unpack_from("<Q", b, k)[0]
                     if p and p > 0x100000000:
                         out.append(p)
-    log("[*] __mod_init_func entries: %d" % len(out))
+    log("[*] __init_offsets/__mod_init_func entries: %d" % len(out))
     return out
 
+
+# --- function recovery ---
 
 def get_function_at(r2, addr):
     f = cmdj(r2, "afij @ 0x%x" % addr)
     if isinstance(f, list) and f:
+        best = None
+        for f0 in f:
+            off = f0.get("offset", 0)
+            sz = f0.get("size", 0)
+            if off <= addr < off + sz:
+                if best is None or sz > best[2]:
+                    best = (off, f0.get("name", ""), sz)
+        if best:
+            return (best[0], best[1])
         f0 = f[0]
         return (f0.get("offset", 0), f0.get("name", ""))
     if isinstance(f, dict):
         return (f.get("offset", 0), f.get("name", ""))
     return None
+
+
+def find_prolog(r2, addr, max_back=0x800):
+    start = max(0, addr - max_back)
+    size = addr - start + 4
+    hx = cmd(r2, "p8 %d @ 0x%x" % (size, start)).strip()
+    if not hx:
+        return None
+    try:
+        data = bytes.fromhex(hx)
+    except Exception:
+        return None
+    n = len(data) // 4
+    # ищем назад: первый stp x29, x30 [sp, ...]! (pre-index) — лучший кандидат
+    # либо sub sp, sp, #N
+    candidates_pre = []
+    candidates_sub = []
+    for i in range(n):
+        w = struct.unpack_from("<I", data, i * 4)[0]
+        ia = start + i * 4
+        if ia > addr:
+            break
+        if is_stp_x29_x30_preindex(w):
+            candidates_pre.append(ia)
+        elif is_sub_sp_sp(w):
+            candidates_sub.append(ia)
+    if candidates_pre:
+        return candidates_pre[-1]
+    if candidates_sub:
+        return candidates_sub[-1]
+    return None
+
+
+def force_function_at(r2, addr):
+    f = get_function_at(r2, addr)
+    if f:
+        return f, "existing"
+    # попробуем af без анализа
+    r2.cmd("af @ 0x%x" % addr)
+    f = get_function_at(r2, addr)
+    if f and f[0] and f[0] <= addr:
+        return f, "af"
+    prolog = find_prolog(r2, addr)
+    if prolog:
+        r2.cmd("af @ 0x%x" % prolog)
+        f = get_function_at(r2, prolog)
+        if f:
+            return f, "af_prolog@0x%x" % prolog
+    return None, "none"
+
+
+def nearest_init(mod_inits, addr, max_diff=0x400):
+    best = None
+    for p in mod_inits:
+        d = abs(p - addr)
+        if d <= max_diff and (best is None or d < best[1]):
+            best = (p, d)
+    return best[0] if best else None
 
 
 def scan_class(r2, cls, str_index, adrp_hits, mod_inits, base):
@@ -300,25 +351,65 @@ def scan_class(r2, cls, str_index, adrp_hits, mod_inits, base):
 
     log("[%s] string anchors: %d" % (cls, len(addrs)))
 
-    candidates = []
+    all_hits = []
     for sa in addrs:
         if sa in adrp_hits:
             for ia in adrp_hits[sa]:
-                candidates.append(("adrp_add", ia, sa))
-                log("[%s]   ADRP+ADD hit: str@0x%x -> adrp@0x%x" % (cls, sa, ia))
-
-    if not candidates:
+                all_hits.append((ia, sa))
+    if not all_hits:
         log("[%s] no ADRP+ADD candidates" % cls)
         return {"class": cls, "method": None, "vtable": None, "ctor": None}
 
-    src, ia, sa = candidates[0]
-    f = get_function_at(r2, ia)
-    if f:
-        log("[%s] func containing 0x%x: 0x%x %s" % (cls, ia, f[0], f[1]))
-        return {"class": cls, "method": (f[0] - base, f[1]),
-                "vtable": None, "ctor": None, "src": src, "str_addr": sa}
-    log("[%s] no function at 0x%x" % (cls, ia))
-    return {"class": cls, "method": None, "vtable": None, "ctor": None}
+    log("[%s] total ADRP+ADD hits: %d" % (cls, len(all_hits)))
+
+    # для каждого hit пытаемся получить функцию
+    attempts = []
+    for ia, sa in all_hits[:12]:
+        f, how = force_function_at(r2, ia)
+        if f:
+            attempts.append((f[0], f[1], ia, sa, how))
+            log("[%s]   hit 0x%x -> func 0x%x %s (%s)"
+                % (cls, ia, f[0], f[1], how))
+        else:
+            log("[%s]   hit 0x%x -> no function (how=%s)" % (cls, ia, how))
+
+    if not attempts:
+        # fallback через __init_offsets
+        for ia, sa in all_hits[:8]:
+            ni = nearest_init(mod_inits, ia, max_diff=0x400)
+            if ni:
+                f, how = force_function_at(r2, ni)
+                if f:
+                    attempts.append((f[0], f[1], ia, sa, "init_offsets"))
+                    log("[%s]   hit 0x%x -> init 0x%x -> func 0x%x %s"
+                        % (cls, ia, ni, f[0], f[1]))
+
+    if not attempts:
+        log("[%s] UNRESOLVED (no function for any hit)" % cls)
+        return {"class": cls, "method": None, "vtable": None, "ctor": None}
+
+    # фильтр логгеров
+    filtered = [a for a in attempts if not is_logger(a[1])]
+    if not filtered:
+        filtered = attempts
+
+    # выбираем самый частый entry (если несколько хитов идут в один ctor)
+    counts = {}
+    for a in filtered:
+        counts[a[0]] = counts.get(a[0], 0) + 1
+    best_entry = max(counts.items(), key=lambda x: x[1])[0]
+    best = None
+    for a in filtered:
+        if a[0] == best_entry:
+            best = a
+            break
+
+    log("[%s] CHOSEN: func 0x%x %s (via %s, from hit 0x%x)"
+        % (cls, best[0], best[1], best[4], best[2]))
+
+    return {"class": cls, "method": (best[0] - base, best[1]),
+            "vtable": None, "ctor": None, "src": best[4],
+            "str_addr": best[3], "hit_addr": best[2]}
 
 
 def main():
@@ -328,7 +419,7 @@ def main():
     except Exception:
         _log_fh = None
 
-    log("=== find_offsets_r2 v5 ===")
+    log("=== find_offsets_r2 v6 ===")
     log("bin: %s" % BIN)
 
     r2 = r2pipe.open(BIN, flags=["-2"])
@@ -346,7 +437,6 @@ def main():
     ):
         r2.cmd(opt)
 
-    # Форсируем архитектуру, если r2 не угадал
     r2.cmd("e asm.arch=arm")
     r2.cmd("e asm.bits=64")
     try:
@@ -354,23 +444,17 @@ def main():
     except Exception:
         pass
 
-    dump_bin_info(r2)
-
     info = cmdj(r2, "ij")
     base = (info or {}).get("baddr", 0x100000000) or 0x100000000
     log("base: 0x%x" % base)
 
-    # === анализ ===
     t0 = time.time()
-    log("running aaa ...")
     r2.cmd("aaa")
     log("aaa done in %.1fs, aflc=%s" % (time.time() - t0, cmd(r2, "aflc").strip()))
     t0 = time.time()
-    log("running aac ...")
     r2.cmd("aac")
     log("aac done in %.1fs, aflc=%s" % (time.time() - t0, cmd(r2, "aflc").strip()))
     t0 = time.time()
-    log("running aar ...")
     r2.cmd("aar")
     log("aar done in %.1fs" % (time.time() - t0))
 
@@ -387,15 +471,13 @@ def main():
 
     text = get_text_bounds(r2)
     if not text:
-        log("[!] .text not found, cannot scan")
+        log("[!] .text not found")
         r2.quit()
         return
     ts, te = text
     log("[*] .text: 0x%x - 0x%x (size 0x%x)" % (ts, te, te - ts))
 
-    log("scanning .text for ADRP+ADD ...")
     adrp_hits = scan_text_for_adrp_add(r2, ts, te, target_set)
-
     mod_inits = load_mod_init_func(r2)
 
     results = []
@@ -416,7 +498,7 @@ def main():
 
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# r2 ctor resolution (v5, byte-scan ADRP+ADD)\n")
+            fh.write("# r2 ctor resolution (v6)\n")
             fh.write("# base=0x%x\n\n" % base)
             for r in results:
                 fh.write("=== %s ===\n" % r["class"])
@@ -427,6 +509,8 @@ def main():
                     fh.write("  src:    %s\n" % r["src"])
                 if r.get("str_addr"):
                     fh.write("  str:    rva=0x%08x\n" % (r["str_addr"] - base))
+                if r.get("hit_addr"):
+                    fh.write("  hit:    rva=0x%08x\n" % (r["hit_addr"] - base))
                 fh.write("\n")
     except Exception as e:
         log("write REPORT failed: %s" % e)
@@ -438,8 +522,8 @@ def main():
             fh.write("export const ctors = Object.freeze({\n")
             for r in results:
                 n_tot += 1
-                if r.get("ctor"):
-                    fh.write("  %s: 0x%x,\n" % (r["class"], r["ctor"][0]))
+                if r.get("method"):
+                    fh.write("  %s: 0x%x,\n" % (r["class"], r["method"][0]))
                     n_ok += 1
                 else:
                     fh.write("  // %s: unresolved\n" % r["class"])
