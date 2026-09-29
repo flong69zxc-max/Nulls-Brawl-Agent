@@ -22,6 +22,7 @@ jobs:
     env:
       FRIDA_VERSION: "17.19.0"
       LDID_VERSION: "v2.1.5-procursus7"
+      IPA_URL: "https://tempweb.nullsusercontent.com/fpipa/nb_69.252_4cc76283.ipa"
 
     steps:
       - uses: actions/checkout@v4
@@ -49,57 +50,11 @@ jobs:
             --outfile=build/agent.js
           ls -la build/agent.js
 
-      - name: Resolve IPA URL
-        id: resolve
-        run: |
-          set -euo pipefail
-          UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-          absolutize() {
-            local base="$1" loc="$2"
-            case "$loc" in
-              http*) printf '%s' "$loc" ;;
-              /*)    printf '%s%s' "$(printf '%s' "$base" | grep -oE '^https?://[^/]+')" "$loc" ;;
-              *)     printf '%s/%s' "$(printf '%s' "$base" | sed -E 's#/[^/]*$##')" "$loc" ;;
-            esac
-          }
-          resolve() {
-            local url="$1" i=0 body next loc hdrs
-            while [ $i -lt 10 ]; do
-              i=$((i+1))
-              echo "resolve[$i] -> $url" >&2
-              hdrs=$(curl -sIL -A "$UA" --max-time 30 "$url" | tr -d '\r' || true)
-              loc=$(printf '%s\n' "$hdrs" | awk 'tolower($1)=="location:"{sub(/^[^:]+:[ \t]*/,""); print}' | tail -1)
-              if [ -n "$loc" ]; then
-                url=$(absolutize "$url" "$loc")
-                continue
-              fi
-              body=$(curl -sL -A "$UA" --max-time 60 -r 0-8191 "$url" 2>/dev/null || true)
-              if printf '%s' "$body" | head -c 200 | grep -qiE '<!doctype|<html'; then
-                next=$(printf '%s' "$body" \
-                  | grep -oE 'https?://[^"'"'"'<> ]+' \
-                  | grep -viE 'w3\.org|googleapis\.com|gstatic\.com|/nulls\.games(/|$)' \
-                  | head -1)
-                if [ -n "$next" ] && [ "$next" != "$url" ]; then
-                  url="$next"
-                  continue
-                fi
-              fi
-              break
-            done
-            printf '%s' "$url"
-          }
-          FINAL=$(resolve "https://nulls.ee/bs_latest_i")
-          echo "final URL: $FINAL"
-          test -n "$FINAL"
-          echo "URL=$FINAL" >> "$GITHUB_OUTPUT"
-          VER=$(basename "${FINAL%%\?*}" | sed -nE 's/.*nb[_-]?([0-9]+(\.[0-9]+)+).*/\1/p')
-          echo "VER=${VER:-unknown}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/cache@v4
         id: cache-ipa
         with:
           path: ipa_cache
-          key: nulls-brawl-ipa-v4-${{ steps.resolve.outputs.VER }}
+          key: nulls-brawl-ipa-v5-direct
 
       - name: Download IPA
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -112,7 +67,7 @@ jobs:
             -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" \
             -H "Accept: */*" \
             -o ipa_cache/bs.ipa \
-            "${{ steps.resolve.outputs.URL }}"
+            "$IPA_URL"
           test -s ipa_cache/bs.ipa
           file ipa_cache/bs.ipa || true
           if ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
@@ -166,15 +121,47 @@ jobs:
           chmod +x gum-graft-bin/gum-graft
           rm -f gum-graft.xz
 
-      - name: Graft binary (all offsets)
+      - name: Graft binary (try variants)
         run: |
           set -euo pipefail
-          ./gum-graft-bin/gum-graft \
-            --ingest-function-starts \
-            --ingest-imports \
-            --transform-lazy-binds \
-            --path "$BIN"
-          echo "graft done"
+          cp "$BIN" "$BIN.orig"
+          SIZE0=$(stat -f%z "$BIN.orig")
+          echo "orig size: $SIZE0"
+
+          try() {
+            local name="$1"; shift
+            cp "$BIN.orig" "$BIN.test"
+            echo "--- $name ---"
+            if ./gum-graft-bin/gum-graft "$@" "$BIN.test" 2>&1 | tee "/tmp/graft-$name.log"; then
+              local sz
+              sz=$(stat -f%z "$BIN.test" 2>/dev/null || echo 0)
+              if [ "$sz" != "$SIZE0" ] && [ "$sz" != "0" ]; then
+                echo "  CHANGED: $SIZE0 -> $sz"
+                cp "$BIN.test" "$BIN"
+                chmod +x "$BIN"
+                rm -f "$BIN.test" "$BIN.orig"
+                return 0
+              fi
+              echo "  no change ($sz)"
+            else
+              echo "  FAILED (exit $?)"
+            fi
+            rm -f "$BIN.test"
+            return 1
+          }
+
+          try "ingest-fn"    --ingest-function-starts   && exit 0
+          try "ingest-imports" --ingest-imports          && exit 0
+          try "lazy-binds"   --transform-lazy-binds     && exit 0
+          try "fn+imports"   --ingest-function-starts --ingest-imports && exit 0
+          try "fn+lazy"      --ingest-function-starts --transform-lazy-binds && exit 0
+          try "all"          --ingest-function-starts --ingest-imports --transform-lazy-binds && exit 0
+
+          echo "no variant worked"
+          cp "$BIN.orig" "$BIN"
+          chmod +x "$BIN"
+          rm -f "$BIN.orig"
+          exit 1
 
       - name: Cache Frida Gadget
         id: cache-gadget
@@ -316,8 +303,11 @@ jobs:
           file bs_patched.ipa
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: patched-brawl-ipa
-          path: bs_patched.ipa
+          path: |
+            bs_patched.ipa
+            /tmp/graft-*.log
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
