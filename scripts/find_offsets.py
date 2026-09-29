@@ -13,19 +13,25 @@ OFF_IN = os.path.join(WS, "offsets.js")
 OFF_OUT = os.path.join(WS, "offsets_resolved.js")
 REPORT = os.path.join(WS, "offsets_report.txt")
 SIGDB = os.path.join(WS, "signatures.json")
+DEV_REPORT = os.path.join(WS, "dev_flags_report.txt")
 
 TEXT_BASE = 0x100000000
 MIN_FUNC_RVA = 0x10000
 BUDGET_SEC = 3600
-MIN_EXPECTED_ENTRIES = 200
+MIN_EXPECTED_ENTRIES = 0
 GENERIC_ANCHOR_LIMIT = 50
+DUMP_DEV_STRINGS = True
 
 L = []
 START = time.time()
-SAMPLE_LIMIT = 40
+SAMPLE_LIMIT = 200
 
-log = lambda m: (sys.stdout.write(m + "\n"), sys.stdout.flush())
-w = lambda s: L.append(s)
+def log(m):
+    sys.stdout.write(m + "\n")
+    sys.stdout.flush()
+
+def w(s):
+    L.append(s)
 
 STRING_ANCHORS = {
     "LogicSkillData__getMsBetweenAttacks": ["MsBetweenAttacks"],
@@ -189,12 +195,46 @@ STRING_ANCHORS = {
 }
 
 DEVELOPER_FLAGS = {
-    "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
-    "LogicVersion_isDev": ["isDev"],
-    "LogicVersion_isProd": ["isProd"],
+    "LogicVersion_isDeveloperBuild": [
+        "isDeveloperBuild",
+        "isDeveloper",
+        "DeveloperBuild",
+        "isDevBuild",
+        "DEV_BUILD",
+        "devBuild",
+    ],
+    "LogicVersion_isDev": [
+        "isDev",
+        "isDevMode",
+        "DevMode",
+        "dev_mode",
+        "isInternal",
+        "InternalBuild",
+        "isDebug",
+        "DebugBuild",
+    ],
+    "LogicVersion_isProd": [
+        "isProd",
+        "isProduction",
+        "isProductive",
+        "isRelease",
+        "isLive",
+        "ReleaseBuild",
+        "prodBuild",
+    ],
     "SCIDConfig_isDevBuild": ["isDevBuild"],
     "LogicVersion_isProduction": ["isProduction"],
 }
+
+DEV_STR_DUMP_FILTERS = [
+    "isDev", "IsDev", "isDeveloper", "IsDeveloper",
+    "isProd", "IsProd", "Production",
+    "DevBuild", "devBuild", "DEV_BUILD",
+    "DebugMenu", "debugMenu", "Debug",
+    "Internal", "internal",
+    "Release", "release",
+    "Frida", "frida",
+]
 
 def addr(rva_val):
     try:
@@ -338,7 +378,7 @@ def index_strings():
                 continue
             total_str += 1
             if len(sample) < SAMPLE_LIMIT:
-                sample.append(sval[:120])
+                sample.append(sval[:160])
             key = sval[:256]
             idx.setdefault(key, []).append(d.getAddress())
         except:
@@ -346,8 +386,8 @@ def index_strings():
     log("[*] total data items: %d" % total_data)
     log("[*] total strings: %d" % total_str)
     log("[*] unique strings: %d" % len(idx))
-    log("[*] sample strings:")
-    for s in sample[:20]:
+    log("[*] sample strings (first 40):")
+    for s in sample[:40]:
         log("    %r" % s)
     return idx, total_data, total_str
 
@@ -357,6 +397,37 @@ def find_anchor_addrs(string_idx, anchor):
         if anchor in sval:
             out.extend(addrs)
     return out
+
+def dump_dev_related_strings(string_idx):
+    log("[*] dumping dev/prod-related strings...")
+    found = {}
+    for sval, addrs in string_idx.items():
+        for f in DEV_STR_DUMP_FILTERS:
+            if f in sval:
+                found.setdefault(f, [])
+                for a in addrs:
+                    found[f].append((rva(a), sval[:160]))
+                break
+    fh = None
+    try:
+        fh = open(DEV_REPORT, "w")
+    except:
+        fh = None
+    for f in sorted(found.keys()):
+        items = found[f][:50]
+        log("  [%s] %d hit(s):" % (f, len(found[f])))
+        if fh is not None:
+            fh.write("[%s] %d hit(s):\n" % (f, len(found[f])))
+        for r, s in items:
+            log("    rva=0x%x  %r" % (r, s))
+            if fh is not None:
+                fh.write("    rva=0x%x  %r\n" % (r, s))
+    if fh is not None:
+        try:
+            fh.close()
+        except:
+            pass
+    log("[*] wrote %s" % DEV_REPORT)
 
 def score_functions_for_name(anchors, anchor_hits, used_addrs, rm):
     scores = {}
@@ -391,11 +462,11 @@ def score_functions_for_name(anchors, anchor_hits, used_addrs, rm):
     return scores, addr_to_func
 
 def main():
-    log("=== find_offsets v4 (scored anchors) ===")
+    log("=== find_offsets v5 (dev-flags focused) ===")
     offs = read_offsets()
     log("[*] parsed %d entries from offsets.js" % len(offs))
 
-    if len(offs) < MIN_EXPECTED_ENTRIES:
+    if MIN_EXPECTED_ENTRIES > 0 and len(offs) < MIN_EXPECTED_ENTRIES:
         log("[!] ABORT: offsets.js has only %d entries, expected >= %d" % (len(offs), MIN_EXPECTED_ENTRIES))
         sys.exit(1)
 
@@ -404,7 +475,7 @@ def main():
 
     string_idx, total_data, total_str = index_strings()
     if total_str == 0:
-        log("[!] NO STRINGS FOUND — cannot use SCRE method")
+        log("[!] NO STRINGS FOUND")
         sys.exit(1)
 
     all_anchors = set()
@@ -426,6 +497,8 @@ def main():
                 generic_anchors.add(a)
     log("[*] anchors with hits: %d / %d" % (len(anchor_hits), len(all_anchors)))
     log("[*] generic anchors (>%d hits): %d" % (GENERIC_ANCHOR_LIMIT, len(generic_anchors)))
+    for a in sorted(anchor_hits.keys()):
+        log("    anchor %r -> %d hit(s)" % (a, len(anchor_hits[a])))
 
     rm = currentProgram.getReferenceManager()
     resolved = {}
@@ -437,7 +510,6 @@ def main():
     new_sigs = {}
     sig_index = None
     used_addrs = set()
-    addr_owner = {}
 
     names_sorted = sorted(offs.keys())
     for name in names_sorted:
@@ -492,7 +564,6 @@ def main():
         best_rva = top[0]
         for sa_key in addr_to_func.get(best_rva, []):
             used_addrs.add(sa_key)
-            addr_owner[sa_key] = name
         resolved[name] = best_rva
         anchor_hits_count += 1
         try:
@@ -505,9 +576,13 @@ def main():
             pass
 
     dev_flags = {}
-    for flag_name, anchors in DEVELOPER_FLAGS.items():
+    log("")
+    log("=== DEV FLAG RESOLUTION ===")
+    for flag_name in sorted(DEVELOPER_FLAGS.keys()):
+        anchors = DEVELOPER_FLAGS[flag_name]
         scores, addr_to_func = score_functions_for_name(anchors, anchor_hits, used_addrs, rm)
         if not scores:
+            log("  %s -> no hits" % flag_name)
             continue
         best_score = max(scores.values())
         top = [fr for fr, sc in scores.items() if sc == best_score and sc > 0]
@@ -516,7 +591,14 @@ def main():
             dev_flags[flag_name] = best_rva
             for sa_key in addr_to_func.get(best_rva, []):
                 used_addrs.add(sa_key)
-                addr_owner[sa_key] = flag_name
+            log("  %s -> rva=0x%x score=%d" % (flag_name, best_rva, best_score))
+        else:
+            log("  %s -> ambiguous (%d candidates):" % (flag_name, len(top)))
+            for fr in top[:20]:
+                log("      rva=0x%x score=%d" % (fr, scores[fr]))
+
+    if DUMP_DEV_STRINGS:
+        dump_dev_related_strings(string_idx)
 
     fh = open(OFF_OUT, "w")
     fh.write("export const offsets = Object.freeze(\n{\n")
@@ -540,7 +622,7 @@ def main():
     w("resolved: %d (verified=%d rematched=%d anchor=%d ambiguous=%d)" % (
         len(resolved), verified, rematched, anchor_hits_count, ambiguous))
     w("developer flags found: %d" % len(dev_flags))
-    for n, r in dev_flags.items():
+    for n, r in sorted(dev_flags.items()):
         w("  DEV %s @ 0x%x" % (n, r))
     w("failed: %d" % len(failures))
     for n, r, msg in failures[:100]:
