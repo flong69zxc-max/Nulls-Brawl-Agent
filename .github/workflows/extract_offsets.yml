@@ -17,8 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHE_EPOCH: v4
+  CACHE_EPOCH: v6
   GHIDRA_VER: "11.4.3"
+  GHIDRA_URL: "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip"
 
 jobs:
   prepare:
@@ -26,7 +27,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       ver: ${{ steps.resolve.outputs.VER }}
-      url: ${{ steps.resolve.outputs.URL }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,9 +45,9 @@ jobs:
           LOC=$(curl -sIL -A "Mozilla/5.0" "https://dnull.xyz/latest_bs_i" \
             | grep -i "^location:" | tail -1 | awk '{print $2}' | tr -d '\r\n')
           test -n "$LOC"
-          echo "URL=$LOC" >> "$GITHUB_OUTPUT"
           VER=$(basename "$LOC" | sed -E 's/nb_([0-9.]+)_.*/\1/')
           echo "VER=$VER" >> "$GITHUB_OUTPUT"
+          echo "URL=$LOC" >> "$GITHUB_OUTPUT"
           echo "resolved: $LOC (version $VER)"
 
       - uses: actions/cache@v4
@@ -64,18 +64,12 @@ jobs:
           set -euo pipefail
           mkdir -p ipa_cache
           curl -fL --retry 5 --retry-delay 5 --retry-all-errors \
-            --max-time 900 \
-            -A "Mozilla/5.0" \
-            -o ipa_cache/bs.ipa \
-            "${{ steps.resolve.outputs.URL }}"
+            --max-time 900 -A "Mozilla/5.0" \
+            -o ipa_cache/bs.ipa "${{ steps.resolve.outputs.URL }}"
           test -s ipa_cache/bs.ipa
           file ipa_cache/bs.ipa
-          if ! file ipa_cache/bs.ipa | grep -qi "zip"; then
-            echo "ERROR: not a zip/ipa"
-            exit 1
-          fi
 
-      - name: Extract executable
+      - name: Extract binary
         run: |
           set -euo pipefail
           rm -rf extract
@@ -91,10 +85,7 @@ jobs:
               case "$f" in
                 *.dylib|*.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.xml|*.txt|*.html) continue ;;
               esac
-              if file "$f" | grep -qi "Mach-O"; then
-                BIN="$f"
-                break
-              fi
+              if file "$f" | grep -qi "Mach-O"; then BIN="$f"; break; fi
             done
           fi
           test -n "$BIN"
@@ -139,66 +130,55 @@ jobs:
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip
+          curl -fsSL -o /tmp/g.zip "${{ env.GHIDRA_URL }}"
           unzip -oq /tmp/g.zip -d "$GITHUB_WORKSPACE"
           rm -rf "$GITHUB_WORKSPACE/ghidra"
-          mv "$GITHUB_WORKSPACE/ghidra_11.4.3_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
+          mv "$GITHUB_WORKSPACE/ghidra_${GHIDRA_VER}_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           rm -f /tmp/g.zip
 
       - uses: actions/cache/restore@v4
-        id: cache-project
+        id: cache-gzf
         with:
-          path: ghidra_project
-          key: ghidra-project-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
+          path: brawl_bin.gzf
+          key: gzf-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-project-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-
+            gzf-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-
 
       - uses: actions/download-artifact@v4
-        if: steps.cache-project.outputs.cache-hit != 'true'
+        if: steps.cache-gzf.outputs.cache-hit != 'true'
         with:
           name: brawl-bin
           path: /tmp
 
       - name: Run COLD
-        if: steps.cache-project.outputs.cache-hit != 'true'
+        if: steps.cache-gzf.outputs.cache-hit != 'true'
         env:
           _JAVA_OPTIONS: "-Xmx14g -Djava.awt.headless=true"
           GITHUB_WORKSPACE: ${{ github.workspace }}
         run: |
           set -euo pipefail
           JOBS=$(nproc)
-          rm -rf ghidra_project cold.log
-          mkdir -p ghidra_project
+          rm -rf /tmp/ghidra_cold "$GITHUB_WORKSPACE/brawl_bin.gzf"
+          mkdir -p /tmp/ghidra_cold
           test -s /tmp/brawl_bin
           file /tmp/brawl_bin
           "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
-            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
+            /tmp/ghidra_cold ColdProject \
             -import /tmp/brawl_bin \
             -processor AARCH64:LE:64:AppleSilicon \
             -loader MachoLoader \
             -analysisTimeoutPerFile 3600 \
-            -max-cpu "$JOBS" 2>&1 | tee cold.log | tail -80
-          test -f "$GITHUB_WORKSPACE/ghidra_project/BrawlProject.rep/project.prp"
-
-      - name: Verify project has programs
-        if: steps.cache-project.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          echo "=== project tree ==="
-          find ghidra_project -maxdepth 4 | head -80
-          N=$(find ghidra_project -type d -name "*.rep" -o -type d -name "*.prp" 2>/dev/null | wc -l)
-          M=$(find ghidra_project -type f \( -name "*.prp" -o -name "*.db" \) 2>/dev/null | wc -l)
-          echo "rep/prp dirs: $N   prp/db files: $M"
-          if [ "$M" -lt 1 ]; then
-            echo "ERROR: project contains no program files"
-            exit 1
-          fi
+            -max-cpu "$JOBS" \
+            -export "$GITHUB_WORKSPACE/brawl_bin.gzf" 2>&1 | tee cold.log | tail -80
+          echo "=== after cold ==="
+          ls -la "$GITHUB_WORKSPACE/brawl_bin.gzf" || true
+          test -s "$GITHUB_WORKSPACE/brawl_bin.gzf"
 
       - uses: actions/cache/save@v4
-        if: steps.cache-project.outputs.cache-hit != 'true'
+        if: steps.cache-gzf.outputs.cache-hit != 'true'
         with:
-          path: ghidra_project
-          key: ghidra-project-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
+          path: brawl_bin.gzf
+          key: gzf-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
 
   warm:
     needs: [prepare, cold]
@@ -232,37 +212,25 @@ jobs:
         if: steps.cache-ghidra.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/g.zip https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip
+          curl -fsSL -o /tmp/g.zip "${{ env.GHIDRA_URL }}"
           unzip -oq /tmp/g.zip -d "$GITHUB_WORKSPACE"
           rm -rf "$GITHUB_WORKSPACE/ghidra"
-          mv "$GITHUB_WORKSPACE/ghidra_11.4.3_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
+          mv "$GITHUB_WORKSPACE/ghidra_${GHIDRA_VER}_PUBLIC" "$GITHUB_WORKSPACE/ghidra"
           rm -f /tmp/g.zip
 
       - uses: actions/cache/restore@v4
-        id: cache-project
+        id: cache-gzf
         with:
-          path: ghidra_project
-          key: ghidra-project-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
+          path: brawl_bin.gzf
+          key: gzf-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-${{ needs.prepare.outputs.ver }}
           restore-keys: |
-            ghidra-project-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-
+            gzf-${{ env.GHIDRA_VER }}-${{ env.CACHE_EPOCH }}-
 
-      - name: Fail if no project cache
-        if: steps.cache-project.outputs.cache-hit != 'true'
+      - name: Fail if no gzf
+        if: steps.cache-gzf.outputs.cache-hit != 'true'
         run: |
-          echo "ERROR: ghidra_project not found"
+          echo "ERROR: brawl_bin.gzf not found"
           exit 1
-
-      - name: Verify restored project
-        run: |
-          set -euo pipefail
-          echo "=== project tree ==="
-          find ghidra_project -maxdepth 4 | head -80
-          M=$(find ghidra_project -type f \( -name "*.prp" -o -name "*.db" \) 2>/dev/null | wc -l)
-          echo "prp/db files: $M"
-          if [ "$M" -lt 1 ]; then
-            echo "ERROR: restored project contains no programs"
-            exit 1
-          fi
 
       - name: Run WARM
         env:
@@ -273,9 +241,14 @@ jobs:
           JOBS=$(nproc)
           rm -f offsets_resolved.js offsets_report.txt ctors_detailed.log ghidra.log
           git checkout -- offsets.js 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/brawl_bin.gzf"
+          test -s "$GITHUB_WORKSPACE/brawl_bin.gzf"
+          rm -rf /tmp/ghidra_warm
+          mkdir -p /tmp/ghidra_warm
           "$GITHUB_WORKSPACE/ghidra/support/analyzeHeadless" \
-            "$GITHUB_WORKSPACE/ghidra_project" BrawlProject \
-            -process "*" -noanalysis \
+            /tmp/ghidra_warm WarmProject \
+            -import "$GITHUB_WORKSPACE/brawl_bin.gzf" \
+            -noanalysis \
             -postScript find_offsets.py \
             -scriptPath "$GITHUB_WORKSPACE/scripts" \
             -max-cpu "$JOBS" 2>&1 | tee ghidra.log | tail -120
@@ -286,9 +259,7 @@ jobs:
           set -uo pipefail
           if [ ! -s offsets_resolved.js ]; then
             echo "offsets_resolved.js missing or empty"
-            echo "=== ctors_detailed.log tail ==="
-            tail -200 ctors_detailed.log 2>/dev/null || true
-            echo "=== ghidra.log tail ==="
+            tail -300 ctors_detailed.log 2>/dev/null || true
             tail -200 ghidra.log 2>/dev/null || true
             exit 1
           fi
