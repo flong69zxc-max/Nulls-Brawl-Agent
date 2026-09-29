@@ -100,7 +100,7 @@ jobs:
         id: cache-ipa
         with:
           path: ipa_cache
-          key: nulls-brawl-ipa-v3-${{ steps.resolve.outputs.VER }}
+          key: nulls-brawl-ipa-v4-${{ steps.resolve.outputs.VER }}
 
       - name: Download IPA
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -161,16 +161,18 @@ jobs:
           mkdir -p gum-graft-bin
           curl -fL --retry 3 \
             -o gum-graft.tar.xz \
-            "https://github.com/frida/frida-gum/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.tar.xz"
+            "https://github.com/frida/frida/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.tar.xz"
           tar -xJf gum-graft.tar.xz -C gum-graft-bin
           chmod +x gum-graft-bin/gum-graft
           rm -f gum-graft.tar.xz
 
-      - name: Graft binary (all functions)
+      - name: Graft binary (all offsets)
         run: |
           set -euo pipefail
           ./gum-graft-bin/gum-graft \
-            --flags ingest-function-starts \
+            --ingest-function-starts \
+            --ingest-imports \
+            --transform-lazy-binds \
             --path "$BIN"
           echo "graft done"
 
