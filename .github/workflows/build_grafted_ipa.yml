@@ -1,20 +1,10 @@
 name: Build Patched Nulls Brawl
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "Nulls Brawl"
-      - "scripts/frida-scripts/agent.js"
-      - ".github/workflows/build-patched.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -30,10 +20,19 @@ jobs:
           lfs: true
           fetch-depth: 1
 
+      - name: List repo
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2 -iname "*nulls*" -not -path "./.git/*" || true
+
       - name: Verify binary
         run: |
           set -euo pipefail
-          test -f "Nulls Brawl"
+          if [ ! -f "Nulls Brawl" ]; then
+            echo "ERROR: file 'Nulls Brawl' not found in repo root"
+            exit 1
+          fi
           file "Nulls Brawl"
           stat -f%z "Nulls Brawl"
 
@@ -41,15 +40,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Cache node_modules
-        id: cache-node
-        uses: actions/cache@v4
-        with:
-          path: node_modules
-          key: node-frida-objc-bridge-8.0.6-esbuild-0.28.2
-
       - name: Install toolchain
-        if: steps.cache-node.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts \
@@ -66,16 +57,9 @@ jobs:
             --banner:js='"use strict";' \
             --outfile=build/agent.js
           ls -la build/agent.js
-
-      - name: Cache Frida Gadget
-        id: cache-gadget
-        uses: actions/cache@v4
-        with:
-          path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin
+          head -c 200 build/agent.js
 
       - name: Download Frida Gadget
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           curl -fL --retry 3 -o gadget.xz "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
@@ -83,20 +67,15 @@ jobs:
           mv gadget W.fat.dylib
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           rm -f W.fat.dylib
-          echo "thin: $(stat -f%z W.thin.dylib)"
+          file W.thin.dylib
+          stat -f%z W.thin.dylib
 
       - name: Install ldid deps
-        run: brew install pkg-config libplist openssl@3
-
-      - name: Cache ldid
-        id: cache-ldid
-        uses: actions/cache@v4
-        with:
-          path: ldid-bin
-          key: ldid-${{ env.LDID_VERSION }}-macos-arm64
+        run: |
+          set -euo pipefail
+          brew install pkg-config libplist openssl@3
 
       - name: Build ldid
-        if: steps.cache-ldid.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p ldid-bin
@@ -105,36 +84,51 @@ jobs:
           export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
           export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
+          rm -rf ldid-src
           git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null || git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
           cd ldid-src
           make CXXFLAGS="-O2 -pipe" -j"$(sysctl -n hw.ncpu)"
           cp ldid ../ldid-bin/ldid
           chmod +x ../ldid-bin/ldid
+          otool -L ../ldid-bin/ldid
 
       - name: Build Frida.framework
-        run: |
+        run
+: |
           set -euo pipefail
-          rm -rf Frida.framework
-          mkdir -p Frida.framework
+          rm -rf Frida.framework          mkdir -p Frida.framework
           cp W.thin.dylib Frida.framework/W.dylib
           cp build/agent.js Frida.framework/agent.js
+
           cat > Frida.framework/Info.plist <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
-              <key>CFBundleExecutable</key><string>W.dylib</string>
-              <key>CFBundleIdentifier</key><string>re.frida.gadget</string>
-              <key>CFBundleShortVersionString</key><string>17.19.0</string>
-              <key>CFBundleVersion</key><string>17.19.0</string>
-              <key>CFBundleName</key><string>Frida</string>
-              <key>CFBundlePackageType</key><string>FMWK</string>
-              <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
-              <key>DTPlatformName</key><string>iphoneos</string>
-              <key>MinimumOSVersion</key><string>12.0</string>
+              <key>CFBundleExecutable</key>
+              <string>W.dylib</string>
+              <key>CFBundleIdentifier</key>
+              <string>re.frida.gadget</string>
+              <key>CFBundleShortVersionString</key>
+              <string>17.19.0</string>
+              <key>CFBundleVersion</key>
+              <string>17.19.0</string>
+              <key>CFBundleName</key>
+              <string>Frida</string>
+              <key>CFBundlePackageType</key>
+              <string>FMWK</string>
+              <key>CFBundleSupportedPlatforms</key>
+              <array>
+                  <string>iPhoneOS</string>
+              </array>
+              <key>DTPlatformName</key>
+              <string>iphoneos</string>
+              <key>MinimumOSVersion</key>
+              <string>12.0</string>
           </dict>
           </plist>
           PLIST
+
           cat > Frida.framework/W.config <<'CONFIG'
           {
             "interaction": {
@@ -145,21 +139,15 @@ jobs:
             "code_signing": "required"
           }
           CONFIG
+
           plutil -lint Frida.framework/Info.plist
           ls -la Frida.framework/
 
-      - name: Cache insert_dylib
-        id: cache-insert-dylib
-        uses: actions/cache@v4
-        with:
-          path: insert_dylib-bin
-          key: insert_dylib-macos-arm64-v1
-
       - name: Build insert_dylib
-        if: steps.cache-insert-dylib.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p insert_dylib-bin
+          rm -rf /tmp/insert_dylib
           git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
           cd /tmp/insert_dylib
           xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
@@ -169,16 +157,21 @@ jobs:
       - name: Inject load command and fix rpath
         run: |
           set -euo pipefail
-          ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl" "Nulls Brawl.patched"
-          mv "Nulls Brawl.patched" "Nulls Brawl"
+          cp "Nulls Brawl" "Nulls Brawl.orig"
+
+          ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl.orig" "Nulls Brawl"
           chmod +x "Nulls Brawl"
-          echo "=== rpath before ==="
+          rm -f "Nulls Brawl.orig"
+
+          echo "=== LC_RPATH before ==="
           otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
+
           echo "=== adding rpath ==="
-          install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl"
-          echo "=== rpath after ==="
-          otool -l "Nulls Brawl" | grep -A2 LC_RPATH
-          otool -L "Nulls Brawl" | grep -i frida
+          install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl" || echo "rpath may already exist"
+
+          echo "=== LC_RPATH after ==="
+          otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
+          otool -L "Nulls Brawl" | grep -i frida || echo "no frida dylib in LC_LOAD_DYLIB"
 
       - name: Sign
         run: |
@@ -186,6 +179,13 @@ jobs:
           ./ldid-bin/ldid -S Frida.framework/W.dylib
           ./ldid-bin/ldid -S "Nulls Brawl"
           echo "signed"
+
+      - name: Show results
+        run: |
+          set -euo pipefail
+          ls -la "Nulls Brawl" Frida.framework/
+          file "Nulls Brawl"
+          otool -L "Nulls Brawl" | grep -i frida || true
 
       - uses: actions/upload-artifact@v4
         with:
