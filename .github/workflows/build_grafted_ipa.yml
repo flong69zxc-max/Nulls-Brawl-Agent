@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "scripts/frida-scripts/agent.js"
-      - ".github/workflows/build-patched.yml"
+      - ".github/workflows/build_grafted_ipa.yml"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,7 @@ jobs:
     env:
       FRIDA_VERSION: "17.19.0"
       LDID_VERSION: "v2.1.5-procursus7"
+      GUM_GRAFT_VERSION: "17.19.0"
 
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +55,6 @@ jobs:
         run: |
           set -euo pipefail
           UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-
-          # Разворачивает абсолютизацию относительного Location
           absolutize() {
             local base="$1" loc="$2"
             case "$loc" in
@@ -64,25 +63,19 @@ jobs:
               *)     printf '%s/%s' "$(printf '%s' "$base" | sed -E 's#/[^/]*$##')" "$loc" ;;
             esac
           }
-
           resolve() {
             local url="$1" i=0 body next loc hdrs
             while [ $i -lt 10 ]; do
               i=$((i+1))
               echo "resolve[$i] -> $url" >&2
-
-              # 1) Проверяем HTTP-редирект через HEAD
               hdrs=$(curl -sIL -A "$UA" --max-time 30 "$url" | tr -d '\r' || true)
               loc=$(printf '%s\n' "$hdrs" | awk 'tolower($1)=="location:"{sub(/^[^:]+:[ \t]*/,""); print}' | tail -1)
               if [ -n "$loc" ]; then
                 url=$(absolutize "$url" "$loc")
                 continue
               fi
-
-              # 2) Скачиваем первые байты и смотрим, не HTML ли это
               body=$(curl -sL -A "$UA" --max-time 60 -r 0-8191 "$url" 2>/dev/null || true)
               if printf '%s' "$body" | head -c 200 | grep -qiE '<!doctype|<html'; then
-                # Ищем window.open("URL") / window.location.href = "URL"
                 next=$(printf '%s' "$body" \
                   | grep -oE 'https?://[^"'"'"'<> ]+' \
                   | grep -viE 'w3\.org|googleapis\.com|gstatic\.com|/nulls\.games(/|$)' \
@@ -92,12 +85,10 @@ jobs:
                   continue
                 fi
               fi
-
               break
             done
             printf '%s' "$url"
           }
-
           FINAL=$(resolve "https://nulls.ee/bs_latest_i")
           echo "final URL: $FINAL"
           test -n "$FINAL"
@@ -155,6 +146,33 @@ jobs:
           file "$BIN"
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
           echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Cache gum-graft
+        id: cache-gumgraft
+        uses: actions/cache@v4
+        with:
+          path: gum-graft-bin
+          key: gum-graft-${{ env.GUM_GRAFT_VERSION }}-macos-arm64
+
+      - name: Download gum-graft
+        if: steps.cache-gumgraft.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p gum-graft-bin
+          curl -fL --retry 3 \
+            -o gum-graft.tar.xz \
+            "https://github.com/frida/frida-gum/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.tar.xz"
+          tar -xJf gum-graft.tar.xz -C gum-graft-bin
+          chmod +x gum-graft-bin/gum-graft
+          rm -f gum-graft.tar.xz
+
+      - name: Graft binary (all functions)
+        run: |
+          set -euo pipefail
+          ./gum-graft-bin/gum-graft \
+            --flags ingest-function-starts \
+            --path "$BIN"
+          echo "graft done"
 
       - name: Cache Frida Gadget
         id: cache-gadget
