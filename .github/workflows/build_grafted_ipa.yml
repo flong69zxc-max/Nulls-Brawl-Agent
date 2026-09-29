@@ -1,4 +1,4 @@
-name: Build Patched Nulls Brawl IPA
+name: Build Frida.framework (17.19.0 gum-graft + explicit offsets)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,242 +15,162 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
-      FRIDA_VERSION: "17.19.0"
-      LDID_VERSION: "v2.1.5-procursus7"
-      IPA_URL: "https://tempweb.nullsusercontent.com/fpipa/nb_69.252_4cc76283.ipa"
+      FRIDA_VERSION: '17.19.0'
+      FRAMEWORK_NAME: Frida.framework
+      LDID_VERSION: 'v2.1.5-procursus7'
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          lfs: true
-          fetch-depth: 1
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install toolchain
-        run: |
-          set -euo pipefail
-          npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts esbuild@0.28.2 frida-objc-bridge@8.0.6
-
-      - name: Build test agent.js
-        run: |
-          set -euo pipefail
-          mkdir -p build
-          cat > build/agent.js <<'AGENT'
-          (function () {
-            try {
-              var UIAlertController = ObjC.classes.UIAlertController;
-              var UIAlertAction = ObjC.classes.UIAlertAction;
-
-              var alert = UIAlertController.alertControllerWithTitle_message_preferredStyle_(
-                "Frida Works!",
-                "Agent loaded successfully.\nPID: " + Process.id + "\nArch: " + Process.arch,
-                1
-              );
-              var okAction = UIAlertAction.actionWithTitle_style_handler_(
-                "OK",
-                0,
-                null
-              );
-              alert.addAction_(okAction);
-
-              var rootVC = ObjC.classes.UIApplication.sharedApplication().keyWindow().rootViewController();
-              while (rootVC.presentedViewController()) {
-                rootVC = rootVC.presentedViewController();
-              }
-              rootVC.presentViewController_animated_completion_(alert, true, null);
-
-              console.log("[+] Frida alert shown successfully");
-            } catch (e) {
-              console.log("[-] Failed to show alert: " + e.message);
-            }
-          })();
-          AGENT
-          node -e "console.log('agent.js size: ' + require('fs').statSync('build/agent.js').size + ' bytes')"
-
-      - uses: actions/cache@v4
-        id: cache-ipa
-        with:
-          path: ipa_cache
-          key: nulls-brawl-ipa-v9-direct
-
-      - name: Download IPA
-        if: steps.cache-ipa.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p ipa_cache
-          rm -f ipa_cache/bs.ipa
-          curl -fL --retry 5 --retry-delay 5 --retry-all-errors --max-time 900 \
-            -A "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" \
-            -H "Accept: */*" \
-            -o ipa_cache/bs.ipa "$IPA_URL"
-          test -s ipa_cache/bs.ipa
-          unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1 || { rm -f ipa_cache/bs.ipa; exit 1; }
-
-      - name: Extract IPA
-        id: extract
-        run: |
-          set -euo pipefail
-          if [ ! -s ipa_cache/bs.ipa ] || ! unzip -tq ipa_cache/bs.ipa >/dev/null 2>&1; then
-            rm -f ipa_cache/bs.ipa
-            exit 1
-          fi
-          rm -rf extract
-          mkdir -p extract
-          unzip -q ipa_cache/bs.ipa -d extract
-          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
-          test -n "$APP_DIR"
-          BIN="$APP_DIR/Nulls Brawl"
-          if [ ! -f "$BIN" ]; then
-            BIN=$(find "$APP_DIR" -maxdepth 1 -type f -perm /111 ! -name "*.dylib" ! -name "*.png" | head -n1)
-          fi
-          test -f "$BIN"
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-          echo "BIN=$BIN" >> "$GITHUB_ENV"
-
-      - name: Cache Frida Gadget
-        id: cache-gadget
-        uses: actions/cache@v4
-        with:
-          path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-v5
 
       - name: Download Frida Gadget
-        if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fL --retry 3 -o gadget.xz \
-            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          curl -fL --retry 3 -o gadget.xz "$URL"
           xz -d gadget.xz
           mv gadget W.fat.dylib
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
-          rm -f W.fat.dylib
-          echo "gadget: $(stat -f%z W.thin.dylib) bytes"
+          echo "thin before: $(stat -f%z W.thin.dylib)"
 
-      - name: Install ldid deps
+      - name: Remove signature before graft
         run: |
           set -euo pipefail
+          codesign --remove-signature W.thin.dylib 2>&1 || true
+          echo "unsigned: $(stat -f%z W.thin.dylib)"
+
+      - name: Download gum-graft
+        run: |
+          set -euo pipefail
+          URL="https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/gum-graft-${FRIDA_VERSION}-macos-arm64.xz"
+          curl -fL --retry 3 -o gum-graft.xz "$URL"
+          xz -d gum-graft.xz
+          chmod +x gum-graft
+          file gum-graft
+          echo "GUM_GRAFT=$(realpath gum-graft)" >> "$GITHUB_ENV"
+
+      - name: gum-graft help
+        run: |
+          set -euo pipefail
+          "$GUM_GRAFT" --help 2>&1 | head -60 || true
+
+      - name: Run gum-graft with explicit offsets
+        run: |
+          set -euo pipefail
+          echo "before: $(stat -f%z W.thin.dylib)"
+          "$GUM_GRAFT" \
+            --ingest-imports \
+            --add 0xd93d80 \
+            --add 0xb24820 \
+            --add 0xb24244 \
+            --add 0x9b5afc \
+            --add 0x62d890 \
+            W.thin.dylib 2>&1 | tail -30 || true
+          sz=$(stat -f%z W.thin.dylib)
+          echo "after: $sz"
+          otool -l W.thin.dylib | grep -iE "graft|__FRIDA" || echo "no graft sections"
+
+      - name: Install ldid-procursus from source
+        run: |
+          set -euo pipefail
+          sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid /usr/bin/ldid 2>/dev/null || true
+          brew uninstall ldid 2>/dev/null || true
+          brew uninstall ldid-procursus 2>/dev/null || true
           brew install pkg-config libplist openssl@3
-
-      - name: Cache ldid
-        id: cache-ldid
-        uses: actions/cache@v4
-        with:
-          path: ldid-bin
-          key: ldid-${{ env.LDID_VERSION }}-macos-arm64
-
-      - name: Build ldid
-        if: steps.cache-ldid.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p ldid-bin
           OPENSSL_PREFIX=$(brew --prefix openssl@3)
           LIBPLIST_PREFIX=$(brew --prefix libplist)
           export PKG_CONFIG_PATH="$OPENSSL_PREFIX/lib/pkgconfig:$LIBPLIST_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           export LDFLAGS="-L$OPENSSL_PREFIX/lib -L$LIBPLIST_PREFIX/lib"
           export CPPFLAGS="-I$OPENSSL_PREFIX/include -I$LIBPLIST_PREFIX/include"
+          rm -rf ldid-src
           git clone --depth 1 --branch "${LDID_VERSION}" https://github.com/ProcursusTeam/ldid.git ldid-src 2>/dev/null || git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
           cd ldid-src
-          make CXXFLAGS="-O2 -pipe" -j"$(sysctl -n hw.ncpu)"
-          cp ldid ../ldid-bin/ldid
-          chmod +x ../ldid-bin/ldid
+          make CXXFLAGS="-O2 -pipe"
+          sudo cp ldid /usr/local/bin/ldid
+          sudo chmod +x /usr/local/bin/ldid
+          [ -e /opt/homebrew/bin/ldid ] && sudo rm -f /opt/homebrew/bin/ldid || true
+          [ -e /usr/bin/ldid ] && sudo rm -f /usr/bin/ldid || true
+          /usr/local/bin/ldid -v 2>&1 | head -1 || true
 
-      - name: Cache insert_dylib
-        id: cache-insert-dylib
-        uses: actions/cache@v4
-        with:
-          path: insert_dylib-bin
-          key: insert_dylib-macos-arm64-v1
-
-      - name: Build insert_dylib
-        if: steps.cache-insert-dylib.outputs.cache-hit != 'true'
+      - name: Sign grafted thin
         run: |
           set -euo pipefail
-          mkdir -p insert_dylib-bin
-          rm -rf /tmp/insert_dylib
-          git clone --depth 1 https://github.com/tyilo/insert_dylib.git /tmp/insert_dylib
-          cd /tmp/insert_dylib
-          xcodebuild -project insert_dylib.xcodeproj -scheme insert_dylib -configuration Release SYMROOT="$PWD/build" CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | tail -5
-          cp build/Release/insert_dylib "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
-          chmod +x "$GITHUB_WORKSPACE/insert_dylib-bin/insert_dylib"
+          /usr/local/bin/ldid -S W.thin.dylib
+          echo "signed thin: $(stat -f%z W.thin.dylib)"
+
+      - name: Wrap into fat
+        run: |
+          set -euo pipefail
+          lipo -create -arch arm64 W.thin.dylib -output W.dylib
+          echo "fat: $(stat -f%z W.dylib)"
+          file W.dylib
 
       - name: Build Frida.framework
         run: |
           set -euo pipefail
-          FW="$APP_DIR/Frameworks/Frida.framework"
-          rm -rf "$FW"
-          mkdir -p "$FW"
-          cp W.thin.dylib "$FW/W.dylib"
-          cp build/agent.js "$FW/agent.js"
-          cat > "$FW/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>CFBundleExecutable</key>
-              <string>W.dylib</string>
-              <key>CFBundleIdentifier</key>
-              <string>re.frida.gadget</string>
-              <key>CFBundleShortVersionString</key>
-              <string>17.19.0</string>
-              <key>CFBundleVersion</key>
-              <string>17.19.0</string>
-              <key>CFBundleName</key>
-              <string>Frida</string>
-              <key>CFBundlePackageType</key>
-              <string>FMWK</string>
-              <key>CFBundleSupportedPlatforms</key>
-              <array><string>iPhoneOS</string></array>
-              <key>DTPlatformName</key>
-              <string>iphoneos</string>
-              <key>MinimumOSVersion</key>
-              <string>12.0</string>
-          </dict>
-          </plist>
-          PLIST
-          cat > "$FW/W.config" <<'CONFIG'
-          {
-            "interaction": {
-              "type": "script",
-              "path": "agent.js",
-              "on_change": "ignore"
-            },
-            "code_signing": "required"
-          }
-          CONFIG
-          plutil -lint "$FW/Info.plist"
+          rm -rf "$FRAMEWORK_NAME"
+          mkdir -p "$FRAMEWORK_NAME"
+          cp W.dylib "$FRAMEWORK_NAME/W.dylib"
 
-      - name: Inject load command and fix rpath
+          printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict>' \
+            '    <key>CFBundleExecutable</key>' \
+            '    <string>W.dylib</string>' \
+            '    <key>CFBundleIdentifier</key>' \
+            '    <string>re.frida.gadget</string>' \
+            '    <key>CFBundleShortVersionString</key>' \
+            '    <string>17.19.0</string>' \
+            '    <key>CFBundleVersion</key>' \
+            '    <string>17.19.0</string>' \
+            '    <key>CFBundleName</key>' \
+            '    <string>Frida</string>' \
+            '    <key>CFBundlePackageType</key>' \
+            '    <string>FMWK</string>' \
+            '    <key>CFBundleSupportedPlatforms</key>' \
+            '    <array>' \
+            '        <string>iPhoneOS</string>' \
+            '    </array>' \
+            '    <key>DTPlatformName</key>' \
+            '    <string>iphoneos</string>' \
+            '    <key>MinimumOSVersion</key>' \
+            '    <string>12.0</string>' \
+            '</dict>' \
+            '</plist>' \
+            > "$FRAMEWORK_NAME/Info.plist"
+
+          printf '%s\n' \
+            '{' \
+            '  "interaction": {' \
+            '    "type": "script",' \
+            '    "path": "agent.js",' \
+            '    "on_change": "ignore"' \
+            '  },' \
+            '  "code_signing": "required"' \
+            '}' \
+            > "$FRAMEWORK_NAME/W.config"
+
+          printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
+          plutil -lint "$FRAMEWORK_NAME/Info.plist"
+          find "$FRAMEWORK_NAME" -type f -exec ls -la {} \;
+
+      - name: Package
         run: |
           set -euo pipefail
-          cp "$BIN" "$BIN.orig"
-          ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "$BIN.orig" "$BIN"
-          chmod +x "$BIN"
-          rm -f "$BIN.orig"
-          install_name_tool -add_rpath "@executable_path/Frameworks" "$BIN" || true
-          otool -L "$BIN" | grep -i frida || true
-
-      - name: Sign
-        run: |
-          set -euo pipefail
-          ./ldid-bin/ldid -S "$APP_DIR/Frameworks/Frida.framework/W.dylib"
-          ./ldid-bin/ldid -S "$BIN"
-
-      - name: Repack IPA
-        run: |
-          set -euo pipefail
-          cd extract
-          rm -f ../bs_patched.ipa
-          zip -qry ../bs_patched.ipa Payload
-          cd ..
-          ls -la bs_patched.ipa
+          find "$FRAMEWORK_NAME" -name ".DS_Store" -delete
+          find "$FRAMEWORK_NAME" -name "._*" -delete
+          xattr -cr "$FRAMEWORK_NAME" 2>/dev/null || true
+          ditto -c -k --sequesterRsrc --keepParent "$FRAMEWORK_NAME" Frida.framework.zip
+          echo "zip: $(stat -f%z Frida.framework.zip) bytes"
+          shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: patched-brawl-ipa
-          path: bs_patched.ipa
+          name: Frida.framework
+          path: Frida.framework.zip
           retention-days: 30
+          if-no-files-found: error
