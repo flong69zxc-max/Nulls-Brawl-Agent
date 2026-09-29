@@ -136,7 +136,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-grafted
+          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-grafted-v2
 
       - name: Download and graft Frida Gadget
         if: steps.cache-gadget.outputs.cache-hit != 'true'
@@ -213,42 +213,45 @@ jobs:
           mkdir -p "$FW"
           cp W.thin.dylib "$FW/W.dylib"
           cp build/agent.js "$FW/agent.js"
-          printf '%s\n' \
-            '<?xml version="1.0" encoding="UTF-8"?>' \
-            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
-            '<plist version="1.0">' \
-            '<dict>' \
-            '    <key>CFBundleExecutable</key>' \
-            '    <string>W.dylib</string>' \
-            '    <key>CFBundleIdentifier</key>' \
-            '    <string>re.frida.gadget</string>' \
-           s '    <key>CFBundle</ShortVersionString</keykey>' \
-           >' \
-            '    <string>17.19.0</string>' \
-            '    <key>CFBundleVersion</key>' \
-            '    <string>17.19.0</string>' \
-            '    <key>CFBundleName</key>' \
-            '    <string>Frida</string>' \
-            '    <key>CFBundlePackageType</key>' \
-            '    <string>FMWK</string>' \
-            '    <key>CFBundleSupportedPlatform '    <array><string>iPhoneOS</string></array>' \
-            '    <key>DTPlatformName</key>' \
-            '    <string>iphoneos</string>' \
-            '    <key>MinimumOSVersion</key>' \
-            '    <string>12.0</string>' \
-            '</dict>' \
-            '</plist>' \
-            > "$FW/Info.plist"
-          printf '%s\n' \
-            '{' \
-            '  "interaction": {' \
-            '    "type": "script",' \
-            '    "path": "agent.js",' \
-            '    "on_change": "ignore"' \
-            '  },' \
-            '  "code_signing": "required"' \
-            '}' \
-            > "$FW/W.config"
+
+          cat > "$FW/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>W.dylib</string>
+              <key>CFBundleIdentifier</key>
+              <string>re.frida.gadget</string>
+              <key>CFBundleShortVersionString</key>
+              <string>17.19.0</string>
+              <key>CFBundleVersion</key>
+              <string>17.19.0</string>
+              <key>CFBundleName</key>
+              <string>Frida</string>
+              <key>CFBundlePackageType</key>
+              <string>FMWK</string>
+              <key>CFBundleSupportedPlatforms</key>
+              <array><string>iPhoneOS</string></array>
+              <key>DTPlatformName</key>
+              <string>iphoneos</string>
+              <key>MinimumOSVersion</key>
+              <string>12.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+          cat > "$FW/W.config" <<'CONFIG'
+          {
+            "interaction": {
+              "type": "script",
+              "path": "agent.js",
+              "on_change": "ignore"
+            },
+            "code_signing": "required"
+          }
+          CONFIG
+
           plutil -lint "$FW/Info.plist"
           ls -la "$FW/"
 
