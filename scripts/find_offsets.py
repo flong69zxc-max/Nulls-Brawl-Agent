@@ -7,13 +7,21 @@ import time
 import traceback
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
-OUT = os.path.join(WS, "mod_menu_offsets.js")
+OUT = os.path.join(WS, "offsets_resolved.js")
 REPORT = os.path.join(WS, "mod_menu_report.txt")
 BASE = 0x100000000
-BUDGET = 1200
+BUDGET = 1500
 START = time.time()
 
-L = []
+CLASSES = [
+    "HomePage",
+    "GameButton",
+    "GenericPopup",
+    "ResourceManager",
+    "MovieClip",
+    "TextField",
+    "Sprite",
+]
 
 def log(m):
     sys.stdout.write(m + "\n")
@@ -28,75 +36,13 @@ def rva(a):
 def to_addr(r):
     return toAddr(BASE + r)
 
-# Имена символов (mangled) и подсказки-строки для поиска
-TARGETS = {
-    # HomePage / Lobby
-    "HomePage_ctor": ["HomePage", "C1", "C2"],
-    "HomePage_startGame": ["HomePage", "startGame"],
-
-    # ResourceManager
-    "ResourceManager_getMovieClip": ["ResourceManager", "getMovieClip"],
-
-    # GameButton
-    "GameButton_ctor": ["GameButton", "C1", "C2"],
-    "GameButton_buttonPressed": ["GameButton", "buttonPressed"],
-
-    # Sprite / Stage
-    "Sprite_ctor": ["Sprite", "C1", "C2"],
-    "Sprite_addChild": ["Sprite", "addChild"],
-    "Stage_addChild": ["Stage", "addChild"],
-    "Stage_instance": ["Stage", "instance"],
-    "MovieClip_getMovieClipByName": ["MovieClip", "getMovieClipByName"],
-    "MovieClip_getTextFieldByName": ["MovieClip", "getTextFieldByName"],
-    "MovieClip_gotoAndStopFrameIndex": ["MovieClip", "gotoAndStopFrameIndex"],
-
-    # Text
-    "TextField_setText": ["TextField", "setText"],
-    "TextField_fetchFont": ["TextField", "fetchFont"],
-    "String_ctor": ["String", "C1", "C2"],
-
-    # GUI / Popup
-    "GenericPopup_ctor": ["GenericPopup", "C1", "C2"],
-    "GenericPopup_addButton": ["GenericPopup", "addButton"],
-    "GenericPopup_addButton2": ["GenericPopup", "addButton2"],
-    "GenericPopup_setTitle": ["GenericPopup", "setTitle"],
-    "GenericPopup_onHudCloseButton": ["GenericPopup", "onHudCloseButton"],
-    "GUI_showPopup": ["GUI", "showPopup"],
-    "GUI_getInstance": ["GUI", "getInstance"],
-    "GUI_closePopup": ["GUI", "closePopup"],
-    "GUI_showFloater": ["GUI", "showFloater"],
-}
-
-def find_functions_by_patterns():
-    fm = currentProgram.getFunctionManager()
-    all_funcs = []
-    it = fm.getFunctions(True)
-    while it.hasNext():
-        f = it.next()
-        all_funcs.append((f.getName(), f.getEntryPoint()))
-    log("[*] total functions: %d" % len(all_funcs))
-
-    results = {}
-    for tag, patterns in sorted(TARGETS.items()):
-        hits = []
-        for name, entry in all_funcs:
-            if all(p.lower() in name.lower() for p in patterns):
-                hits.append((rva(entry), name))
-        if hits:
-            hits.sort()
-            results[tag] = hits
-            log("[+] %s -> %s" % (tag, hits[0]))
-        else:
-            log("[-] %s -> NOT FOUND" % tag)
-    return results
-
-def find_strings():
+def build_string_index():
     listing = currentProgram.getListing()
     idx = {}
     it = listing.getDefinedData(True)
     total = 0
     while it.hasNext():
-        if time.time() - START > BUDGET - 200:
+        if time.time() - START > BUDGET - 300:
             break
         try:
             d = it.next()
@@ -112,7 +58,7 @@ def find_strings():
             idx.setdefault(s, []).append(d.getAddress())
         except:
             continue
-    log("[*] strings indexed: %d" % total)
+    log("[*] strings: %d unique: %d" % (total, len(idx)))
     return idx
 
 def find_refs(a):
@@ -126,73 +72,123 @@ def find_refs(a):
         pass
     return out
 
+def find_exact_string(idx, s):
+    return idx.get(s, [])
+
+def find_data_items_at(addr):
+    """Найти все data-структуры, которые начинаются по адресу."""
+    out = []
+    listing = currentProgram.getListing()
+    d = listing.getDataAt(addr)
+    if d is not None:
+        out.append(d)
+    # также смотрим на структуры, содержащие addr как указатель
+    return out
+
+def scan_for_vtable_refs(vtable_addr, max_results=8):
+    """Ищем функции, где есть ссылка на vtable_addr — это ctor/dtor."""
+    funcs = set()
+    for ref in find_refs(vtable_addr):
+        f = getFunctionContaining(ref)
+        if f is not None:
+            funcs.add(f.getEntryPoint())
+    return sorted(funcs, key=lambda a: rva(a))[:max_results]
+
+def check_vptr_write(func_addr, vtable_addr):
+    """Проверяем, пишет ли функция vtable в [x0] — это признак ctor."""
+    f = getFunctionAt(func_addr)
+    if f is None:
+        return False
+    listing = currentProgram.getListing()
+    it = f.getBody().getAddresses(True)
+    writes = 0
+    while it.hasNext():
+        a = it.next()
+        instr = listing.getInstructionAt(a)
+        if instr is None:
+            continue
+        mn = instr.getMnemonicString().lower()
+        if mn == "str":
+            try:
+                op0 = instr.getOpObjects(0)
+                if op0 and "[x0]" in instr.toString():
+                    writes += 1
+            except:
+                pass
+    return writes > 0
+
 def main():
-    log("=== find_mod_menu_offsets ===")
+    log("=== find_offsets (SCRE vtable method) ===")
     log("program: %s" % currentProgram.getName())
 
-    # 1) Поиск функций по именам символов
-    log("")
-    log("=== SYMBOL SEARCH ===")
-    results = find_functions_by_patterns()
+    idx = build_string_index()
+    if not idx:
+        log("[!] no strings")
+        return
 
-    # 2) Поиск по строкам, если символы не найдены
-    log("")
-    log("=== STRING SEARCH (fallback) ===")
-    string_idx = find_strings()
+    results = {}
 
-    STRING_ANCHORS = {
-        "HomePage_ctor": ["TID_MATCHMAKE_FAILED_15", "HomePage", "Lobby"],
-        "GameButton_buttonPressed": ["GameButton", "buttonPressed"],
-        "GUI_showPopup": ["GUI", "Popup"],
-        "GenericPopup_ctor": ["GenericPopup", "Popup"],
-    }
-
-    for tag, anchors in sorted(STRING_ANCHORS.items()):
-        if tag in results:
-            continue
+    for cls in CLASSES:
         log("")
-        log("--- %s ---" % tag)
-        for anchor in anchors:
-            hits = []
-            for s, addrs in string_idx.items():
-                if anchor in s:
-                    hits.extend(addrs)
-            if not hits:
-                log("  anchor %r: not found" % anchor)
-                continue
-            log("  anchor %r: %d string(s)" % (anchor, len(hits)))
-            for sa in hits[:5]:
-                for ra in find_refs(sa):
-                    f = getFunctionContaining(ra)
-                    if f is not None:
-                        fr = rva(f.getEntryPoint())
-                        if tag not in results:
-                            results[tag] = []
-                        results[tag].append((fr, f.getName()))
-                        log("    func 0x%x %s" % (fr, f.getName()))
+        log("=== CLASS: %s ===" % cls)
+        saddrs = find_exact_string(idx, cls)
+        if not saddrs:
+            # пробуем с префиксом/суффиксом
+            for s, addrs in idx.items():
+                if s == cls or s.startswith(cls + "::") or s.endswith("::" + cls):
+                    saddrs.extend(addrs)
+        if not saddrs:
+            log("  no exact string")
+            continue
 
-    # 3) Запись результатов
+        for sa in saddrs[:3]:
+            log("  str @ 0x%x" % rva(sa))
+            # typeinfo — data, содержащая указатель на строку
+            for ra in find_refs(sa):
+                blk = currentProgram.getMemory().getBlock(ra)
+                if blk is None:
+                    continue
+                name = blk.getName()
+                if "TEXT" in name:
+                    continue  # это код, не typeinfo
+                log("    ref @ 0x%x in %s" % (rva(ra), name))
+                # это может быть typeinfo или vtable начало
+                # ищем xref на addr-8 (typeinfo обычно имеет -1 перед name)
+                typeinfo_addr = ra.subtract(8)
+                vtable_candidates = find_refs(typeinfo_addr)
+                if not vtable_candidates:
+                    vtable_candidates = find_refs(ra)
+                for vt in vtable_candidates[:2]:
+                    vt_blk = currentProgram.getMemory().getBlock(vt)
+                    if vt_blk is None:
+                        continue
+                    log("      vtable candidate @ 0x%x in %s" % (rva(vt), vt_blk.getName()))
+                    for func_addr in scan_for_vtable_refs(vt):
+                        is_ctor = check_vptr_write(func_addr, vt)
+                        log("        ctor candidate @ 0x%x ctor=%s" % (rva(func_addr), is_ctor))
+                        if is_ctor and cls not in results:
+                            results[cls] = (rva(func_addr), vt)
+
     log("")
     log("=== SUMMARY ===")
-    for tag, hits in sorted(results.items()):
-        if hits:
-            log("  %s: 0x%x" % (tag, hits[0][0]))
+    for cls in CLASSES:
+        if cls in results:
+            log("  %s ctor: 0x%x vtable: 0x%x" % (cls, results[cls][0], results[cls][1]))
         else:
-            log("  %s: NOT FOUND" % tag)
+            log("  %s: NOT FOUND" % cls)
 
     with open(OUT, "w") as fh:
         fh.write("export const offsets = Object.freeze({\n")
-        for tag in sorted(results.keys()):
-            if results[tag]:
-                fr, name = results[tag][0]
-                fh.write("  %s: 0x%x, // %s\n" % (tag, fr, name))
+        for cls, (ctor_rva, vt_rva) in sorted(results.items()):
+            fh.write("  %s_ctor: 0x%x,\n" % (cls, ctor_rva))
+            fh.write("  %s_vtable: 0x%x,\n" % (cls, vt_rva))
         fh.write("});\n")
 
     with open(REPORT, "w") as fh:
-        for line in L:
-            fh.write(line + "\n")
+        fh.write("classes found: %d / %d\n" % (len(results), len(CLASSES)))
+        for cls, (ctor_rva, vt_rva) in sorted(results.items()):
+            fh.write("  %s ctor=0x%x vtable=0x%x\n" % (cls, ctor_rva, vt_rva))
 
-    log("")
     log("[+] wrote %s" % OUT)
 
 try:
