@@ -7,8 +7,9 @@ import time
 import traceback
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
-OUT = os.path.join(WS, "ctors_resolved.js")
-REPORT = os.path.join(WS, "ctors_report.txt")
+OUT = os.path.join(WS, "offsets_resolved.js")
+REPORT = os.path.join(WS, "offsets_report.txt")
+DETAIL = os.path.join(WS, "ctors_detailed.log")
 BUDGET = 1500
 START = time.time()
 
@@ -39,10 +40,45 @@ CLASSES = [
     "HashTagCodeGenerator", "CSVRow", "CSVTable",
 ]
 
+_log_fh = None
+
+
+def init_log():
+    global _log_fh
+    try:
+        _log_fh = open(DETAIL, "w")
+    except Exception as e:
+        sys.stderr.write("cannot open %s: %s\n" % (DETAIL, e))
+        _log_fh = None
+
+
+def close_log():
+    global _log_fh
+    if _log_fh is not None:
+        try:
+            _log_fh.close()
+        except:
+            pass
+        _log_fh = None
+
+
+def elapsed():
+    return time.time() - START
+
 
 def log(m):
-    sys.stdout.write(m + "\n")
-    sys.stdout.flush()
+    line = "[%7.2f] %s" % (elapsed(), m)
+    try:
+        sys.stdout.write(line + "\n")
+        sys.stdout.flush()
+    except:
+        pass
+    if _log_fh is not None:
+        try:
+            _log_fh.write(line + "\n")
+            _log_fh.flush()
+        except:
+            pass
 
 
 def img_base():
@@ -62,6 +98,13 @@ def rva(a):
         return -1
 
 
+def fa(a):
+    try:
+        return "0x%08x" % rva(a)
+    except:
+        return "?"
+
+
 def blk(a):
     try:
         return getMemoryBlock(a)
@@ -76,12 +119,22 @@ def is_code(a):
 
 def is_data(a):
     b = blk(a)
-    return b is not None and b.isRead() and not b.isExecute()
+    if b is None:
+        return False
+    if b.isExecute():
+        return False
+    n = b.getName() or ""
+    if "LINKEDIT" in n:
+        return False
+    return b.isRead()
 
 
-def read_ptr(a):
+def mem_long(a):
     try:
-        return currentProgram.getMemory().getLong(a) & 0xFFFFFFFFFFFFFFFF
+        v = currentProgram.getMemory().getLong(a)
+        if v is None:
+            return None
+        return v & 0xFFFFFFFFFFFFFFFF
     except:
         return None
 
@@ -101,23 +154,53 @@ def find_refs(a):
     return out
 
 
+def dump_blocks():
+    log("memory blocks:")
+    try:
+        for b in currentProgram.getMemory().getBlocks():
+            try:
+                log("  %-24s 0x%x-0x%x  r=%s w=%s x=%s init=%s size=0x%x" % (
+                    b.getName(),
+                    int(b.getStart().getOffset()),
+                    int(b.getEnd().getOffset()),
+                    b.isRead(), b.isWrite(), b.isExecute(),
+                    b.isInitialized(),
+                    int(b.getSize())))
+            except Exception as e:
+                log("  <block error: %s>" % e)
+    except Exception as e:
+        log("  block dump failed: %s" % e)
+
+
 def build_string_index():
+    t0 = time.time()
     listing = currentProgram.getListing()
     idx = {}
     total = 0
-    for b in currentProgram.getMemory().getBlocks():
-        if time.time() - START > BUDGET - 500:
+    blocks = []
+    try:
+        for b in currentProgram.getMemory().getBlocks():
+            n = b.getName() or ""
+            if ("cstring" in n or "objc" in n.lower() or "ustring" in n):
+                blocks.append(b)
+    except Exception as e:
+        log("string index: block scan failed: %s" % e)
+    log("string index: source blocks: %s" % ", ".join([b.getName() for b in blocks]))
+    deadline = START + BUDGET - 600
+    for b in blocks:
+        if time.time() > deadline:
+            log("string index: budget guard, stopping at %s" % b.getName())
             break
-        n = b.getName()
-        if not ("cstring" in n or "objc" in n.lower() or "ustring" in n):
-            continue
-        end = b.getEnd()
+        b0 = time.time()
         try:
             it = listing.getDefinedData(b.getStart(), True)
-        except:
+        except Exception as e:
+            log("string index: iterator failed in %s: %s" % (b.getName(), e))
             continue
+        end = b.getEnd()
+        cnt = 0
         while it.hasNext():
-            if time.time() - START > BUDGET - 500:
+            if time.time() > deadline:
                 break
             try:
                 d = it.next()
@@ -134,22 +217,102 @@ def build_string_index():
                 if not s:
                     continue
                 total += 1
+                cnt += 1
                 idx.setdefault(s, []).append(d.getAddress())
             except:
                 continue
-    log("[*] strings: %d unique: %d" % (total, len(idx)))
+        log("string index: block %s -> %d (%.2fs)" % (b.getName(), cnt, time.time() - b0))
+    log("string index: total=%d unique=%d (%.2fs)" % (total, len(idx), time.time() - t0))
     return idx
 
 
-BAD_FN = ["log", "Log", "print", "Print", "trace", "Trace", "assert", "Assert",
-          "debug", "Debug", "os_log", "_os_log", "vsnprintf", "snprintf",
-          "printf", "NSString", "format", "abort", "panic"]
+def build_pointer_index():
+    t0 = time.time()
+    idx = {}
+    kept = 0
+    skipped = 0
+    deadline = START + BUDGET - 400
+    try:
+        blocks = list(currentProgram.getMemory().getBlocks())
+    except Exception as e:
+        log("pointer index: getBlocks failed: %s" % e)
+        return idx
+    for b in blocks:
+        if not is_data(b):
+            continue
+        if time.time() > deadline:
+            log("pointer index: budget guard, skipping remaining blocks")
+            break
+        b0 = time.time()
+        start = b.getStart()
+        end = b.getEnd()
+        sz = 0
+        try:
+            sz = int(b.getSize())
+        except:
+            sz = 0
+        log("pointer index: block %s size=0x%x" % (b.getName(), sz))
+        cur = start
+        n = 0
+        while True:
+            try:
+                if cur.compareTo(end) > 0:
+                    break
+                v = mem_long(cur)
+                if v is None:
+                    break
+                try:
+                    va = toAddr(v)
+                except:
+                    va = None
+                if va is not None and is_code(va):
+                    idx.setdefault(v, []).append(int(cur.getOffset()))
+                    kept += 1
+                else:
+                    skipped += 1
+                cur = cur.add(8)
+                n += 1
+            except:
+                break
+            if (n & 0xFFFFF) == 0 and time.time() > deadline:
+                log("pointer index: inner budget guard at 0x%x" % int(cur.getOffset()))
+                break
+        log("pointer index: block %s scanned=%d kept=%d (%.2fs)" % (
+            b.getName(), n, kept, time.time() - b0))
+    log("pointer index: total kept=%d skipped=%d (%.2fs)" % (
+        kept, skipped, time.time() - t0))
+    return idx
+
+
+def ptr_index_lookup(idx, addr):
+    if addr is None or not idx:
+        return []
+    try:
+        key = int(addr.getOffset())
+    except:
+        return []
+    lst = idx.get(key, [])
+    if not lst:
+        return []
+    out = []
+    for x in lst:
+        try:
+            out.append(toAddr(x))
+        except:
+            continue
+    return out
+
+
+BAD_FN = ["log", "Log", "print", "Print", "trace", "Trace",
+          "assert", "Assert", "debug", "Debug", "os_log", "_os_log",
+          "vsnprintf", "snprintf", "printf", "NSString", "format",
+          "abort", "panic", "raise", "throw"]
 
 
 def is_logger(f):
     if f is None:
         return False
-    n = f.getName()
+    n = f.getName() or ""
     for b in BAD_FN:
         if b in n:
             return True
@@ -159,8 +322,8 @@ def is_logger(f):
 def expand_vtable(anchor):
     start = anchor
     prev = anchor.subtract(8)
-    for _ in range(256):
-        v = read_ptr(prev)
+    for _ in range(512):
+        v = mem_long(prev)
         if v is None or v == 0:
             break
         try:
@@ -173,8 +336,8 @@ def expand_vtable(anchor):
         prev = prev.subtract(8)
     slots = []
     cur = start
-    for _ in range(512):
-        v = read_ptr(cur)
+    for _ in range(1024):
+        v = mem_long(cur)
         if v is None or v == 0:
             break
         try:
@@ -190,60 +353,82 @@ def expand_vtable(anchor):
 
 def score_vtable(slots):
     n = len(slots)
-    if n < 2 or n > 256:
+    if n < 2 or n > 512:
         return -1
     s = n * 2
-    if 4 <= n <= 128:
+    if 4 <= n <= 256:
         s += 20
-    addrs = [int(t.getOffset()) for _, t in slots]
-    spread = max(addrs) - min(addrs)
-    if spread < 0x400000:
-        s += 10
+    try:
+        addrs = [int(t.getOffset()) for _, t in slots]
+        spread = max(addrs) - min(addrs)
+        if spread < 0x800000:
+            s += 10
+    except:
+        pass
     return s
 
 
-def find_vtables_for_entry(entry):
+def find_vtables_for_entry(entry, pidx):
     cands = []
+    hits = []
     for ra in find_refs(entry):
-        if not is_data(ra):
+        if is_data(ra):
+            hits.append((ra, "ref"))
+    for ra in ptr_index_lookup(pidx, entry):
+        if is_data(ra):
+            hits.append((ra, "ptr_idx"))
+    seen = set()
+    for ra, src in hits:
+        k = int(ra.getOffset())
+        if k in seen:
             continue
+        seen.add(k)
         vt_start, slots = expand_vtable(ra)
         sc = score_vtable(slots)
         if sc > 0:
-            cands.append((sc, vt_start, slots))
+            cands.append((sc, vt_start, slots, src))
     cands.sort(key=lambda x: -x[0])
     return cands
 
 
 def score_ctor(f, vt_start):
     if f is None:
-        return -1
+        return -999
     body = f.getBody()
     if body is None:
-        return -1
+        return -999
     n = body.getNumAddresses()
     if n < 16 or n > 4096:
-        return -5
+        return -999
     s = 0
-    if 32 <= n <= 1500:
+    if 32 <= n <= 2000:
         s += 10
     listing = currentProgram.getListing()
-    it = listing.getInstructions(body, True)
+    try:
+        it = listing.getInstructions(body, True)
+    except:
+        return s
     bl = 0
     str_z = 0
     cnt = 0
-    while it.hasNext() and cnt < 400:
+    while it.hasNext() and cnt < 500:
         cnt += 1
-        i = it.next()
+        try:
+            i = it.next()
+        except:
+            break
         mn = i.getMnemonicString().lower()
         if mn in ("bl", "blr"):
             bl += 1
-        elif mn in ("str", "stp", "stur"):
-            txt = i.toString()
+        elif mn in ("str", "stp", "stur", "strb", "strh"):
+            try:
+                txt = i.toString()
+            except:
+                txt = ""
             if "xzr" in txt or "wzr" in txt:
                 str_z += 1
-    s += min(bl, 10) * 2
-    s += min(str_z, 20)
+    s += min(bl, 12) * 2
+    s += min(str_z, 24)
     if bl == 0:
         s -= 15
     refs_inside = 0
@@ -252,8 +437,7 @@ def score_ctor(f, vt_start):
         it2 = rm.getReferencesTo(vt_start).iterator()
         while it2.hasNext():
             r = it2.next()
-            fa = r.getFromAddress()
-            if body.contains(fa):
+            if body.contains(r.getFromAddress()):
                 refs_inside += 1
     except:
         pass
@@ -264,12 +448,17 @@ def score_ctor(f, vt_start):
     return s
 
 
-def find_ctors_for_vtable(vt_start):
+def find_ctors_for_vtable(vt_start, pidx):
     cands = []
     seen = set()
+    hits = []
     for ra in find_refs(vt_start):
-        if not is_code(ra):
-            continue
+        if is_code(ra):
+            hits.append((ra, "ref"))
+    for ra in ptr_index_lookup(pidx, vt_start):
+        if is_code(ra):
+            hits.append((ra, "ptr_idx"))
+    for ra, src in hits:
         f = getFunctionContaining(ra)
         if f is None:
             continue
@@ -278,22 +467,29 @@ def find_ctors_for_vtable(vt_start):
             continue
         seen.add(k)
         sc = score_ctor(f, vt_start)
-        cands.append((sc, f))
+        cands.append((sc, f, src))
     cands.sort(key=lambda x: -x[0])
     return cands
 
 
-def scan_class(cls, idx):
+def scan_class(cls, sidx, pidx):
+    t0 = time.time()
     addrs = []
-    for s, al in idx.items():
-        if s == cls or s.startswith(cls + "::") or ("::" + cls) in s:
-            addrs.extend(al)
+    for s, al in sidx.items():
+        try:
+            if s == cls or s.startswith(cls + "::") or ("::" + cls) in s:
+                addrs.extend(al)
+        except:
+            continue
     if not addrs:
+        log("[%s] no string anchors" % cls)
         return None
+
+    log("[%s] string anchors: %d" % (cls, len(addrs)))
 
     anchors = []
     seen = set()
-    for sa in addrs[:24]:
+    for sa in addrs[:32]:
         for ra in find_refs(sa):
             f = getFunctionContaining(ra)
             if f is None:
@@ -306,98 +502,155 @@ def scan_class(cls, idx):
                 continue
             seen.add(k)
             anchors.append((fe, sa, f))
-    if not anchors:
-        return None
 
-    res = {"class": cls, "method": None, "vtable": None, "ctor": None, "slots": []}
+    if not anchors:
+        log("[%s] no non-logger anchors" % cls)
+        return {"class": cls, "method": None, "vtable": None, "ctor": None, "slots": []}
+
+    log("[%s] candidate anchors: %d" % (cls, len(anchors)))
+    for fe, sa, f in anchors[:8]:
+        log("[%s]   anchor %s  %s  str=%s" % (cls, fa(fe), f.getName(), fa(sa)))
+
+    res = {"class": cls, "method": None, "vtable": None, "ctor": None,
+           "slots": [], "vtable_src": None, "ctor_src": None}
 
     best_vt = None
     for fe, sa, f in anchors:
-        cands = find_vtables_for_entry(fe)
+        cands = find_vtables_for_entry(fe, pidx)
         if not cands:
             continue
-        sc, vt_start, slots = cands[0]
+        sc, vt_start, slots, src = cands[0]
+        log("[%s]   anchor %s -> vtable %s (%d slots, score=%d, via=%s)" % (
+            cls, fa(fe), fa(vt_start), len(slots), sc, src))
         if best_vt is None or sc > best_vt[0]:
-            best_vt = (sc, vt_start, slots, fe, sa, f)
+            best_vt = (sc, vt_start, slots, fe, sa, f, src)
 
     if best_vt is None:
         fe, sa, f = anchors[0]
         res["method"] = (rva(fe), f.getName(), rva(sa))
+        log("[%s] FAILED: no vtable found for any anchor" % cls)
         return res
 
-    _, vt_start, slots, fe, sa, f = best_vt
+    _, vt_start, slots, fe, sa, f, vsrc = best_vt
     res["method"] = (rva(fe), f.getName(), rva(sa))
     res["vtable"] = rva(vt_start)
-    res["slots"] = [(rva(a), rva(t)) for a, t in slots[:128]]
+    res["vtable_src"] = vsrc
+    res["slots"] = [(rva(a), rva(t)) for a, t in slots[:256]]
 
-    ctors = find_ctors_for_vtable(vt_start)
+    ctors = find_ctors_for_vtable(vt_start, pidx)
     if ctors:
-        sc, c = ctors[0]
+        log("[%s] ctor candidates for vtable %s:" % (cls, fa(vt_start)))
+        for sc, c, src in ctors[:5]:
+            log("[%s]   ctor %s score=%d via=%s name=%s" % (
+                cls, fa(c.getEntryPoint()), sc, src, c.getName()))
+        sc, c, src = ctors[0]
         if sc > 0:
             res["ctor"] = (rva(c.getEntryPoint()), c.getName(), sc)
+            res["ctor_src"] = src
+    else:
+        log("[%s] no ctor refs to vtable %s" % (cls, fa(vt_start)))
 
+    log("[%s] done in %.2fs" % (cls, time.time() - t0))
     return res
 
 
+def write_outputs(results):
+    log("writing %s" % REPORT)
+    try:
+        with open(REPORT, "w") as fh:
+            fh.write("# iOS ctor resolution (rtti-less)\n")
+            fh.write("# image_base=0x%x\n" % BASE)
+            fh.write("# generated at %.2fs\n\n" % elapsed())
+            for r in results:
+                fh.write("=== %s ===\n" % r["class"])
+                if r.get("method"):
+                    m = r["method"]
+                    fh.write("  method: rva=0x%08x  %s  (str@0x%x)\n" % (m[0], m[1], m[2]))
+                if r.get("vtable") is not None:
+                    fh.write("  vtable: rva=0x%08x  slots=%d  via=%s\n" % (
+                        r["vtable"], len(r.get("slots", [])), r.get("vtable_src")))
+                if r.get("ctor"):
+                    c = r["ctor"]
+                    fh.write("  ctor:   rva=0x%08x  score=%d  via=%s  %s\n" % (
+                        c[0], c[2], r.get("ctor_src"), c[1]))
+                for i, (sa, ta) in enumerate(r.get("slots", [])):
+                    fh.write("    [%3d] 0x%08x -> 0x%08x\n" % (i, sa, ta))
+                fh.write("\n")
+        log("wrote %s" % REPORT)
+    except Exception as e:
+        log("write REPORT failed: %s" % e)
+        traceback.print_exc()
+
+    log("writing %s" % OUT)
+    try:
+        n_ok = 0
+        n_tot = 0
+        with open(OUT, "w") as fh:
+            fh.write("export const ctors = Object.freeze({\n")
+            for r in results:
+                n_tot += 1
+                if r.get("ctor"):
+                    fh.write("  %s: 0x%x,\n" % (r["class"], r["ctor"][0]))
+                    n_ok += 1
+                else:
+                    fh.write("  // %s: unresolved\n" % r["class"])
+            fh.write("});\n")
+        log("wrote %s (%d/%d resolved)" % (OUT, n_ok, n_tot))
+    except Exception as e:
+        log("write OUT failed: %s" % e)
+        traceback.print_exc()
+
+
 def main():
+    init_log()
     log("=== find_ctors_ios ===")
-    log("program: %s" % currentProgram.getName())
+    try:
+        log("program: %s" % currentProgram.getName())
+        log("format: %s" % currentProgram.getExecutableFormat())
+        log("language: %s" % currentProgram.getLanguage().getLanguageID().getIdAsString())
+    except Exception as e:
+        log("env info failed: %s" % e)
     log("image base: 0x%x" % BASE)
 
-    idx = build_string_index()
-    if not idx:
-        log("[!] no strings")
+    try:
+        dump_blocks()
+    except Exception as e:
+        log("dump_blocks failed: %s" % e)
+
+    try:
+        sidx = build_string_index()
+    except Exception as e:
+        log("build_string_index failed: %s" % e)
+        traceback.print_exc()
         return
+    if not sidx:
+        log("FATAL: no strings indexed, aborting")
+        return
+
+    try:
+        pidx = build_pointer_index()
+    except Exception as e:
+        log("build_pointer_index failed: %s" % e)
+        traceback.print_exc()
+        pidx = {}
 
     results = []
     for cls in CLASSES:
-        if time.time() - START > BUDGET - 60:
-            log("[!] budget exhausted")
+        if time.time() - START > BUDGET - 120:
+            log("[!] global budget exhausted before class %s" % cls)
             break
         try:
-            r = scan_class(cls, idx)
+            r = scan_class(cls, sidx, pidx)
         except Exception as e:
-            log("[!] %s: %s" % (cls, e))
-            continue
+            log("[%s] EXCEPTION: %s" % (cls, e))
+            traceback.print_exc()
+            r = None
         if r is None:
             continue
         results.append(r)
-        if r.get("ctor"):
-            log("%-34s ctor=0x%08x vt=0x%08x meth=0x%08x %s" % (
-                cls, r["ctor"][0], r["vtable"], r["method"][0], r["ctor"][1]))
-        elif r.get("vtable") is not None:
-            log("%-34s vt=0x%08x meth=0x%08x ctor=?" % (
-                cls, r["vtable"], r["method"][0]))
-        elif r.get("method"):
-            log("%-34s meth=0x%08x vt=?" % (cls, r["method"][0]))
 
-    with open(REPORT, "w") as fh:
-        fh.write("# iOS ctor resolution (rtti-less)\n")
-        fh.write("# image_base=0x%x\n\n" % BASE)
-        for r in results:
-            fh.write("=== %s ===\n" % r["class"])
-            if r.get("method"):
-                fh.write("  method: rva=0x%08x  %s  (str@0x%x)\n" % r["method"])
-            if r.get("vtable") is not None:
-                fh.write("  vtable: rva=0x%08x  slots=%d\n" % (
-                    r["vtable"], len(r.get("slots", []))))
-            if r.get("ctor"):
-                c = r["ctor"]
-                fh.write("  ctor:   rva=0x%08x  score=%d  %s\n" % (c[0], c[2], c[1]))
-            for i, (sa, ta) in enumerate(r.get("slots", [])):
-                fh.write("    [%3d] 0x%08x -> 0x%08x\n" % (i, sa, ta))
-            fh.write("\n")
-
-    with open(OUT, "w") as fh:
-        fh.write("export const ctors = Object.freeze({\n")
-        for r in results:
-            if r.get("ctor"):
-                fh.write("  %s: 0x%x,\n" % (r["class"], r["ctor"][0]))
-            else:
-                fh.write("  // %s: unresolved\n" % r["class"])
-        fh.write("});\n")
-
-    log("[+] wrote %s and %s" % (OUT, REPORT))
+    write_outputs(results)
+    log("=== done in %.2fs ===" % elapsed())
 
 
 try:
@@ -407,3 +660,5 @@ except SystemExit:
 except Exception as e:
     log("FATAL: %s" % e)
     traceback.print_exc()
+finally:
+    close_log()
