@@ -54,7 +54,7 @@ jobs:
         id: cache-ipa
         with:
           path: ipa_cache
-          key: nulls-brawl-ipa-v5-direct
+          key: nulls-brawl-ipa-v6-direct
 
       - name: Download IPA
         if: steps.cache-ipa.outputs.cache-hit != 'true'
@@ -121,64 +121,42 @@ jobs:
           chmod +x gum-graft-bin/gum-graft
           rm -f gum-graft.xz
 
-      - name: Graft binary (try variants)
+      - name: Graft main binary
         run: |
           set -euo pipefail
-          cp "$BIN" "$BIN.orig"
-          SIZE0=$(stat -f%z "$BIN.orig")
-          echo "orig size: $SIZE0"
-
-          try() {
-            local name="$1"; shift
-            cp "$BIN.orig" "$BIN.test"
-            echo "--- $name ---"
-            if ./gum-graft-bin/gum-graft "$@" "$BIN.test" 2>&1 | tee "/tmp/graft-$name.log"; then
-              local sz
-              sz=$(stat -f%z "$BIN.test" 2>/dev/null || echo 0)
-              if [ "$sz" != "$SIZE0" ] && [ "$sz" != "0" ]; then
-                echo "  CHANGED: $SIZE0 -> $sz"
-                cp "$BIN.test" "$BIN"
-                chmod +x "$BIN"
-                rm -f "$BIN.test" "$BIN.orig"
-                return 0
-              fi
-              echo "  no change ($sz)"
-            else
-              echo "  FAILED (exit $?)"
-            fi
-            rm -f "$BIN.test"
-            return 1
-          }
-
-          try "ingest-fn"    --ingest-function-starts   && exit 0
-          try "ingest-imports" --ingest-imports          && exit 0
-          try "lazy-binds"   --transform-lazy-binds     && exit 0
-          try "fn+imports"   --ingest-function-starts --ingest-imports && exit 0
-          try "fn+lazy"      --ingest-function-starts --transform-lazy-binds && exit 0
-          try "all"          --ingest-function-starts --ingest-imports --transform-lazy-binds && exit 0
-
-          echo "no variant worked"
-          cp "$BIN.orig" "$BIN"
+          echo "=== grafting main binary: $BIN ==="
+          BEFORE=$(stat -f%z "$BIN")
+          ./gum-graft-bin/gum-graft -s -m -z "$BIN" 2>&1 | tee /tmp/graft-main.log || true
+          AFTER=$(stat -f%z "$BIN")
+          echo "main binary: $BEFORE -> $AFTER bytes"
           chmod +x "$BIN"
-          rm -f "$BIN.orig"
-          exit 1
 
       - name: Cache Frida Gadget
         id: cache-gadget
         uses: actions/cache@v4
         with:
           path: W.thin.dylib
-          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin
+          key: frida-gadget-${{ env.FRIDA_VERSION }}-arm64-thin-grafted
 
-      - name: Download Frida Gadget
+      - name: Download and graft Frida Gadget
         if: steps.cache-gadget.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fL --retry 3 -o gadget.xz "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
+          echo "=== downloading gadget ==="
+          curl -fL --retry 3 -o gadget.xz \
+            "https://github.com/frida/frida/releases/download/${FRIDA_VERSION}/frida-gadget-${FRIDA_VERSION}-ios-universal.dylib.xz"
           xz -d gadget.xz
           mv gadget W.fat.dylib
+
+          echo "=== thinning to arm64 ==="
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           rm -f W.fat.dylib
+
+          echo "=== grafting gadget ==="
+          BEFORE=$(stat -f%z W.thin.dylib)
+          ./gum-graft-bin/gum-graft -s -m -z W.thin.dylib 2>&1 | tee /tmp/graft-gadget.log || true
+          AFTER=$(stat -f%z W.thin.dylib)
+          echo "gadget: $BEFORE -> $AFTER bytes"
 
       - name: Install ldid deps
         run: |
@@ -244,7 +222,8 @@ jobs:
             '    <string>W.dylib</string>' \
             '    <key>CFBundleIdentifier</key>' \
             '    <string>re.frida.gadget</string>' \
-            '    <key>CFBundleShortVersionString</key>' \
+           s '    <key>CFBundle</ShortVersionString</keykey>' \
+           >' \
             '    <string>17.19.0</string>' \
             '    <key>CFBundleVersion</key>' \
             '    <string>17.19.0</string>' \
@@ -252,8 +231,7 @@ jobs:
             '    <string>Frida</string>' \
             '    <key>CFBundlePackageType</key>' \
             '    <string>FMWK</string>' \
-            '    <key>CFBundleSupportedPlatforms</key>' \
-            '    <array><string>iPhoneOS</string></array>' \
+            '    <key>CFBundleSupportedPlatform '    <array><string>iPhoneOS</string></array>' \
             '    <key>DTPlatformName</key>' \
             '    <string>iphoneos</string>' \
             '    <key>MinimumOSVersion</key>' \
@@ -308,6 +286,7 @@ jobs:
           name: patched-brawl-ipa
           path: |
             bs_patched.ipa
-            /tmp/graft-*.log
+            /tmp/graft-main.log
+            /tmp/graft-gadget.log
           retention-days: 30
           if-no-files-found: warn
