@@ -149,4 +149,10 @@ setTimeout(function () {
   }
 }, 8000);
 
+rpc.exports = {
+  ping: function () { return "pong"; },
+  openCount: function () { return openCount; },
+  fopenCount: function () { return fopenCount; }
+};
+
 log("=== interceptor test armed ===");
