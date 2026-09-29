@@ -35,12 +35,6 @@ jobs:
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           echo "thin before: $(stat -f%z W.thin.dylib)"
 
-      - name: Remove signature before graft
-        run: |
-          set -euo pipefail
-          codesign --remove-signature W.thin.dylib 2>&1 || true
-          echo "thin unsigned: $(stat -f%z W.thin.dylib)"
-
       - name: Download gum-graft
         run: |
           set -euo pipefail
@@ -49,37 +43,92 @@ jobs:
           xz -d gum-graft.xz
           chmod +x gum-graft
           file gum-graft
-          echo "=== gum-graft help ==="
-          ./gum-graft --help 2>&1 | head -40 || true
+          echo "=== HELP ==="
+          ./gum-graft --help 2>&1 | tee /tmp/help.txt
           echo "GUM_GRAFT=$(realpath gum-graft)" >> "$GITHUB_ENV"
 
-      - name: Run gum-graft
+      - name: Remove signature
         run: |
           set -euo pipefail
-          echo "before: $(stat -f%z W.thin.dylib)"
-          rc=0
-          "$GUM_GRAFT" W.thin.dylib 2>&1 | tee /tmp/graft1.log || rc=$?
-          echo "exit=$rc"
-          sz=$(stat -f%z W.thin.dylib)
-          echo "after default: $sz"
-          if [ "$sz" = "19236032" ]; then
-            echo "default did nothing, trying --verbose"
-            "$GUM_GRAFT" --verbose W.thin.dylib 2>&1 | tee /tmp/graft2.log || true
-            sz=$(stat -f%z W.thin.dylib)
-            echo "after verbose: $sz"
-          fi
-          if [ "$sz" = "19236032" ]; then
-            echo "still nothing, trying with --arch arm64"
-            "$GUM_GRAFT" --arch arm64 W.thin.dylib 2>&1 | tee /tmp/graft3.log || true
-            sz=$(stat -f%z W.thin.dylib)
-            echo "after --arch: $sz"
-          fi
-          echo "final size: $sz"
-          echo "=== graft log tail ==="
-          tail -40 /tmp/graft*.log 2>/dev/null || true
-          otool -l W.thin.dylib | grep -iE "graft|__FRIDA" || echo "no graft sections"
+          codesign --remove-signature W.thin.dylib 2>&1 || true
+          echo "unsigned thin: $(stat -f%z W.thin.dylib)"
 
-      - name: Install ldid-procursus from source
+      - name: Try graft variants on thin
+        id: graft-thin
+        run: |
+          set -euo pipefail
+          cp W.thin.dylib W.thin.orig.dylib
+          SIZE0=$(stat -f%z W.thin.dylib)
+          FOUND=0
+
+          try() {
+            local name="$1"; shift
+            cp W.thin.orig.dylib W.thin.test.dylib
+            echo "--- $name ---"
+            if "$GUM_GRAFT" "$@" 2>&1 | tee "/tmp/graft-$name.log"; then
+              local sz=$(stat -f%z W.thin.test.dylib)
+              if [ "$sz" != "$SIZE0" ]; then
+                echo "  CHANGED: $SIZE0 -> $sz"
+                cp W.thin.test.dylib W.thin.dylib
+                FOUND=1
+                return 0
+              else
+                echo "  no change ($sz)"
+              fi
+            else
+              echo "  FAILED"
+            fi
+            return 1
+          }
+
+          # Перебираем варианты
+          try "ingest-fn-before" --ingest-function-starts W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "ingest-fn-after" W.thin.test.dylib --ingest-function-starts || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "ingest-imports" --ingest-imports W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "transform-lazy" --transform-lazy-binds W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "all-flags" --ingest-function-starts --ingest-imports --transform-lazy-binds W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "short-i" -i W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          try "all" --all W.thin.test.dylib || true
+          [ "$FOUND" = "1" ] && exit 0 || true
+
+          echo "no variant changed the file"
+          echo "thin after all attempts: $(stat -f%z W.thin.dylib)"
+
+      - name: Try graft on fat
+        if: steps.graft-thin.outcome == 'success' && hashFiles('W.thin.dylib') == ''
+        run: |
+          echo "thin graft failed, trying fat"
+          set -euo pipefail
+          codesign --remove-signature W.fat.dylib 2>&1 || true
+          SIZE0=$(stat -f%z W.fat.dylib)
+          cp W.fat.dylib W.fat.orig.dylib
+          for flag in "--ingest-function-starts" "--ingest-imports" "--transform-lazy-binds" "--all"; do
+            cp W.fat.orig.dylib W.fat.test.dylib
+            if "$GUM_GRAFT" $flag W.fat.test.dylib >/dev/null 2>&1; then
+              SZ=$(stat -f%z W.fat.test.dylib)
+              if [ "$SZ" != "$SIZE0" ]; then
+                echo "fat changed with $flag: $SIZE0 -> $SZ"
+                cp W.fat.test.dylib W.fat.dylib
+                lipo -thin arm64 -output W.thin.dylib W.fat.dylib
+                exit 0
+              fi
+            fi
+          done
+          echo "fat graft also failed"
+
+      - name: Install ldid-procursus
         run: |
           set -euo pipefail
           sudo rm -f /usr/local/bin/ldid /opt/homebrew/bin/ldid /usr/bin/ldid 2>/dev/null || true
@@ -101,11 +150,11 @@ jobs:
           [ -e /usr/bin/ldid ] && sudo rm -f /usr/bin/ldid || true
           /usr/local/bin/ldid -v 2>&1 | head -1 || true
 
-      - name: Sign patched thin
+      - name: Sign thin
         run: |
           set -euo pipefail
           /usr/local/bin/ldid -S W.thin.dylib
-          echo "signed thin: $(stat -f%z W.thin.dylib)"
+          echo "signed: $(stat -f%z W.thin.dylib)"
 
       - name: Wrap into fat
         run: |
@@ -161,7 +210,6 @@ jobs:
             > "$FRAMEWORK_NAME/W.config"
 
           printf '%s\n' 'rpc.exports = { init: function () { return true; } };' > "$FRAMEWORK_NAME/agent.js"
-
           plutil -lint "$FRAMEWORK_NAME/Info.plist"
 
       - name: Package
@@ -174,8 +222,12 @@ jobs:
           shasum -a 256 Frida.framework.zip
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: Frida.framework
-          path: Frida.framework.zip
+          name: Frida.framework-and-logs
+          path: |
+            Frida.framework.zip
+            /tmp/help.txt
+            /tmp/graft-*.log
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
