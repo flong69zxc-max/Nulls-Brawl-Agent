@@ -7,11 +7,13 @@ import time
 import traceback
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
-OUT = os.path.join(WS, "offsets_resolved.js")
-REPORT = os.path.join(WS, "debug_menu_report.txt")
+OUT = os.path.join(WS, "mod_menu_offsets.js")
+REPORT = os.path.join(WS, "mod_menu_report.txt")
 BASE = 0x100000000
-BUDGET = 1500
+BUDGET = 1200
 START = time.time()
+
+L = []
 
 def log(m):
     sys.stdout.write(m + "\n")
@@ -26,13 +28,75 @@ def rva(a):
 def to_addr(r):
     return toAddr(BASE + r)
 
-def build_index():
+# Имена символов (mangled) и подсказки-строки для поиска
+TARGETS = {
+    # HomePage / Lobby
+    "HomePage_ctor": ["HomePage", "C1", "C2"],
+    "HomePage_startGame": ["HomePage", "startGame"],
+
+    # ResourceManager
+    "ResourceManager_getMovieClip": ["ResourceManager", "getMovieClip"],
+
+    # GameButton
+    "GameButton_ctor": ["GameButton", "C1", "C2"],
+    "GameButton_buttonPressed": ["GameButton", "buttonPressed"],
+
+    # Sprite / Stage
+    "Sprite_ctor": ["Sprite", "C1", "C2"],
+    "Sprite_addChild": ["Sprite", "addChild"],
+    "Stage_addChild": ["Stage", "addChild"],
+    "Stage_instance": ["Stage", "instance"],
+    "MovieClip_getMovieClipByName": ["MovieClip", "getMovieClipByName"],
+    "MovieClip_getTextFieldByName": ["MovieClip", "getTextFieldByName"],
+    "MovieClip_gotoAndStopFrameIndex": ["MovieClip", "gotoAndStopFrameIndex"],
+
+    # Text
+    "TextField_setText": ["TextField", "setText"],
+    "TextField_fetchFont": ["TextField", "fetchFont"],
+    "String_ctor": ["String", "C1", "C2"],
+
+    # GUI / Popup
+    "GenericPopup_ctor": ["GenericPopup", "C1", "C2"],
+    "GenericPopup_addButton": ["GenericPopup", "addButton"],
+    "GenericPopup_addButton2": ["GenericPopup", "addButton2"],
+    "GenericPopup_setTitle": ["GenericPopup", "setTitle"],
+    "GenericPopup_onHudCloseButton": ["GenericPopup", "onHudCloseButton"],
+    "GUI_showPopup": ["GUI", "showPopup"],
+    "GUI_getInstance": ["GUI", "getInstance"],
+    "GUI_closePopup": ["GUI", "closePopup"],
+    "GUI_showFloater": ["GUI", "showFloater"],
+}
+
+def find_functions_by_patterns():
+    fm = currentProgram.getFunctionManager()
+    all_funcs = []
+    it = fm.getFunctions(True)
+    while it.hasNext():
+        f = it.next()
+        all_funcs.append((f.getName(), f.getEntryPoint()))
+    log("[*] total functions: %d" % len(all_funcs))
+
+    results = {}
+    for tag, patterns in sorted(TARGETS.items()):
+        hits = []
+        for name, entry in all_funcs:
+            if all(p.lower() in name.lower() for p in patterns):
+                hits.append((rva(entry), name))
+        if hits:
+            hits.sort()
+            results[tag] = hits
+            log("[+] %s -> %s" % (tag, hits[0]))
+        else:
+            log("[-] %s -> NOT FOUND" % tag)
+    return results
+
+def find_strings():
     listing = currentProgram.getListing()
     idx = {}
     it = listing.getDefinedData(True)
     total = 0
     while it.hasNext():
-        if time.time() - START > BUDGET - 300:
+        if time.time() - START > BUDGET - 200:
             break
         try:
             d = it.next()
@@ -48,18 +112,8 @@ def build_index():
             idx.setdefault(s, []).append(d.getAddress())
         except:
             continue
-    log("[*] strings: %d unique: %d" % (total, len(idx)))
+    log("[*] strings indexed: %d" % total)
     return idx
-
-def strings_with(idx, needle, limit=30):
-    out = []
-    for s, addrs in idx.items():
-        if needle in s:
-            for a in addrs:
-                out.append((s, a))
-                if len(out) >= limit:
-                    return out
-    return out
 
 def find_refs(a):
     out = []
@@ -72,101 +126,73 @@ def find_refs(a):
         pass
     return out
 
-def dump_func(f, max_instr=60):
-    if f is None:
-        log("    <no function>")
-        return
-    body = f.getBody()
-    listing = currentProgram.getListing()
-    it = body.getAddresses(True)
-    n = 0
-    while it.hasNext():
-        a = it.next()
-        i = listing.getInstructionAt(a)
-        if i is None:
-            continue
-        n += 1
-        if n > max_instr:
-            log("    ...")
-            break
-        try:
-            log("      +0x%04x  %s" % (rva(a) - rva(f.getEntryPoint()), i.toString()))
-        except:
-            continue
-
-def analyze_entry(entry):
-    f = getFunctionAt(entry)
-    if f is None:
-        return
-    log("    --- 0x%x %s ---" % (rva(entry), f.getName()))
-    dump_func(f)
-
 def main():
-    log("=== find_debug_menu ===")
+    log("=== find_mod_menu_offsets ===")
     log("program: %s" % currentProgram.getName())
 
-    idx = build_index()
-    if not idx:
-        log("[!] empty index")
-        return
+    # 1) Поиск функций по именам символов
+    log("")
+    log("=== SYMBOL SEARCH ===")
+    results = find_functions_by_patterns()
 
-    # ТОЛЬКО реальные якоря Brawl Stars из SCRE
-    ANCHORS = [
-        "sc/debug.sc",
-        "debug.sc",
-        "debug_tex.sc",
-        "debug_menu_button",
-        "debug_menu_text",
-        "addResourcesToLoad",
-        "TID_CONNECTING_TO_SERVER",
-        "OfflineMode",
-        "OFFLINE_MODE",
-        "GameMode",
-    ]
+    # 2) Поиск по строкам, если символы не найдены
+    log("")
+    log("=== STRING SEARCH (fallback) ===")
+    string_idx = find_strings()
 
-    candidates = {}
-    for key in ANCHORS:
-        hits = strings_with(idx, key, 20)
-        if not hits:
-            log("")
-            log("[*] %s: NOT FOUND" % key)
+    STRING_ANCHORS = {
+        "HomePage_ctor": ["TID_MATCHMAKE_FAILED_15", "HomePage", "Lobby"],
+        "GameButton_buttonPressed": ["GameButton", "buttonPressed"],
+        "GUI_showPopup": ["GUI", "Popup"],
+        "GenericPopup_ctor": ["GenericPopup", "Popup"],
+    }
+
+    for tag, anchors in sorted(STRING_ANCHORS.items()):
+        if tag in results:
             continue
         log("")
-        log("[*] %s: %d string(s)" % (key, len(hits)))
-        for s, a in hits:
-            log("  %r @ 0x%x" % (s[:80], rva(a)))
-            for ra in find_refs(a):
-                f = getFunctionContaining(ra)
-                if f is None:
-                    continue
-                fr = rva(f.getEntryPoint())
-                candidates.setdefault(fr, set()).add(key)
-                log("    xref 0x%x -> func 0x%x %s" % (rva(ra), fr, f.getName()))
+        log("--- %s ---" % tag)
+        for anchor in anchors:
+            hits = []
+            for s, addrs in string_idx.items():
+                if anchor in s:
+                    hits.extend(addrs)
+            if not hits:
+                log("  anchor %r: not found" % anchor)
+                continue
+            log("  anchor %r: %d string(s)" % (anchor, len(hits)))
+            for sa in hits[:5]:
+                for ra in find_refs(sa):
+                    f = getFunctionContaining(ra)
+                    if f is not None:
+                        fr = rva(f.getEntryPoint())
+                        if tag not in results:
+                            results[tag] = []
+                        results[tag].append((fr, f.getName()))
+                        log("    func 0x%x %s" % (fr, f.getName()))
 
-    log("")
-    log("=== BODIES ===")
-    for fr in sorted(candidates.keys()):
-        log("")
-        log("--- 0x%x  keys=%s ---" % (fr, ",".join(sorted(candidates[fr]))))
-        analyze_entry(to_addr(fr))
-
+    # 3) Запись результатов
     log("")
     log("=== SUMMARY ===")
-    for fr in sorted(candidates.keys()):
-        log("  0x%x  %s" % (fr, ",".join(sorted(candidates[fr]))))
+    for tag, hits in sorted(results.items()):
+        if hits:
+            log("  %s: 0x%x" % (tag, hits[0][0]))
+        else:
+            log("  %s: NOT FOUND" % tag)
 
     with open(OUT, "w") as fh:
         fh.write("export const offsets = Object.freeze({\n")
-        for fr in sorted(candidates.keys()):
-            keys = "_".join(sorted(candidates[fr])).replace("/", "_").replace(" ", "_")
-            fh.write("  hook_%s: 0x%x,\n" % (keys, fr))
+        for tag in sorted(results.keys()):
+            if results[tag]:
+                fr, name = results[tag][0]
+                fh.write("  %s: 0x%x, // %s\n" % (tag, fr, name))
         fh.write("});\n")
 
     with open(REPORT, "w") as fh:
-        fh.write("candidates: %d\n" % len(candidates))
-        for fr in sorted(candidates.keys()):
-            fh.write("  0x%x  %s\n" % (fr, ",".join(sorted(candidates[fr]))))
+        for line in L:
+            fh.write(line + "\n")
 
+    log("")
     log("[+] wrote %s" % OUT)
 
 try:
