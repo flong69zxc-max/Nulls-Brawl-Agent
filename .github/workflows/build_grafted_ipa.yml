@@ -43,11 +43,10 @@ jobs:
           chmod +x gum-graft
           file gum-graft
 
-      - name: Verify gum-graft
+      - name: Show gum-graft help
         run: |
           set -euo pipefail
-          test -x gum-graft
-          ./gum-graft --help 2>&1 | head -30 || true
+          ./gum-graft --help 2>&1 | head -40
 
       - name: Cache Frida Gadget
         id: cache-gadget
@@ -74,19 +73,25 @@ jobs:
           codesign --remove-signature W.thin.dylib 2>&1 || true
 
       - name: Run gum-graft with explicit offsets
+        id: graft
         run: |
           set -euo pipefail
           echo "before: $(stat -f%z W.thin.dylib)"
+          set +e
           ./gum-graft \
-            --ingest-imports \
-            --add 0xd93d80 \
-            --add 0xb24820 \
-            --add 0xb24244 \
-            --add 0x9b5afc \
-            --add 0x62d890 \
-            W.thin.dylib 2>&1 | tail -30 || true
+            -m \
+            -i 0xd93d80 \
+            -i 0xb24820 \
+            -i 0xb24244 \
+            -i 0x9b5afc \
+            -i 0x62d890 \
+            W.thin.dylib 2>&1 | tail -40
+          rc=$?
+          set -e
+          echo "gum-graft exit code: $rc"
           echo "after: $(stat -f%z W.thin.dylib)"
           otool -l W.thin.dylib | grep -iE "graft|__FRIDA" || echo "no graft sections"
+          echo "graft_rc=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Cache ldid
         id: cache-ldid
