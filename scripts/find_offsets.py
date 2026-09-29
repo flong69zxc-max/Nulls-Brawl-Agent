@@ -3,7 +3,6 @@
 
 import os
 import sys
-import json
 import time
 import traceback
 
@@ -11,9 +10,8 @@ WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
 OFF_OUT = os.path.join(WS, "offsets_resolved.js")
 REPORT = os.path.join(WS, "debug_menu_report.txt")
 
-TEXT_BASE = 0x100000000
 BUDGET_SEC = 1800
-MAX_HITS_PER_ANCHOR = 16
+MAX_INSTR_SCAN = 20
 
 L = []
 START = time.time()
@@ -25,31 +23,84 @@ def log(m):
 def w(s):
     L.append(s)
 
-STRING_ANCHORS = {
-    "SCIDConfig_getBool": ["DisableIngameFriends"],
-    "LogicVersion_isDev": ["isDev"],
-    "LogicVersion_isDevBuild": ["isDevBuild"],
-    "LogicVersion_isDeveloperBuild": ["isDeveloperBuild"],
-    "LogicVersion_isProd": ["isProd"],
-    "LogicVersion_isProduction": ["isProduction"],
-    "DebugMenu_label": ["DebugMenu"],
-    "DebugMenu_cheat": ["cheat"],
-    "DebugMenu_godMode": ["GodMode"],
-    "StringCtor": ["String not found:"],
-}
-
 def rva(a):
-    return int(a.getOffset()) - TEXT_BASE
+    return int(a.getOffset()) - 0x100000000
 
-def index_strings():
-    log("[*] indexing strings via getDefinedData...")
+def get_segment_name(addr):
+    block = currentProgram.getMemory().getBlock(addr)
+    if block is None:
+        return "?"
+    return block.getName()
+
+def is_function(addr):
+    return getFunctionAt(addr) is not None
+
+def get_func_entry(addr):
+    f = getFunctionContaining(addr)
+    if f is None:
+        return None
+    return f.getEntryPoint()
+
+def find_string_addrs(string_idx, anchor):
+    out = []
+    for sval, addrs in string_idx.items():
+        if anchor in sval:
+            out.extend(addrs)
+    return out
+
+def find_code_refs(target_addr):
+    rm = currentProgram.getReferenceManager()
+    refs = rm.getReferencesTo(target_addr)
+    it = refs.iterator()
+    out = []
+    while it.hasNext():
+        r = it.next()
+        fa = r.getFromAddress()
+        f = getFunctionContaining(fa)
+        if f is not None:
+            out.append(fa)
+    return out
+
+def scan_instructions(start_addr, count):
     listing = currentProgram.getListing()
-    try:
-        it = listing.getDefinedData(True)
-    except Exception as e:
-        log("[!] getDefinedData failed: %s" % e)
-        return {}, 0
+    out = []
+    a = start_addr
+    for _ in range(count):
+        instr = listing.getInstructionAt(a)
+        if instr is None:
+            break
+        out.append(instr)
+        a = instr.getMaxAddress().add(1)
+    return out
+
+def find_bl_targets(instrs):
+    out = []
+    for instr in instrs:
+        mn = instr.getMnemonicString().lower()
+        if mn == "bl":
+            flows = instr.getFlows()
+            if flows:
+                out.append(flows[0])
+    return out
+
+def has_function_prologue(addr):
+    listing = currentProgram.getListing()
+    instrs = scan_instructions(addr, 3)
+    for instr in instrs:
+        mn = instr.getMnemonicString().lower()
+        if mn in ("stp", "sub"):
+            return True
+        if mn in ("ret", "br"):
+            return False
+    return False
+
+def main():
+    log("=== find_offsets ===")
+    log("program: %s" % currentProgram.getName())
+
+    listing = currentProgram.getListing()
     idx = {}
+    it = listing.getDefinedData(True)
     total_data = 0
     total_str = 0
     while it.hasNext():
@@ -71,83 +122,63 @@ def index_strings():
             idx.setdefault(key, []).append(d.getAddress())
         except:
             continue
-    log("[*] total data items: %d" % total_data)
-    log("[*] total strings: %d" % total_str)
-    log("[*] unique strings: %d" % len(idx))
-    return idx, total_str
-
-def find_anchor_addrs(string_idx, anchor):
-    out = []
-    for sval, addrs in string_idx.items():
-        if anchor in sval:
-            out.extend(addrs)
-    return out
-
-def find_xrefs_to(target_addr, limit):
-    rm = currentProgram.getReferenceManager()
-    refs = rm.getReferencesTo(target_addr)
-    it = refs.iterator()
-    out = []
-    while it.hasNext() and len(out) < limit:
-        r = it.next()
-        fa = r.getFromAddress()
-        f = getFunctionContaining(fa)
-        if f is not None:
-            out.append(f)
-    return out
-
-def main():
-    log("=== find_debug_menu ===")
-    log("program: %s" % currentProgram.getName())
-
-    string_idx, total_str = index_strings()
-    if total_str == 0:
-        log("[!] NO STRINGS FOUND")
-        sys.exit(1)
+    log("[*] strings indexed: %d" % total_str)
 
     results = {}
-    log("")
-    log("=== ANCHOR SEARCH ===")
 
-    for tag, anchors in sorted(STRING_ANCHORS.items()):
+    ANCHORS = {
+        "getBool": ["DisableIngameFriends"],
+        "isDev": ["isDev"],
+        "isDevBuild": ["isDevBuild"],
+        "isDeveloperBuild": ["isDeveloperBuild"],
+        "isProd": ["isProd"],
+    }
+
+    for tag, anchors in sorted(ANCHORS.items()):
         log("")
         log("--- %s ---" % tag)
-        found_rvas = []
         for anchor in anchors:
-            addrs = find_anchor_addrs(string_idx, anchor)
-            log("  anchor %r -> %d string occurrence(s)" % (anchor, len(addrs)))
-            for sa in addrs[:MAX_HITS_PER_ANCHOR]:
-                funcs = find_xrefs_to(sa, 8)
-                for f in funcs:
-                    try:
-                        fr = rva(f.getEntryPoint())
-                        if fr < 0x10000:
-                            continue
-                        found_rvas.append(fr)
-                        log("    %s @ 0x%x" % (str(f.getName()), fr))
-                    except:
-                        continue
-        if found_rvas:
-            found_rvas = sorted(set(found_rvas))
-            results[tag] = found_rvas[0]
-            log("  -> picked rva=0x%x" % results[tag])
+            addrs = find_string_addrs(idx, anchor)
+            log("  anchor %r -> %d string(s)" % (anchor, len(addrs)))
+            for sa in addrs[:8]:
+                code_refs = find_code_refs(sa)
+                for ref_addr in code_refs[:4]:
+                    instrs = scan_instructions(ref_addr, MAX_INSTR_SCAN)
+                    bls = find_bl_targets(instrs)
+                    # Ищем вызовы функций после загрузки адреса строки
+                    if len(bls) >= 2:
+                        # Первый BL обычно конструктор строки, второй — getBool
+                        cand_func = bls[1]
+                        if is_function(cand_func):
+                            fr = rva(cand_func)
+                            if fr > 0x10000:
+                                results[tag] = ("func", fr)
+                                log("    func @ 0x%x (prologue=%s)" % (fr, has_function_prologue(cand_func)))
+                    # Если после загрузки адреса идёт LDRB — это данные
+                    for instr in instrs:
+                        mn = instr.getMnemonicString().lower()
+                        if mn.startswith("ldr"):
+                            # Адрес данных берём из ADRP+ADD
+                            for prev in instrs:
+                                if prev.getMnemonicString().lower() == "adrp":
+                                    # Приблизительно: адрес = page + offset
+                                    # Точное вычисление требует эмуляции
+                                    pass
+        if tag not in results:
+            log("  -> NOT FOUND")
 
     log("")
     log("=== SUMMARY ===")
-    for tag, r in sorted(results.items()):
-        log("  %s @ 0x%x" % (tag, r))
+    for tag, (typ, r) in sorted(results.items()):
+        log("  %s: type=%s rva=0x%x" % (tag, typ, r))
 
     fh = open(OFF_OUT, "w")
-    fh.write("export const offsets = Object.freeze(\n{\n")
+    fh.write("export const offsets = Object.freeze({\n")
     for tag in sorted(results.keys()):
-        fh.write("    %s: 0x%x,\n" % (tag, results[tag]))
+        typ, r = results[tag]
+        fh.write("  %s: 0x%x, // type=%s\n" % (tag, r, typ))
     fh.write("});\n")
     fh.close()
-
-    w("strings indexed: %d" % total_str)
-    w("")
-    for tag, r in sorted(results.items()):
-        w("  %s @ 0x%x" % (tag, r))
 
     fh = open(REPORT, "w")
     for line in L:
@@ -155,7 +186,6 @@ def main():
     fh.close()
 
     log("[+] wrote %s" % OFF_OUT)
-    log("[+] wrote %s" % REPORT)
 
 try:
     main()
@@ -164,12 +194,3 @@ except SystemExit:
 except Exception as e:
     log("FATAL: %s" % e)
     traceback.print_exc()
-    try:
-        fh = open(OFF_OUT, "w")
-        fh.write("export const offsets = Object.freeze(\n{\n});\n")
-        fh.close()
-        fh = open(REPORT, "w")
-        fh.write("FATAL: %s\n%s\n" % (e, traceback.format_exc()))
-        fh.close()
-    except:
-        pass
