@@ -127,25 +127,31 @@ setTimeout(function () {
 
 setTimeout(function () {
   try {
-    var alert = ObjC.classes.UIAlertController.alertControllerWithTitle_message_preferredStyle_(
-      "Frida", "Interceptor works! v" + Frida.version, 1
-    );
-    alert.addAction_(ObjC.classes.UIAlertAction.actionWithTitle_style_handler_("OK", 0, null));
-    var windows = ObjC.classes.UIApplication.sharedApplication().windows();
-    var root = null;
-    for (var i = 0; i < windows.count(); i++) {
-      var w = windows.objectAtIndex_(i);
-      if (w.isKeyWindow()) { root = w.rootViewController(); break; }
-    }
-    if (root !== null) {
-      while (root.presentedViewController() !== null) root = root.presentedViewController();
-      root.presentViewController_animated_completion_(alert, true, null);
-      log("alert shown");
-    } else {
-      log("alert skipped: no key window");
-    }
+    ObjC.schedule(ObjC.mainQueue, function () {
+      try {
+        var alert = ObjC.classes.UIAlertController.alertControllerWithTitle_message_preferredStyle_(
+          "Frida", "Interceptor works! v" + Frida.version, 1
+        );
+        alert.addAction_(ObjC.classes.UIAlertAction.actionWithTitle_style_handler_("OK", 0, null));
+        var windows = ObjC.classes.UIApplication.sharedApplication().windows();
+        var root = null;
+        for (var i = 0; i < windows.count(); i++) {
+          var w = windows.objectAtIndex_(i);
+          if (w.isKeyWindow()) { root = w.rootViewController(); break; }
+        }
+        if (root !== null) {
+          while (root.presentedViewController() !== null) root = root.presentedViewController();
+          root.presentViewController_animated_completion_(alert, true, null);
+          log("alert shown");
+        } else {
+          log("alert skipped: no key window");
+        }
+      } catch (e) {
+        log("alert FAIL: " + e.message);
+      }
+    });
   } catch (e) {
-    log("alert FAIL: " + e.message);
+    log("ObjC.schedule FAIL: " + e.message);
   }
 }, 8000);
 
