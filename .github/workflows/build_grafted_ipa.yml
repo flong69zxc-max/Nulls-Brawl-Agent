@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 30
     env:
       FRIDA_VERSION: "17.19.0"
+      GUM_GRAFT_VERSION: "17.19.0"
       LDID_VERSION: "v2.1.5-procursus7"
 
     steps:
@@ -20,19 +21,10 @@ jobs:
           lfs: true
           fetch-depth: 1
 
-      - name: List repo
-        run: |
-          pwd
-          ls -la
-          find . -maxdepth 2 -iname "*nulls*" -not -path "./.git/*" || true
-
       - name: Verify binary
         run: |
           set -euo pipefail
-          if [ ! -f "Nulls Brawl" ]; then
-            echo "ERROR: file not found"
-            exit 1
-          fi
+          test -f "Nulls Brawl"
           file "Nulls Brawl"
           stat -f%z "Nulls Brawl"
 
@@ -49,7 +41,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build
-          ./node_modules/.bin/esbuild scripts/frida-scripts/agent.js --bundle --format=esm --target=es2020 --minify --legal-comments=none --banner:js='"use strict";' --outfile=build/agent.js
+          ./node_modules/.bin/esbuild scripts/frida-scripts/agent.js \
+            --bundle --format=esm --target=es2020 --minify \
+            --legal-comments=none \
+            --banner:js='"use strict";' \
+            --outfile=build/agent.js
           ls -la build/agent.js
 
       - name: Download Frida Gadget
@@ -61,7 +57,36 @@ jobs:
           lipo -thin arm64 -output W.thin.dylib W.fat.dylib
           rm -f W.fat.dylib
           file W.thin.dylib
-          stat -f%z W.thin.dylib
+
+      - name: Download gum-graft
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 -o gum-graft.xz "https://github.com/frida/frida/releases/download/${GUM_GRAFT_VERSION}/gum-graft-${GUM_GRAFT_VERSION}-macos-arm64.xz"
+          xz -d gum-graft.xz
+          chmod +x gum-graft
+          ./gum-graft --help 2>&1 | head -20
+
+      - name: Graft binary
+        run: |
+          set -euo pipefail
+          cp "Nulls Brawl" "Nulls Brawl.orig"
+          echo "before: $(stat -f%z "Nulls Brawl")"
+          set +e
+          ./gum-graft \
+            --ingest-function-starts \
+            --offset 0xb24820 \
+            --offset 0xd93d80 \
+            "Nulls Brawl" 2>&1 | tail -40
+          rc=$?
+          set -e
+          echo "gum-graft exit code: $rc"
+          echo "after: $(stat -f%z "Nulls Brawl")"
+          otool -l "Nulls Brawl" | grep -iE "__FRIDA|graft" || echo "no graft sections"
+          if [ "$rc" -ne 0 ]; then
+            echo "WARNING: graft failed, using original"
+            cp "Nulls Brawl.orig" "Nulls Brawl"
+          fi
+          rm -f "Nulls Brawl.orig"
 
       - name: Install ldid deps
         run: |
@@ -83,7 +108,6 @@ jobs:
           make CXXFLAGS="-O2 -pipe" -j"$(sysctl -n hw.ncpu)"
           cp ldid ../ldid-bin/ldid
           chmod +x ../ldid-bin/ldid
-          otool -L ../ldid-bin/ldid
 
       - name: Build Frida.framework
         run: |
@@ -149,26 +173,15 @@ jobs:
           ./insert_dylib-bin/insert_dylib --weak --all-yes "@executable_path/Frameworks/Frida.framework/W.dylib" "Nulls Brawl.orig" "Nulls Brawl"
           chmod +x "Nulls Brawl"
           rm -f "Nulls Brawl.orig"
-          echo "=== LC_RPATH before ==="
-          otool -l "Nulls Brawl" | grep -A2 LC_RPATH || echo "no LC_RPATH"
           install_name_tool -add_rpath "@executable_path/Frameworks" "Nulls Brawl" || echo "rpath already exists"
-          echo "=== LC_RPATH after ==="
-          otool -l "Nulls Brawl" | grep -A2 LC_RPATH
-          otool -L "Nulls Brawl" | grep -i frida || echo "no frida dylib in LC_LOAD_DYLIB"
+          otool -L "Nulls Brawl" | grep -i frida || echo "no frida dylib"
 
       - name: Sign
         run: |
           set -euo pipefail
           ./ldid-bin/ldid -S Frida.framework/W.dylib
           ./ldid-bin/ldid -S "Nulls Brawl"
-          echo "signed"
-
-      - name: Show results
-        run: |
-          set -euo pipefail
-          ls -la "Nulls Brawl" Frida.framework/
-          file "Nulls Brawl"
-          otool -L "Nulls Brawl" | grep -i frida || true
+          codesign --force --sign - "Nulls Brawl" 2>&1 || true
 
       - uses: actions/upload-artifact@v4
         with:
