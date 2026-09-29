@@ -11,13 +11,8 @@ const RVA_GETBOOL = 0xb24820;
 const RVA_ISDEV = 0xd93d80;
 
 const FORCE_TRUE_CONTAINS = [
-  "isDev",
-  "isDeveloperBuild",
-  "isDevBuild",
-  "enableDebug",
-  "enableCheat",
-  "disableIngameFriends",
-  "debugMenu",
+  "isDev", "isDeveloperBuild", "isDevBuild", "enableDebug",
+  "enableCheat", "disableIngameFriends", "debugMenu",
 ];
 
 let logPath = null;
@@ -31,7 +26,6 @@ let isDevCalls = 0;
 
 function str(v) { try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; } }
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
-
 function mkdir(p) { try { fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(p, true, null, null); return true; } catch (e) { return false; } }
 function exists(p) { try { return fileManager().fileExistsAtPath_(p) === true; } catch (e) { return false; } }
 function readText(p) { try { const f = new File(p, "r"); const t = f.readText(); f.close(); return t; } catch (e) { return null; } }
@@ -177,7 +171,6 @@ function findGameModule() {
 function readArgAsString(arg) {
   if (arg === null || arg === undefined) return null;
   if (arg.isNull()) return null;
-
   try {
     const obj = new ObjC.Object(arg);
     const cls = obj.$className;
@@ -186,33 +179,12 @@ function readArgAsString(arg) {
       if (s !== null && s.length > 0) return s;
     }
   } catch (e) {}
-
+  try { const s = arg.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } catch (e) {}
+  try { const p = arg.readPointer(); if (!p.isNull()) { const s = p.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } } catch (e) {}
   try {
-    const s = arg.readUtf8String();
-    if (s !== null && s.length > 0 && s.length < 200) return s;
+    const lenPtr = arg.add(0x4); const dataPtr = arg.add(0x8); const len = lenPtr.readU32();
+    if (len > 0 && len < 200) { const p2 = dataPtr.readPointer(); if (!p2.isNull()) { const s = p2.readUtf8String(); if (s !== null && s.length > 0 && s.length < 200) return s; } }
   } catch (e) {}
-
-  try {
-    const p = arg.readPointer();
-    if (!p.isNull()) {
-      const s = p.readUtf8String();
-      if (s !== null && s.length > 0 && s.length < 200) return s;
-    }
-  } catch (e) {}
-
-  try {
-    const lenPtr = arg.add(0x4);
-    const dataPtr = arg.add(0x8);
-    const len = lenPtr.readU32();
-    if (len > 0 && len < 200) {
-      const p2 = dataPtr.readPointer();
-      if (!p2.isNull()) {
-        const s = p2.readUtf8String();
-        if (s !== null && s.length > 0 && s.length < 200) return s;
-      }
-    }
-  } catch (e) {}
-
   return null;
 }
 
@@ -238,19 +210,24 @@ function findGrafterExports() {
     const m = mods[i];
     if (!m.path) continue;
     const p = m.path.toLowerCase();
-    if (p.indexOf("frida") === -1 && p.indexOf("gadget") === -1 && p.indexOf("gum") === -1) continue;
+    if (p.indexOf("frida") === -1 && p.indexOf("gadget") === -1 && p.indexOf("gum") === -1 && p.indexOf("w.dylib") === -1) continue;
 
-    for (let j = 0; j < names.length; j++) {
-      const n = names[j];
-      if (found[n]) continue;
-      try {
-        const addr = Module.findExportByName(m.name, n);
-        if (addr) {
-          found[n] = addr;
-          log("graft: found " + n + " in " + m.name + " @ " + addr);
+    try {
+      const exports = Module.enumerateExports(m.name);
+      for (let j = 0; j < exports.length; j++) {
+        const e = exports[j];
+        for (let k = 0; k < names.length; k++) {
+          const n = names[k];
+          if (found[n]) continue;
+          if (e.name === n || e.name.indexOf(n) !== -1 || e.name.indexOf("darwin_grafter") !== -1) {
+            if (e.type === "function") {
+              found[n] = e.address;
+              log("graft: found " + e.name + " in " + m.name + " @ " + e.address);
+            }
+          }
         }
-      } catch (e) {}
-    }
+      }
+    } catch (err) {}
   }
 
   for (let j = 0; j < names.length; j++) {
@@ -258,10 +235,7 @@ function findGrafterExports() {
     if (found[n]) continue;
     try {
       const addr = Module.getGlobalExportByName(n);
-      if (addr) {
-        found[n] = addr;
-        log("graft: found " + n + " globally @ " + addr);
-      }
+      if (addr) { found[n] = addr; log("graft: found " + n + " globally @ " + addr); }
     } catch (e) {}
   }
 
@@ -275,6 +249,8 @@ function graftTrampolines(binaryPath) {
   const ex = findGrafterExports();
   if (!ex["gum_darwin_grafter_new_from_file"] || !ex["gum_darwin_grafter_add"] || !ex["gum_darwin_grafter_graft"]) {
     log("graft: gum_* not found in any loaded module");
+    log("graft: use CLI: gum-graft --ingest-function-starts --offset 0xb24820 --offset 0xd93d80 <binary>");
+    log("graft: then codesign --force --sign - <binary>");
     return "unavailable";
   }
 
@@ -286,10 +262,7 @@ function graftTrampolines(binaryPath) {
   const pathPtr = Memory.allocUtf8String(binaryPath);
 
   const grafter = fnNew(pathPtr, INGEST_FUNCTION_STARTS);
-  if (grafter.isNull()) {
-    log("graft: new_from_file failed");
-    return "error";
-  }
+  if (grafter.isNull()) { log("graft: new_from_file failed"); return "error"; }
 
   fnAdd(grafter, RVA_GETBOOL);
   fnAdd(grafter, RVA_ISDEV);
@@ -298,10 +271,7 @@ function graftTrampolines(binaryPath) {
 
   try {
     const unref = Module.getGlobalExportByName("g_object_unref");
-    if (unref) {
-      const fnUnref = new NativeFunction(unref, "void", ["pointer"]);
-      fnUnref(grafter);
-    }
+    if (unref) { const fnUnref = new NativeFunction(unref, "void", ["pointer"]); fnUnref(grafter); }
   } catch (e) {}
 
   log("graft: changed=" + ok);
@@ -314,28 +284,20 @@ function hookGetBool() {
   log("hooking getBool @ " + addr + " (rva 0x" + RVA_GETBOOL.toString(16) + ")");
   try {
     Interceptor.attach(addr, {
-      onEnter: function (args) {
-        this.name = readArgAsString(args[0]);
-      },
+      onEnter: function (args) { this.name = readArgAsString(args[0]); },
       onLeave: function (retval) {
         const n = this.name;
         if (n === null || n.length === 0) return;
         getBoolCalls++;
         const was = retval.toInt32();
         const force = shouldForceTrue(n);
-        if (getBoolCalls <= 500 || force) {
-          log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
-        }
-        if (force && was !== 1) {
-          retval.replace(ptr(1));
-        }
+        if (getBoolCalls <= 500 || force) log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
+        if (force && was !== 1) retval.replace(ptr(1));
       }
     });
     getBoolAddr = addr;
     log("getBool hook installed");
-  } catch (e) {
-    log("getBool hook FAILED: " + e.message);
-  }
+  } catch (e) { log("getBool hook FAILED: " + e.message); }
 }
 
 function hookIsDev() {
@@ -347,19 +309,13 @@ function hookIsDev() {
       onLeave: function (retval) {
         isDevCalls++;
         const was = retval.toInt32();
-        if (was !== 1) {
-          retval.replace(ptr(1));
-          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1");
-        } else {
-          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1");
-        }
+        if (was !== 1) { retval.replace(ptr(1)); if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1"); }
+        else { if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1"); }
       }
     });
     isDevAddr = addr;
     log("isDev hook installed");
-  } catch (e) {
-    log("isDev hook FAILED: " + e.message);
-  }
+  } catch (e) { log("isDev hook FAILED: " + e.message); }
 }
 
 function run() {
@@ -376,27 +332,17 @@ function run() {
 
   hookGetBool();
   hookIsDev();
-
   log("=== debug_menu armed ===");
 }
 
 setTimeout(run, 2000);
-
-setTimeout(function () {
-  log("timer 10s: getBool calls=" + getBoolCalls + " isDev calls=" + isDevCalls);
-}, 12000);
-
-setTimeout(function () {
-  log("timer 30s: getBool calls=" + getBoolCalls + " isDev calls=" + isDevCalls);
-}, 32000);
+setTimeout(function () { log("timer 10s: getBool=" + getBoolCalls + " isDev=" + isDevCalls); }, 12000);
+setTimeout(function () { log("timer 30s: getBool=" + getBoolCalls + " isDev=" + isDevCalls); }, 32000);
 
 rpc.exports = {
   getBool_addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
   isDev_addr: function () { return isDevAddr === null ? null : isDevAddr.toString(); },
   stats: function () { return { getBool: getBoolCalls, isDev: isDevCalls }; },
   logPath: function () { return logPath; },
-  graft: function () {
-    if (!gameModule) gameModule = findGameModule();
-    return graftTrampolines(gameModule.path);
-  }
+  graft: function () { if (!gameModule) gameModule = findGameModule(); return graftTrampolines(gameModule.path); }
 };
