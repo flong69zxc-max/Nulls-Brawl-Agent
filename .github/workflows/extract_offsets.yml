@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CACHE_EPOCH: v8
+  CACHE_EPOCH: v9
   GHIDRA_VER: "11.4.3"
   GHIDRA_URL: "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.3_build/ghidra_11.4.3_PUBLIC_20251203.zip"
 
@@ -141,7 +141,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/scripts"
           cat > "$GITHUB_WORKSPACE/scripts/ExportToGzf.java" <<'JAVA_EOF'
-          //This script pack the project in a gzf archive. Based on beigela post on GitHub.
+          //This script pack the project in a gzf archive.
           //@author Federico Dotta
           //@category Export
           //@keybinding E
@@ -218,6 +218,8 @@ jobs:
             -import /tmp/brawl_bin \
             -processor AARCH64:LE:64:AppleSilicon \
             -loader MachoLoader \
+            -loader-applyLabels false \
+            -loader-anchorLabels false \
             -analysisTimeoutPerFile 3600 \
             -max-cpu "$JOBS" \
             -postScript ExportToGzf.java "$GITHUB_WORKSPACE/brawl_bin.gzf" \
