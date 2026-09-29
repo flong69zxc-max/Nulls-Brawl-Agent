@@ -5,56 +5,62 @@ const UPDATED = "updated";
 const TEST_NAME = ".__dm_write_test";
 const DOC_DIR = 9;
 const USER_MASK = 1;
-const MAX_LOG_BYTES = 1048576;
+const MAX_LOG_BYTES = 2097152;
 
-const ANCHOR_STRING = "DisableIngameFriends";
+const RVA_GETBOOL = 0xb24820;
+const RVA_ISDEV = 0xd93d80;
+
+const FORCE_TRUE_CONTAINS = [
+  "isDev",
+  "isDeveloperBuild",
+  "isDevBuild",
+  "enableDebug",
+  "enableCheat",
+  "disableIngameFriends",
+  "debugMenu",
+];
 
 let logPath = null;
 let docsPath = null;
 let updatedPath = null;
-let targetModule = null;
+let gameModule = null;
 let getBoolAddr = null;
-
-const forceTrue = new Set([]);
-const forceFalse = new Set([]);
+let isDevAddr = null;
+let getBoolCalls = 0;
+let isDevCalls = 0;
 
 function str(v) { try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; } }
 function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
 
-function mkdir(path) {
-  try { fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(path, true, null, null); return true; } catch (e) { return false; }
-}
-function exists(path) { try { return fileManager().fileExistsAtPath_(path) === true; } catch (e) { return false; } }
-function readText(path) { try { const f = new File(path, "r"); const t = f.readText(); f.close(); return t; } catch (e) { return null; } }
-function writeText(path, text) { try { const f = new File(path, "w"); f.write(text); f.flush(); f.close(); return true; } catch (e) { return false; } }
-function fileSize(path) { try { const f = new File(path, "r"); const b = f.readAllBytes(); f.close(); return b.length; } catch (e) { return -1; } }
+function mkdir(p) { try { fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(p, true, null, null); return true; } catch (e) { return false; } }
+function exists(p) { try { return fileManager().fileExistsAtPath_(p) === true; } catch (e) { return false; } }
+function readText(p) { try { const f = new File(p, "r"); const t = f.readText(); f.close(); return t; } catch (e) { return null; } }
+function writeText(p, t) { try { const f = new File(p, "w"); f.write(t); f.flush(); f.close(); return true; } catch (e) { return false; } }
+function fileSize(p) { try { const f = new File(p, "r"); const b = f.readAllBytes(); f.close(); return b.length; } catch (e) { return -1; } }
 
-function writable(path) {
-  if (!path) return false;
-  const test = path + "/" + TEST_NAME;
+function writable(p) {
+  if (!p) return false;
+  const t = p + "/" + TEST_NAME;
   const payload = "p-" + Date.now();
-  if (!writeText(test, payload)) return false;
-  const ok = readText(test) === payload;
-  try { fileManager().removeItemAtPath_error_(test, null); } catch (e) {}
+  if (!writeText(t, payload)) return false;
+  const ok = readText(t) === payload;
+  try { fileManager().removeItemAtPath_error_(t, null); } catch (e) {}
   return ok;
 }
 
-function containerLike(path) {
-  if (!path) return false;
-  if (path.length < 8 || path.charAt(0) !== "/") return false;
-  if (/\/Documents$/.test(path)) return true;
-  if (path.indexOf("/Documents/") !== -1) return true;
-  if (path.indexOf("/Data/Application/") !== -1) return true;
+function containerLike(p) {
+  if (!p) return false;
+  if (p.length < 8 || p.charAt(0) !== "/") return false;
+  if (/\/Documents$/.test(p)) return true;
+  if (p.indexOf("/Documents/") !== -1) return true;
+  if (p.indexOf("/Data/Application/") !== -1) return true;
   return false;
 }
 
-function bundlePath() {
-  try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
-}
+function bundlePath() { try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; } }
 
 function filesystemDir() {
-  const list = [];
-  const seen = {};
+  const list = [], seen = {};
   const add = function (p) {
     if (!p) return;
     const x = String(p).replace(/\/+$/, "");
@@ -82,7 +88,6 @@ function filesystemDir() {
     }
   }
   add("/tmp");
-
   let loose = null;
   for (let i = 0; i < list.length; i++) {
     let p = list[i];
@@ -143,271 +148,160 @@ function skipModule(m) {
   if (m.name === "LiveContainer") return true;
   if (m.name === "LiveContainerShared") return true;
   if (m.name.indexOf("Frida") !== -1) return true;
-  if (m.name === "Nulls Brawl") return true;
-  if (m.size < 512 * 1024) return true;
+  if (m.size < 1024 * 1024) return true;
   return false;
 }
 
-function findScidModule() {
+function findGameModule() {
   const mods = Process.enumerateModules();
-  // Приоритет: Scid
-  for (let i = 0; i < mods.length; i++) {
-    const m = mods[i];
-    if (m.name === "Scid" || (m.path && m.path.indexOf("/Scid.framework/") !== -1)) {
-      log("scid module: " + m.name + " base=" + m.base + " size=" + m.size);
-      return m;
-    }
-  }
-  // Fallback: любой сторонний модуль > 512 KB кроме основных
+  let best = null;
+  const bundleId = (() => {
+    try { return String(ObjC.classes.NSBundle.mainBundle().bundleIdentifier()).toLowerCase(); } catch (e) { return ""; }
+  })();
+  const needle = bundleId.replace(/\./g, "");
   for (let i = 0; i < mods.length; i++) {
     const m = mods[i];
     if (skipModule(m)) continue;
-    const hay = ((m.name || "") + " " + (m.path || "")).toLowerCase();
-    if (hay.indexOf("nb.app") !== -1 || hay.indexOf("nulls") !== -1) {
-      if (m.name === "Nulls Brawl") continue;
-    }
-    log("fallback module: " + m.name + " base=" + m.base + " size=" + m.size);
-    return m;
+    const hay = ((m.name || "") + " " + (m.path || "")).toLowerCase().replace(/\./g, "");
+    if (needle && hay.indexOf(needle) !== -1) { gameModule = m; return m; }
   }
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i];
+    if (skipModule(m)) continue;
+    if (best === null || m.size > best.size) best = m;
+  }
+  gameModule = best || Process.mainModule;
+  return gameModule;
+}
+
+function readArgAsString(arg) {
+  if (arg === null || arg === undefined) return null;
+  if (arg.isNull()) return null;
+
+  try {
+    const obj = new ObjC.Object(arg);
+    const cls = obj.$className;
+    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls) || /^__NSCF/.test(cls) || /NSTaggedPointerString/.test(cls)) {
+      const s = obj.toString();
+      if (s !== null && s.length > 0) return s;
+    }
+  } catch (e) {}
+
+  try {
+    const s = arg.readUtf8String();
+    if (s !== null && s.length > 0 && s.length < 200) return s;
+  } catch (e) {}
+
+  try {
+    const p = arg.readPointer();
+    if (!p.isNull()) {
+      const s = p.readUtf8String();
+      if (s !== null && s.length > 0 && s.length < 200) return s;
+    }
+  } catch (e) {}
+
+  try {
+    const lenPtr = arg.add(0x4);
+    const dataPtr = arg.add(0x8);
+    const len = lenPtr.readU32();
+    if (len > 0 && len < 200) {
+      const p2 = dataPtr.readPointer();
+      if (!p2.isNull()) {
+        const s = p2.readUtf8String();
+        if (s !== null && s.length > 0 && s.length < 200) return s;
+      }
+    }
+  } catch (e) {}
+
   return null;
 }
 
-function findAllOccurrencesInModule(mod, needle, limit) {
-  const out = [];
-  const ranges = Process.enumerateRanges("r--");
-  for (let i = 0; i < ranges.length; i++) {
-    const r = ranges[i];
-    if (r.base.compare(mod.base) < 0) continue;
-    if (r.base.compare(mod.base.add(mod.size)) >= 0) continue;
-    try {
-      const res = Memory.scanSync(r.base, r.size, needle);
-      for (let j = 0; j < res.length && out.length < limit; j++) out.push(res[j].address);
-    } catch (e) {}
+function shouldForceTrue(name) {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  for (let i = 0; i < FORCE_TRUE_CONTAINS.length; i++) {
+    if (lower.indexOf(FORCE_TRUE_CONTAINS[i].toLowerCase()) !== -1) return true;
   }
-  return out;
+  return false;
 }
 
-// Поиск xref-ов: сканирует r-x секции модуля, ищет ADRP+ADD и ADRP+LDR,
-// которые приводят к адресу target
-function findXrefs(mod, target, maxHits) {
-  const hits = [];
-  const modStart = mod.base;
-  const modEnd = mod.base.add(mod.size);
-  const targetNum = parseInt(target.toString(), 16);
-
-  const ranges = Process.enumerateRanges("r-x");
-  for (let i = 0; i < ranges.length; i++) {
-    const r = ranges[i];
-    if (r.base.compare(modStart) < 0) continue;
-    if (r.base.compare(modEnd) >= 0) continue;
-
-    const size = Math.min(r.size, modEnd.sub(r.base).toInt32());
-    let offset = 0;
-    const CHUNK = 1024 * 1024;
-    while (offset < size && hits.length < maxHits) {
-      const take = Math.min(CHUNK, size - offset);
-      let buf = null;
-      try { buf = r.base.add(offset).readByteArray(take); } catch (e) { offset += take; continue; }
-      if (buf === null) { offset += take; continue; }
-      const dv = new DataView(buf);
-      const count = Math.floor(take / 4);
-      const regs = {};
-      const baseAddr = r.base.add(offset);
-
-      for (let k = 0; k < count; k++) {
-        const insn = dv.getUint32(k * 4, true);
-        const addr = baseAddr.add(k * 4);
-
-        // ADRP
-        const family = (insn & 0x9F000000) >>> 0;
-        if (family === 0x90000000) {
-          const rd = insn & 0x1F;
-          let imm = (((insn >>> 5) & 0x7FFFF) << 2) | ((insn >>> 29) & 3);
-          if (imm & 0x100000) imm -= 0x200000;
-          const pcPage = parseInt(addr.toString(), 16) & ~0xFFF;
-          regs[rd] = pcPage + imm * 4096;
-          continue;
-        }
-
-        // ADD (immediate) 64-bit
-        if (((insn & 0xFF800000) >>> 0) === 0x91000000) {
-          const rn = (insn >>> 5) & 0x1F;
-          const shift = (insn >>> 22) & 3;
-          const imm12 = (insn >>> 10) & 0xFFF;
-          if (shift === 0 || shift === 1) {
-            const base = regs[rn];
-            if (base !== undefined) {
-              const value = base + (shift === 1 ? imm12 * 4096 : imm12);
-              if (value === targetNum) {
-                hits.push({ addr: addr, via: "add" });
-              }
-            }
-          }
-          continue;
-        }
-
-        // LDR (immediate) 64-bit unsigned offset, from literal pool
-        // 0xF9400000 mask 0xFFC00000
-        if (((insn & 0xFFC00000) >>> 0) === 0xF9400000) {
-          const rn = (insn >>> 5) & 0x1F;
-          const imm12 = ((insn >>> 10) & 0xFFF) * 8;
-          const base = regs[rn];
-          if (base !== undefined) {
-            const poolAddr = base + imm12;
-            let poolValue = null;
-            try {
-              const pv = ptr(poolAddr).readPointer();
-              if (!pv.isNull()) poolValue = parseInt(pv.toString(), 16);
-            } catch (e) {}
-            if (poolValue !== null && poolValue === targetNum) {
-              hits.push({ addr: addr, via: "ldr" });
-            }
-          }
-          continue;
-        }
-      }
-      offset += take;
-    }
-  }
-  return hits;
-}
-
-function findFunctionStart(addr) {
-  const MAX_BACK = 8192;
-  let cur = addr;
-  for (let i = 0; i < MAX_BACK / 4; i++) {
-    let insn = null;
-    try { insn = cur.readU32(); } catch (e) { break; }
-    if ((insn & 0xFFC07FFF) === 0xA9807BFD) return cur;  // STP x29,x30,[sp,#-N]!
-    if (insn === 0xD503233F) return cur;                  // PACIASP
-    if ((insn & 0xFF8003FF) === 0xD10003FF) return cur;   // SUB sp,sp,#imm
-    if ((insn & 0xFFE07FFF) === 0xA9807BFD) return cur;
-    if (insn === 0x910003FD) return cur;                  // MOV x29,sp
-    cur = cur.sub(4);
-  }
-  return addr;
-}
-
-function installHook(addr) {
-  log("installing hook @ " + addr + " (rva 0x" + addr.sub(targetModule.base).toString(16) + ")");
+function hookGetBool() {
+  const base = gameModule.base;
+  const addr = base.add(RVA_GETBOOL);
+  log("hooking getBool @ " + addr + " (rva 0x" + RVA_GETBOOL.toString(16) + ")");
   try {
     Interceptor.attach(addr, {
       onEnter: function (args) {
-        this.name = null;
-        try {
-          const obj = new ObjC.Object(args[0]);
-          this.name = obj.toString();
-        } catch (e) {
-          try { this.name = args[0].readUtf8String(); } catch (e2) {}
-        }
-        if (this.name !== null && this.name.length > 1 && this.name.length < 120) {
-          log("getBool ENTER name=\"" + this.name + "\"");
-        }
+        this.name = readArgAsString(args[0]);
       },
       onLeave: function (retval) {
         const n = this.name;
-        if (n === null) return;
-        for (const k of forceTrue) {
-          if (n === k || n.indexOf(k) !== -1) {
-            log("FORCE-TRUE \"" + n + "\" was=" + retval.toInt32());
-            retval.replace(ptr(1));
-            return;
-          }
+        if (n === null || n.length === 0) return;
+        getBoolCalls++;
+        const was = retval.toInt32();
+        const force = shouldForceTrue(n);
+        if (getBoolCalls <= 500 || force) {
+          log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
         }
-        for (const k of forceFalse) {
-          if (n === k || n.indexOf(k) !== -1) {
-            log("FORCE-FALSE \"" + n + "\" was=" + retval.toInt32());
-            retval.replace(ptr(0));
-            return;
-          }
+        if (force && was !== 1) {
+          retval.replace(ptr(1));
         }
       }
     });
     getBoolAddr = addr;
-    log("hook installed");
+    log("getBool hook installed");
   } catch (e) {
-    log("hook FAILED: " + e.message);
+    log("getBool hook FAILED: " + e.message);
+  }
+}
+
+function hookIsDev() {
+  const base = gameModule.base;
+  const addr = base.add(RVA_ISDEV);
+  log("hooking isDev @ " + addr + " (rva 0x" + RVA_ISDEV.toString(16) + ")");
+  try {
+    Interceptor.attach(addr, {
+      onLeave: function (retval) {
+        isDevCalls++;
+        const was = retval.toInt32();
+        if (was !== 1) {
+          retval.replace(ptr(1));
+          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1");
+        } else {
+          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1");
+        }
+      }
+    });
+    isDevAddr = addr;
+    log("isDev hook installed");
+  } catch (e) {
+    log("isDev hook FAILED: " + e.message);
   }
 }
 
 function run() {
-  targetModule = findScidModule();
-  if (targetModule === null) {
-    log("Scid module not found, aborting");
-    return;
-  }
+  gameModule = findGameModule();
+  log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
 
-  log("scanning " + targetModule.name + " for string " + ANCHOR_STRING);
-  const strAddrs = findAllOccurrencesInModule(targetModule, ANCHOR_STRING, 8);
-  log("found " + strAddrs.length + " string occurrence(s)");
+  hookGetBool();
+  hookIsDev();
 
-  if (strAddrs.length === 0) {
-    // Расширенный поиск: все модули процесса
-    log("not found in " + targetModule.name + ", scanning all modules...");
-    const allMods = Process.enumerateModules();
-    for (let i = 0; i < allMods.length; i++) {
-      const m = allMods[i];
-      if (skipModule(m)) continue;
-      if (m.name === targetModule.name) continue;
-      const hits = findAllOccurrencesInModule(m, ANCHOR_STRING, 4);
-      if (hits.length > 0) {
-        log("found in " + m.name + ": " + hits.length + " occurrence(s)");
-        targetModule = m;
-        for (let j = 0; j < hits.length; j++) log("  string@" + hits[j]);
-        break;
-      }
-    }
-    if (strAddrs.length === 0) {
-      const recheck = findAllOccurrencesInModule(targetModule, ANCHOR_STRING, 8);
-      if (recheck.length === 0) {
-        log("anchor string NOT FOUND anywhere, aborting");
-        return;
-      }
-      strAddrs.length = 0;
-      for (let j = 0; j < recheck.length; j++) strAddrs.push(recheck[j]);
-    }
-  }
-
-  const picked = strAddrs[0];
-  log("picked string@" + picked);
-
-  log("searching xrefs (ADRP+ADD and ADRP+LDR)");
-  const xrefs = findXrefs(targetModule, picked, 64);
-  log("xrefs found: " + xrefs.length);
-
-  if (xrefs.length === 0) {
-    log("no xrefs found, aborting");
-    return;
-  }
-
-  const seen = {};
-  const funcStarts = [];
-  for (let i = 0; i < xrefs.length; i++) {
-    const hit = xrefs[i];
-    const start = findFunctionStart(hit.addr);
-    const key = start.toString();
-    if (seen[key]) continue;
-    seen[key] = true;
-    funcStarts.push({ start: start, hit: hit.addr, via: hit.via });
-    log("xref#" + i + " hit=" + hit.addr + " via=" + hit.via + " rva=0x" + hit.addr.sub(targetModule.base).toString(16) + " -> func@ " + start + " rva=0x" + start.sub(targetModule.base).toString(16));
-  }
-
-  if (funcStarts.length === 0) {
-    log("no function starts, aborting");
-    return;
-  }
-
-  installHook(funcStarts[0].start);
+  log("=== debug_menu armed ===");
 }
 
 setTimeout(run, 2000);
 
+setTimeout(function () {
+  log("timer 10s: getBool calls=" + getBoolCalls + " isDev calls=" + isDevCalls);
+}, 12000);
+
+setTimeout(function () {
+  log("timer 30s: getBool calls=" + getBoolCalls + " isDev calls=" + isDevCalls);
+}, 32000);
+
 rpc.exports = {
-  addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
-  force_true: function (name) { forceTrue.add(name); return Array.from(forceTrue); },
-  force_false: function (name) { forceFalse.add(name); return Array.from(forceFalse); },
-  list: function () { return { t: Array.from(forceTrue), f: Array.from(forceFalse) }; },
+  getBool_addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
+  isDev_addr: function () { return isDevAddr === null ? null : isDevAddr.toString(); },
+  stats: function () { return { getBool: getBoolCalls, isDev: isDevCalls }; },
   logPath: function () { return logPath; }
 };
-
-log("=== debug_menu armed ===");
