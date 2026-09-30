@@ -3,6 +3,7 @@ import os
 import sys
 import time
 import struct
+import re
 import traceback
 
 import r2pipe
@@ -12,34 +13,217 @@ BIN = os.environ.get("R2_BIN", "/tmp/brawl_bin")
 OUT = os.path.join(WS, "offsets_resolved.js")
 REPORT = os.path.join(WS, "offsets_report.txt")
 DETAIL = os.path.join(WS, "ctors_detailed.log")
-BUDGET = 1500
+BUDGET = 1800
 START = time.time()
 
-CLASSES = [
+TARGETS = [
+    "LogicBattleModeClient_update",
+    "BattleMode_getInstance",
+    "LogicGameObjectClient_getX",
+    "LogicGameObjectClient_getY",
+    "LogicGameObjectClient_getZ",
+    "LogicBattleModeClient_getOwnCharacter",
+    "BattleScreen_activateSkill",
+    "StringCtor",
+    "Gui_showFloaterTextAtDefaultPos",
+    "LogicBattleModeClient_getOwnPlayerTeam",
+    "LogicGameObjectClient_getGlobalID",
+    "LogicGameObjectClient_getData",
+    "LogicProjectileData_getRadius",
+    "LogicProjectileData_getSpeed",
+    "LogicProjectileData_getRendering",
+    "LogicCharacterData_getCollisionRadius",
+    "decoratedTextFieldSetPlayerName",
+    "TextField_setText_ui",
+    "TextField_setText",
+    "handleJoystick",
+    "ClientInput_constructor_int",
+    "ClientInputManager_addInput",
+    "LogicBattleModeClient_setClientPredictionMoveTo",
+    "Sprite_Sprite",
+    "LogicTileData__blocksProjectiles",
+    "ResourceManager__isResourceLoaded",
+    "GameMain__update",
+    "DecalManager__DecalManager",
+    "LogicProjectileData__IsOwnTeamProjectile",
+    "GameObjectManager__GameObjectManager",
+    "Projectile_ctor",
+    "Projectile__update",
+    "RenderSystem__RenderSystem",
+    "CombatHUD__toggleEditing",
+    "BattleScreen__updateCameraParameters",
+    "Character__updateHealthBar",
+    "CombatHUD__setShootStickState",
+    "CombatHUD__setMoveStickState",
+    "GUI__getDefaultFloaterPos",
+    "GUI__showFloaterTextAt",
+    "GUI__showPopup",
+    "GameButtonCtor",
+    "DropGUIContainer__ctorFromExport",
+    "GameSliderComponent__GameSliderComponent",
+    "GameSliderComponent__setValueBounds",
+    "MapEditorModifierItem__MapEditorModifierItem",
+    "MapEditorModifierPopup__MapEditorModifierPopup",
+    "MapEditorModifierPopup__addModifierItem",
+    "PopupBase__PopupBase",
+    "MessageManager__receiveMessage",
+    "BattleScreen__BattleScreen",
+    "BattleScreen__stopWithStick",
+    "BattleScreen__handleTouchReleased",
+    "BattleScreen__update",
+    "BattleScreen__updateAutoshoot",
+    "BattleScreen_getClosestTargetForAutoshoot",
+    "BattleScreen__updateMovement",
+    "BattleScreen__tryToActivateSkill",
+    "BattleScreen__shouldShowAccessoryButton",
+    "BattleScreen__calculateProjectilePath",
+    "BattleScreen__joystickToWorld",
+    "GameScreen__getLogicBattle",
+    "MapEditorScreen__initRenderSystem",
+    "MapEditorScreen__initItems",
+    "MapEditorScreen__initCharacters",
+    "GameSettings__isFixedJoystickEnabled",
+    "BattleMode__enter",
+    "BattleMode__addResourcesToLoad",
+    "GameStateManager__getInstance",
+    "GameStateManager__isState",
+    "HomeMode__getInstance",
+    "StringTable__getMovieClip",
+    "MovieClipHelper__setTextAndScaleIfNecessary",
+    "LogicTile__setData",
+    "LogicTileMap__LogicTileMap",
+    "LogicTileMap__isPlayerLineOfSightClear",
+    "LogicTileMap__isPlayerLineOfSightClear1",
+    "LogicDataTables__getOpenTileData",
+    "LogicDataTables__getBaseTileData",
+    "LogicDataTables__getSiegeBoltTileData",
+    "LogicProjectileData__isBeam",
+    "LogicCharacterData_getSpeed",
+    "LogicProjectileData__getNumEarlyTicks",
+    "LogicSkillData__getActiveTime",
+    "LogicSkillData__getRechargeTime",
+    "LogicSkillData__getMaxCharge",
+    "LogicSkillData__getMsBetweenAttacks",
+    "LogicSkillData__getCastingRange",
+    "LogicTileData__blocksMovement",
+    "LogicCharacterClient__getCarryableData",
+    "LogicCharacterClient__getWeaponSkill",
+    "LogicCharacterClient__canMoveAndUseThisSkillSimultaneously",
+    "LogicCharacterClient__getLinkedCarryable",
+    "LogicCharacterClient__getCurrentActiveOrCastingSkill",
+    "LogicCharacterClient__getSkillAt",
+    "LogicSkillClient__getData",
+    "LogicSkillClient__canActivate",
+    "LogicSkillData__getBehaviour",
+    "LogicSkillData__getLinkedSkill",
+    "LogicCharacterClientOwn__clientPredictionPauseMovementForSkillCasting",
+    "LogicCharacterClientOwn__clientPredictionUpdateAttackDirection",
+    "LogicGameObjectManagerClient__LogicGameObjectManagerClient",
+    "LogicGameObjectManagerClient__getGameObjects",
+    "LogicGameObjectManagerClient__findGameObject",
+    "LogicGameObjectServer__getData",
+    "LogicProjectileServer__shootProjectile",
+    "LogicProjectileServer__runEarlyTicks",
+    "GlobalID__getInstanceID",
+    "LogicPlayerMap__save",
+    "LogicPlayerMapUtil__tileDataToTileCode",
+    "AnalyticEvent__AnalyticEvent",
+    "AnalyticEvent__setString",
+    "LogicBattleModeClient__LogicBattleModeClient",
+    "LogicBattleModeClient__setRandomSeed",
+    "LogicBattleModeClient__setPlayerAvatar",
+    "LogicBattleModeClient__getOwnPlayerIndex",
+    "LogicBattleModeClient__getTileMap",
+    "SetClientPrediction",
+    "ScrollArea__scrollTo",
+    "StringTable_getMovieClip",
+    "DisplayObject__setXY",
+    "DisplayObject__removeFromParent",
+    "MovieClip__getTextFieldByName",
+    "Sprite__addChild",
+    "Sprite__addChildAt",
+    "Sprite__removeChild",
+    "ScrollArea__updateBounds",
+    "ScrollArea__addContent",
+    "ScrollArea__removeAllContent",
+    "CSVRow__getIntegerValueAt",
+    "CSVRow__getName",
+    "CSVRow__getValueAt",
+    "CSVRow__getBooleanValueAt",
+    "CSVTable__getColumnIndexByName",
+    "LogicJSONObject__put",
+    "LogicRandom__setIteratedRandomSeed",
+    "LogicCompressedString__LogicCompressedString",
+    "LogicLongToCodeConverterUtil__LogicLongToCodeConverterUtil",
+    "LogicLongToCodeConverterUtil__convert",
+    "LogicLongToCodeConverterUtil__toCode",
+    "ResourceListener__addFile",
+    "String__format",
+    "FramerateManager__setSegment",
+    "FramerateManager__setLimit",
+    "Application__copyString",
+    "BattleScreen_fireWrapperFn",
+    "Stage_addChild",
+    "GameButton_setText",
+    "nativeCopyToClipboard",
+    "ResourceManager__getCSV",
+    "MovieClip__gotoAndStopFrameIndex",
+    "MovieClip_gotoAndStop",
+    "LogicCharacterClient__isImmuneOrUntargetable",
+    "operator_new",
+    "TeamChatMessage__ctor",
+    "TeamSetMemberReadyMessage__ctor",
+    "MessageManager__sendMessage",
+    "StartSpectateMessage__ctor",
+    "HashTagCodeGenerator__ctor",
+    "HashTagCodeGenerator__toId",
+    "Gui_getInstance",
+    "PiranhaMessage_ctor",
+    "LogicSkillData__getProjectileData",
+    "Name_setupDecorated",
+    "Name_applyDecoration",
+    "AllianceManager__startSpectate",
+    "ClientInputMessage_sendMovement",
+    "CombatHUD__update",
+    "CombatHUD__sendPinCommand",
+    "CombatHUD__sendSprayCommand",
+    "CustomButton_onButtonPressed",
+    "HashTagCodeGenerator__dtor",
+    "HashTagCodeGenerator__isValid",
+    "LogicGameModeUtil__isTileOnPoisonArea",
+    "LogicTileMap_getTile",
+    "LogicProjectileClient_ctor",
+    "LogicProjectileClient_destruct",
+    "LogicProjectileClient_getData",
+    "LogicProjectileClient_getTargetX",
+    "LogicProjectileClient_getTargetY",
+    "LogicProjectileData__getSpawnAreaEffect",
+    "AreaEffectData__getRadius",
+    "AreaEffectData__getActiveTimeMs",
+    "LogicData_getName",
+    "MapEditorScreen__updateCameraParameters",
+    "MovieClip__getChildClipByName",
+    "MovieClip__setChildVisible",
+    "Screen__getDpiClass",
+    "Screen__getHeight",
+    "Screen__getWidth",
+]
+
+# Классы, для которых через vtable-путь ищем ctors
+CTOR_CLASSES = [
     "LogicBattleModeClient", "BattleMode", "LogicGameObjectClient",
-    "BattleScreen", "Gui", "GUI", "LogicProjectileData", "LogicProjectileClient",
-    "LogicProjectileServer", "LogicCharacterData", "LogicCharacterClient",
-    "LogicCharacterClientOwn", "LogicSkillData", "LogicSkillClient",
-    "LogicTileData", "LogicTile", "LogicTileMap", "LogicDataTables",
-    "LogicGameObjectManagerClient", "LogicGameObjectServer",
-    "LogicGameModeUtil", "LogicData", "LogicRandom", "LogicJSONObject",
-    "LogicCompressedString", "LogicPlayerMap", "LogicPlayerMapUtil",
-    "LogicLongToCodeConverterUtil", "LogicAccessory",
-    "GameButton", "GameSelectableButton", "CustomButton", "RadioButton",
-    "GenericPopup", "PopupBase", "DropGUIContainer", "GameSliderComponent",
-    "MapEditorModifierItem", "MapEditorModifierPopup",
-    "Sprite", "Stage", "DisplayObject", "MovieClip", "MovieClipHelper",
-    "TextField", "DecoratedTextField", "Application", "Name",
-    "ClientInput", "ClientInputManager", "ClientInputMessage",
-    "Projectile", "GameMain", "DecalManager", "GameObjectManager",
-    "RenderSystem", "ResourceManager", "StringTable", "FramerateManager",
-    "MessageManager", "AllianceManager", "CombatHUD", "Character",
-    "GameScreen", "MapEditorScreen", "GameSettings", "GameStateManager",
-    "HomeMode", "HomePage", "HomeScreen", "Screen", "ScrollArea",
-    "GlobalID", "AnalyticEvent", "ResourceListener",
-    "AreaEffectData", "TeamChatMessage", "TeamSetMemberReadyMessage",
-    "StartSpectateMessage", "PiranhaMessage",
-    "HashTagCodeGenerator", "CSVRow", "CSVTable",
+    "LogicProjectileData", "LogicCharacterData",
+    "GameButton", "GameSelectableButton", "RadioButton",
+    "Stage", "MovieClip", "MovieClipHelper", "DecoratedTextField",
+    "Application", "Name", "Projectile", "ResourceManager",
+    "StringTable", "MessageManager", "AllianceManager", "CombatHUD",
+    "Character", "HomePage", "HomeScreen", "Screen",
+    "AnalyticEvent", "CSVTable", "LogicTileMap",
+    "LogicGameObjectManagerClient", "LogicProjectileClient",
+    "LogicCharacterClient", "LogicCharacterClientOwn",
+    "GameStateManager", "HomeMode", "Gui", "GUI",
+    "StringTable", "GameObjectManager", "RenderSystem",
+    "GameMain", "DecalManager",
 ]
 
 _log_fh = None
@@ -219,7 +403,6 @@ def scan_text(text, ts):
 
 def build_ptr_index(data_blobs, text_start, text_end):
     idx = {}
-    total = 0
     for va, b in data_blobs:
         n = len(b) // 8
         for i in range(n):
@@ -229,8 +412,7 @@ def build_ptr_index(data_blobs, text_start, text_end):
                 continue
             if text_start <= target < text_end:
                 idx.setdefault(target, []).append(va + i * 8)
-                total += 1
-    return idx, total
+    return idx
 
 
 def build_slot_to_target(ptr_idx):
@@ -270,16 +452,13 @@ def analyze_at(text, ts, func_start, max_instr=300):
         return None
     n_bl = 0
     n_ret = 0
-    n_str_x0 = 0
     for i in range(off, min(off + max_instr, n)):
         w = struct.unpack_from("<I", text, i * 4)[0]
         if is_bl(w):
             n_bl += 1
         elif w == 0xD65F03C0:
             n_ret += 1
-        elif (w & 0xFFC00000) == 0xF9000000 and (w & 0x1F) == 0:
-            n_str_x0 += 1
-    return {"n_bl": n_bl, "n_ret": n_ret, "n_str_x0": n_str_x0}
+    return {"n_bl": n_bl, "n_ret": n_ret}
 
 
 def find_func_start(prologs_sorted, ia):
@@ -290,6 +469,34 @@ def find_func_start(prologs_sorted, ia):
     return ia & ~0xF
 
 
+# --- parse target list ---
+
+def parse_target(t):
+    # "LogicBattleModeClient__update" -> ("LogicBattleModeClient", "update", "method")
+    # "LogicBattleModeClient_update"  -> same
+    # "StringCtor"                    -> ("String", "ctor", "ctor")
+    # "GameButtonCtor"                -> ("GameButton", "ctor", "ctor")
+    # "operator_new"                  -> ("", "operator_new", "operator")
+    # "SetClientPrediction"           -> ("", "SetClientPrediction", "unknown")
+    if t == "operator_new":
+        return ("", "operator_new", "operator")
+    m = re.match(r"^([A-Za-z][A-Za-z0-9]+?)Ctor$", t)
+    if m:
+        return (m.group(1), "ctor", "ctor")
+    if "__" in t:
+        parts = t.split("__", 1)
+        cls, method = parts[0], parts[1]
+        kind = "ctor" if method == cls else "method"
+        return (cls, method, kind)
+    if "_" in t:
+        # first underscore where left part is a KnownClass-like name
+        parts = t.split("_", 1)
+        cls, method = parts[0], parts[1]
+        kind = "ctor" if method == "ctor" else "method"
+        return (cls, method, kind)
+    return ("", t, "unknown")
+
+
 def main():
     global _log_fh
     try:
@@ -297,7 +504,7 @@ def main():
     except Exception:
         _log_fh = None
 
-    log("=== find_offsets_r2 v13 (final) ===")
+    log("=== find_offsets_r2 v15 (targets) ===")
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
@@ -312,10 +519,21 @@ def main():
     if not str_index:
         return
 
-    target_set_strings = set()
-    for al in str_index.values():
-        for a in al:
-            target_set_strings.add(a)
+    # for fast string lookup: build lookup: substring "Class::method" -> addr
+    # 49300 keys, using direct dict
+    pattern_addr = {}
+    for s, al in str_index.items():
+        if "::" in s:
+            # Ключ: "Class::method" без хвоста
+            idx = s.find("::")
+            if idx > 0:
+                # отрезаем пробелы/префиксы после ::, до не-идентификатора
+                rest = s[idx+2:]
+                m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", rest)
+                if m:
+                    key = s[:idx+2] + m.group(1)
+                    pattern_addr.setdefault(key, []).append(al[0])
+    log("[*] string patterns 'Class::method': %d" % len(pattern_addr))
 
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
@@ -335,11 +553,11 @@ def main():
         b = load_range(r2, va, sz)
         if b:
             data_blobs.append((va, b))
-    log("[*] data loaded %d bytes" % sum(len(b) for _, b in data_blobs))
+    log("[*] data %d bytes" % sum(len(b) for _, b in data_blobs))
 
-    ptr_idx, total_slots = build_ptr_index(data_blobs, ts, te)
-    log("[*] chained ptr idx: %d targets, %d slots" % (len(ptr_idx), total_slots))
+    ptr_idx = build_ptr_index(data_blobs, ts, te)
     slot_to_target = build_slot_to_target(ptr_idx)
+    log("[*] chained ptr idx: %d targets, %d slots" % (len(ptr_idx), sum(len(v) for v in ptr_idx.values())))
 
     t0 = time.time()
     adrp_add, bl_map, prologs = scan_text(text, ts)
@@ -347,180 +565,152 @@ def main():
     log("[*] adrp_add=%d bl=%d prologs=%d %.1fs"
         % (len(adrp_add), len(bl_map), len(prologs), time.time() - t0))
 
-    # __init_offsets — читаем как u32 offset от base
-    init_raw = b""
-    for s in sections:
-        n = s.get("name", "") or ""
-        if "__init_offsets" in n or "__mod_init_func" in n:
-            va = s.get("vaddr", 0)
-            sz = s.get("size", 0)
-            if sz > 0:
-                raw = cmd(r2, "p8 %d @ 0x%x" % (sz, va)).strip()
-                try:
-                    init_raw = bytes.fromhex(raw)
-                except Exception:
-                    pass
-                break
-
-    init_funcs = []
-    for i in range(len(init_raw) // 4):
-        v32 = struct.unpack_from("<I", init_raw, i * 4)[0]
-        va = base + v32
-        if ts <= va < te:
-            init_funcs.append(va)
-    init_set = set(init_funcs)
-    log("[*] __init_offsets: %d valid funcs" % len(init_set))
-
-    # карта: строка -> якорь-функции (функции, ссылающиеся на строку)
-    str_to_anchor_funcs = {}
+    # инверт: string_addr -> [pc_ref] (только строки, к которым мы уже искали)
+    str_to_pc = {}
+    target_set_strings = set()
+    for al in str_index.values():
+        for a in al:
+            target_set_strings.add(a)
     for pc, tgt in adrp_add:
         if tgt in target_set_strings:
-            f = find_func_start(prologs_sorted, pc)
-            str_to_anchor_funcs.setdefault(tgt, set()).add(f)
-
-    # карта: anchor_func -> vtable_start
-    anchor_to_vtable = {}
-    for tgt, slots in ptr_idx.items():
-        for slot in slots[:3]:
-            vt = expand_vtable(slot_to_target, slot)
-            if vt:
-                anchor_to_vtable[tgt] = vt[0]
-                break
-
-    all_vt_starts = set(anchor_to_vtable.values())
-    log("[*] anchors with vtable: %d, unique vtables: %d"
-        % (len(anchor_to_vtable), len(all_vt_starts)))
-
-    # карта: vtable_start -> ctor-функции (xref через adrp+add)
-    vt_to_ctors = {}
-    for pc, tgt in adrp_add:
-        if tgt in all_vt_starts:
-            f = find_func_start(prologs_sorted, pc)
-            vt_to_ctors.setdefault(tgt, set()).add(f)
-    log("[*] vtables with ctor xref: %d" % len(vt_to_ctors))
-
-    # карта: init_func -> string_xrefs (функции из init_offsets, которые ссылаются на строки)
-    init_str_xrefs = {}
-    for pc, tgt in adrp_add:
-        if tgt in target_set_strings:
-            f = find_func_start(prologs_sorted, pc)
-            if f in init_set:
-                init_str_xrefs.setdefault(f, set()).add(tgt)
-    log("[*] init funcs with string xrefs: %d" % len(init_str_xrefs))
+            str_to_pc.setdefault(tgt, []).append(pc)
 
     r2.quit()
 
-    results = []
-    for cls in CLASSES:
+    results = {}
+    unresolved = []
+
+    # 1) resolve methods via string "Class::method"
+    for t in TARGETS:
+        cls, method, kind = parse_target(t)
+        if not method:
+            unresolved.append((t, "no_method"))
+            continue
+        if kind == "unknown":
+            # попробуем как есть в строках
+            found = None
+            for key in (t,):
+                if key in str_index:
+                    found = str_index[key]
+                    break
+            if found:
+                pcs = str_to_pc.get(found[0], [])
+                if pcs:
+                    f = find_func_start(prologs_sorted, pcs[0])
+                    results[t] = f - base
+                    log("[%s] resolved via exact string -> 0x%x" % (t, f))
+                    continue
+            unresolved.append((t, "unknown"))
+            continue
+
+        # строим ключ "Class::method"
+        patterns = []
+        if cls:
+            patterns.append(cls + "::" + method)
+            patterns.append(cls + "::" + method + ":")
+        patterns.append(method)
+
+        addr = None
+        chosen_key = None
+        for pat in patterns:
+            if pat in str_index:
+                addr = str_index[pat][0]
+                chosen_key = pat
+                break
+        if addr is None:
+            # ищем префиксно
+            for key, al in str_index.items():
+                if key.startswith((cls + "::" + method) if cls else method):
+                    addr = al[0]
+                    chosen_key = key
+                    break
+
+        if addr is None:
+            unresolved.append((t, "no_string"))
+            continue
+
+        pcs = str_to_pc.get(addr, [])
+        if not pcs:
+            unresolved.append((t, "no_xref"))
+            continue
+
+        f = find_func_start(prologs_sorted, pcs[0])
+        results[t] = f - base
+        log("[%s] str=%r -> func 0x%x" % (t, chosen_key[:50], f))
+
+    # 2) ctors через vtable
+    # для каждого класса ищем vtable и ctor
+    ctor_out = {}
+    for cls in CTOR_CLASSES:
         addrs = []
         for s, al in str_index.items():
             if s == cls or s.startswith(cls + "::") or ("::" + cls) in s \
                or s.startswith(cls + " ") or s.startswith(cls + "\t"):
                 addrs.extend(al)
         if not addrs:
-            results.append({"class": cls, "ctor": None, "src": "no_string"})
             continue
-
         anchor_funcs = set()
         for sa in addrs:
-            for af in str_to_anchor_funcs.get(sa, []):
-                anchor_funcs.add(af)
-
-        ctor_candidates = []
-
-        # путь 1: anchor -> vtable -> ctor
+            for pc in str_to_pc.get(sa, []):
+                anchor_funcs.add(find_func_start(prologs_sorted, pc))
+        vt_starts = set()
         for af in anchor_funcs:
-            vt = anchor_to_vtable.get(af)
-            if not vt:
-                continue
-            for ctor in vt_to_ctors.get(vt, []):
-                info = analyze_at(text, ts, ctor)
-                if not info:
-                    continue
-                score = info["n_bl"] * 3
-                if info["n_str_x0"] > 0:
-                    score += 20
-                if ctor in init_set:
-                    score += 200
-                if info["n_bl"] == 0:
-                    score -= 50
-                ctor_candidates.append({
-                    "func": ctor, "score": score, "vtable": vt,
-                    "via": "vtable", "n_bl": info["n_bl"],
-                })
-
-        # путь 2: init_func ссылается на строку класса напрямую
-        if not ctor_candidates:
-            for sa in addrs:
-                for initf, strs in init_str_xrefs.items():
-                    if sa in strs:
-                        info = analyze_at(text, ts, initf)
-                        if not info or info["n_bl"] == 0:
-                            continue
-                        score = 100 + info["n_bl"] * 3
-                        if info["n_str_x0"] > 0:
-                            score += 20
-                        ctor_candidates.append({
-                            "func": initf, "score": score, "vtable": None,
-                            "via": "init_string", "n_bl": info["n_bl"],
-                        })
-
-        # путь 3: anchor сам есть init_func
-        if not ctor_candidates:
-            for af in anchor_funcs:
-                if af in init_set:
-                    info = analyze_at(text, ts, af)
-                    if info and info["n_bl"] > 0:
-                        ctor_candidates.append({
-                            "func": af, "score": 80 + info["n_bl"] * 2,
-                            "vtable": None, "via": "init_anchor",
-                            "n_bl": info["n_bl"],
-                        })
-
-        if not ctor_candidates:
-            results.append({"class": cls, "ctor": None, "src": "unresolved"})
-            log("[%s] unresolved" % cls)
+            slots = ptr_idx.get(af, [])
+            for slot in slots[:3]:
+                vt = expand_vtable(slot_to_target, slot)
+                if vt:
+                    vt_starts.add(vt[0])
+                    break
+        if not vt_starts:
             continue
+        # ищем xref на vt через adrp+add
+        for pc, tgt in adrp_add:
+            if tgt in vt_starts:
+                f = find_func_start(prologs_sorted, pc)
+                info = analyze_at(text, ts, f)
+                if info and info["n_bl"] > 0:
+                    ctor_out[cls] = (f, tgt, info["n_bl"])
+                    break
+    log("[*] ctors resolved via vtable: %d" % len(ctor_out))
 
-        ctor_candidates.sort(key=lambda x: -x["score"])
-        best = ctor_candidates[0]
-        results.append({
-            "class": cls, "ctor": best["func"] - base, "score": best["score"],
-            "vtable": (best["vtable"] - base) if best["vtable"] else None,
-            "src": best["via"],
-        })
-        log("[%s] ctor=0x%x via=%s score=%d n_bl=%d"
-            % (cls, best["func"], best["via"], best["score"], best["n_bl"]))
+    # 3) записать
+    try:
+        with open(OUT, "w") as fh:
+            fh.write("// Auto-generated offsets (v15)\n")
+            fh.write("// Resolved: %d / %d targets, ctors: %d\n\n"
+                     % (len(results), len(TARGETS), len(ctor_out)))
+            fh.write("export const offsets = Object.freeze({\n")
+            for t in TARGETS:
+                if t in results:
+                    fh.write("    %s: 0x%x,\n" % (t, results[t]))
+                else:
+                    fh.write("    // %s: unresolved\n" % t)
+            fh.write("\n    // ctors via vtable\n")
+            for cls, (f, vt, nbl) in ctor_out.items():
+                fh.write("    %s__ctor: 0x%x,\n" % (cls, f - base))
+            fh.write("});\n")
+    except Exception as e:
+        log("out error: %s" % e)
 
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# r2 ctor resolution (v13)\n")
-            fh.write("# base=0x%x\n\n" % base)
-            for r in results:
-                fh.write("=== %s ===\n" % r["class"])
-                if r.get("ctor") is not None:
-                    fh.write("  ctor:   rva=0x%08x\n" % r["ctor"])
-                if r.get("vtable") is not None:
-                    fh.write("  vtable: rva=0x%08x\n" % r["vtable"])
-                fh.write("  src=%s score=%d\n"
-                         % (r.get("src", ""), r.get("score", 0)))
-                fh.write("\n")
-    except Exception as e:
-        log("report: %s" % e)
-
-    try:
-        with open(OUT, "w") as fh:
-            fh.write("export const ctors = Object.freeze({\n")
-            for r in results:
-                if r.get("ctor") is not None:
-                    fh.write("  %s: 0x%x,\n" % (r["class"], r["ctor"]))
+            fh.write("# v15 target resolution\n")
+            fh.write("# base=0x%x\n" % base)
+            fh.write("# resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
+            for t in TARGETS:
+                if t in results:
+                    fh.write("%-55s 0x%08x\n" % (t, results[t]))
                 else:
-                    fh.write("  // %s: unresolved\n" % r["class"])
-            fh.write("});\n")
+                    fh.write("%-55s UNRESOLVED\n" % t)
+            fh.write("\n# ctors via vtable\n")
+            for cls, (f, vt, nbl) in ctor_out.items():
+                fh.write("%-40s ctor=0x%08x vt=0x%08x n_bl=%d\n"
+                         % (cls, f - base, vt - base, nbl))
     except Exception as e:
-        log("out: %s" % e)
+        log("report error: %s" % e)
 
-    log("[+] wrote %s and %s" % (OUT, REPORT))
+    log("[+] resolved %d/%d via strings, %d ctors via vtable"
+        % (len(results), len(TARGETS), len(ctor_out)))
     log("[+] total %.1fs" % (time.time() - START))
 
 
