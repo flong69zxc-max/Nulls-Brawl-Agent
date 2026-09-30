@@ -89,7 +89,7 @@ jobs:
             BIN=""
             for f in "$APP_DIR"/*; do
               [ -f "$f" ] || continue
-              if file "$f" | grep -qE "Mach-O 64-bit .* executable"; then
+              if file "$f" | grep -qE "Mach-O.*executable"; then
                 BIN="$f"
                 break
               fi
@@ -100,7 +100,7 @@ jobs:
 
           FILE_OUT=$(file "$BIN")
           echo "$FILE_OUT"
-          if ! echo "$FILE_OUT" | grep -qE "Mach-O 64-bit .* executable"; then
+          if ! echo "$FILE_OUT" | grep -qE "Mach-O.*executable"; then
             echo "wrong file type: $FILE_OUT"
             exit 1
           fi
