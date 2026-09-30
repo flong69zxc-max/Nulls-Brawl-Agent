@@ -72,8 +72,8 @@ jobs:
           set -euo pipefail
           rm -rf extract
           mkdir -p extract
-          unINzip -oq ipa_cache/bs.="$ipa -d extract
-         APP APP_DIR=$(find_DIR extract/Payload -maxdepth/$ 1 -type d -name "*.EXapp" | head -n1)
+          unzip -oq ipa_cache/bs.ipa -d extract
+          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           test -n "$APP_DIR"
           echo "APP_DIR=$APP_DIR"
 
@@ -83,7 +83,7 @@ jobs:
           EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
           echo "CFBundleExecutable=$EXEC_NAME"
 
-          BEC_NAME"
+          BIN="$APP_DIR/$EXEC_NAME"
           if [ ! -f "$BIN" ]; then
             echo "not found at $BIN, scanning .app root"
             BIN=""
@@ -105,13 +105,13 @@ jobs:
             exit 1
           fi
 
-          cp "$BIN" "$RUNNER_TEMP/Nulls Brawl"
-          file "$RUNNER_TEMP/Nulls Brawl"
+          cp "$BIN" "/tmp/Nulls Brawl"
+          file "/tmp/Nulls Brawl"
 
       - uses: actions/upload-artifact@v4
         with:
           name: nulls-brawl-bin
-          path: ${{ runner.temp }}/Nulls Brawl
+          path: "/tmp/Nulls Brawl"
           retention-days: 30
 
   analyze:
