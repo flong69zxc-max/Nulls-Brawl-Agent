@@ -85,11 +85,11 @@ jobs:
 
           BIN="$APP_DIR/$EXEC_NAME"
           if [ ! -f "$BIN" ]; then
-            echo "not found at $BIN, scanning .app root for Mach-O executable"
+            echo "not found at $BIN, scanning .app root"
             BIN=""
             for f in "$APP_DIR"/*; do
               [ -f "$f" ] || continue
-              if file "$f" | grep -q "Mach-O 64-bit executable"; then
+              if file "$f" | grep -qE "Mach-O 64-bit .* executable"; then
                 BIN="$f"
                 break
               fi
@@ -100,10 +100,10 @@ jobs:
 
           FILE_OUT=$(file "$BIN")
           echo "$FILE_OUT"
-          case "$FILE_OUT" in
-            *"Mach-O 64-bit executable"*) ;;
-            *) echo "wrong file type: $FILE_OUT"; exit 1 ;;
-          esac
+          if ! echo "$FILE_OUT" | grep -qE "Mach-O 64-bit .* executable"; then
+            echo "wrong file type: $FILE_OUT"
+            exit 1
+          fi
 
           cp "$BIN" /tmp/brawl_bin
           file /tmp/brawl_bin
