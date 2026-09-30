@@ -1,5 +1,7 @@
 'use strict';
 
+import ObjC from 'frida-objc-bridge';
+
 const FILE_BASE = 0x100000000;
 const TEXT_LO   = 0x100004000;
 const TEXT_HI   = 0x100D8AF60;
@@ -22,15 +24,15 @@ const KNOWN = {
 };
 
 const VTABLES = {
-    'GameButton':         0x00f9b0f8,
-    'HomePage':           0x00fe4008,
-    'Character':          0x00ff45c0,
-    'LogicDataTables':    0x00ff2478,
-    'LogicProjectileData':0x00ff3aa0,
-    'MessageManager':     0x00fd57e8,
-    'MovieClip':          0x01006150,
-    'NativeFont':         0x01005858,
-    'Stage':              0x010091b0,
+    'GameButton':          0x00f9b0f8,
+    'HomePage':            0x00fe4008,
+    'Character':           0x00ff45c0,
+    'LogicDataTables':     0x00ff2478,
+    'LogicProjectileData': 0x00ff3aa0,
+    'MessageManager':      0x00fd57e8,
+    'MovieClip':           0x01006150,
+    'NativeFont':          0x01005858,
+    'Stage':               0x010091b0,
 };
 
 const LOG_LIMIT        = 10;
@@ -49,9 +51,9 @@ let gLastFlush  = 0;
 function OXTs() {
     const d = new Date();
     const pad = (n, w) => String(n).padStart(w, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2) + ' ' +
-           pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) +
-           '.' + pad(d.getMilliseconds(), 3);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2) +
+        ' ' + pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' +
+        pad(d.getSeconds(), 2) + '.' + pad(d.getMilliseconds(), 3);
 }
 
 function resolveDocumentsPath() {
@@ -128,7 +130,8 @@ function fileOffset(runtimePtr) {
 
 function moduleByBasename(basename) {
     const mods = Process.enumerateModules();
-    for (const m of mods) {
+    for (let i = 0; i < mods.length; i++) {
+        const m = mods[i];
         const name = m.name;
         if (name === basename || name.endsWith('/' + basename)) return m;
     }
@@ -137,14 +140,15 @@ function moduleByBasename(basename) {
 
 function findMainBinary() {
     const candidates = ['Nulls Brawl', 'NullsBrawl', 'brawl', 'Brawl'];
-    for (const c of candidates) {
-        const m = moduleByBasename(c);
+    for (let i = 0; i < candidates.length; i++) {
+        const m = moduleByBasename(candidates[i]);
         if (m) return m;
     }
 
     const mods = Process.enumerateModules();
     let best = null;
-    for (const m of mods) {
+    for (let i = 0; i < mods.length; i++) {
+        const m = mods[i];
         const p = m.path || '';
         if (p.indexOf('.app/') !== -1 &&
             p.indexOf('.framework') === -1 &&
@@ -156,22 +160,20 @@ function findMainBinary() {
     return best;
 }
 
-function installHook(name, fileOffsetVal, onEnterFn) {
+function installHook(name, fileOff, onEnterFn) {
     if (!gBase) return false;
-    const target = gBase.add(fileOffsetVal);
+    const target = gBase.add(fileOff);
     try {
         Interceptor.attach(target, {
             onEnter: function (args) {
                 if (onEnterFn) onEnterFn(args, this);
             }
         });
-        gHooks[name] = { target: target, offset: fileOffsetVal };
-        LOG('HOOK OK  ' + name + '  file=0x' + fileOffsetVal.toString(16) +
-            '  rt=' + target);
+        gHooks[name] = { target: target, offset: fileOff };
+        LOG('HOOK OK  ' + name + '  file=0x' + fileOff.toString(16) + '  rt=' + target);
         return true;
     } catch (e) {
-        LOG('HOOK FAIL ' + name + '  file=0x' + fileOffsetVal.toString(16) +
-            '  err=' + e);
+        LOG('HOOK FAIL ' + name + '  file=0x' + fileOff.toString(16) + '  err=' + e);
         return false;
     }
 }
@@ -190,8 +192,7 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK GameButton::ctor #' + gCallCounts['GameButton::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
     installHook('HomePage::ctor', KNOWN['HomePage::ctor'], (args) => {
@@ -199,8 +200,7 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK HomePage::ctor #' + gCallCounts['HomePage::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
     installHook('Character::ctor', KNOWN['Character::ctor'], (args) => {
@@ -208,38 +208,30 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK Character::ctor #' + gCallCounts['Character::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
-    installHook('MessageManager::receiveMessage',
-        KNOWN['MessageManager::receiveMessage'], (args) => {
-            if (!shouldLog('MessageManager::receiveMessage')) return;
-            LOG('BRK MessageManager::receiveMessage #' +
-                gCallCounts['MessageManager::receiveMessage'] +
-                ' self=' + args[0] + ' msg=' + args[1]);
-        });
+    installHook('MessageManager::receiveMessage', KNOWN['MessageManager::receiveMessage'], (args) => {
+        if (!shouldLog('MessageManager::receiveMessage')) return;
+        LOG('BRK MessageManager::receiveMessage #' + gCallCounts['MessageManager::receiveMessage'] +
+            ' self=' + args[0] + ' msg=' + args[1]);
+    });
 
-    installHook('NativeFont::formatString',
-        KNOWN['NativeFont::formatString'], (args) => {
-            if (!shouldLog('NativeFont::formatString')) return;
-            LOG('BRK NativeFont::formatString #' +
-                gCallCounts['NativeFont::formatString'] +
-                ' self=' + args[0] + ' str=' + args[1]);
-        });
+    installHook('NativeFont::formatString', KNOWN['NativeFont::formatString'], (args) => {
+        if (!shouldLog('NativeFont::formatString')) return;
+        LOG('BRK NativeFont::formatString #' + gCallCounts['NativeFont::formatString'] +
+            ' self=' + args[0] + ' str=' + args[1]);
+    });
 
-    installHook('LogicDataTables::initDataTable',
-        KNOWN['LogicDataTables::initDataTable'], (args) => {
-            if (!shouldLog('LogicDataTables::initDataTable')) return;
-            LOG('BRK LogicDataTables::initDataTable #' +
-                gCallCounts['LogicDataTables::initDataTable'] +
-                ' self=' + args[0] + ' a=' + args[1]);
-        });
+    installHook('LogicDataTables::initDataTable', KNOWN['LogicDataTables::initDataTable'], (args) => {
+        if (!shouldLog('LogicDataTables::initDataTable')) return;
+        LOG('BRK LogicDataTables::initDataTable #' + gCallCounts['LogicDataTables::initDataTable'] +
+            ' self=' + args[0] + ' a=' + args[1]);
+    });
 
     installHook('Stage::setViewport', KNOWN['Stage::setViewport'], (args) => {
         if (!shouldLog('Stage::setViewport')) return;
-        LOG('BRK Stage::setViewport #' + gCallCounts['Stage::setViewport'] +
-            ' self=' + args[0]);
+        LOG('BRK Stage::setViewport #' + gCallCounts['Stage::setViewport'] + ' self=' + args[0]);
     });
 
     installHook('MessageManager::ctor', KNOWN['MessageManager::ctor'], (args) => {
@@ -247,8 +239,7 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK MessageManager::ctor #' + gCallCounts['MessageManager::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
     installHook('MovieClip::ctor', KNOWN['MovieClip::ctor'], (args) => {
@@ -256,8 +247,7 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK MovieClip::ctor #' + gCallCounts['MovieClip::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
     installHook('NativeFont::ctor', KNOWN['NativeFont::ctor'], (args) => {
@@ -265,8 +255,7 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK NativeFont::ctor #' + gCallCounts['NativeFont::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 
     installHook('Stage::ctor', KNOWN['Stage::ctor'], (args) => {
@@ -274,20 +263,17 @@ function installAllKnownHooks() {
         const self = args[0];
         const vt = readPtr(self);
         LOG('BRK Stage::ctor #' + gCallCounts['Stage::ctor'] +
-            ' self=' + self + ' vt=' + vt +
-            ' file=0x' + fileOffset(vt).toString(16));
+            ' self=' + self + ' vt=' + vt + ' file=0x' + fileOffset(vt).toString(16));
     });
 }
 
 function dumpVtable(clsName, vtFileOffset) {
     const vt = gBase.add(vtFileOffset);
-    LOG('=== VT ' + clsName + ' file=0x' + vtFileOffset.toString(16) +
-        ' rt=' + vt + ' ===');
+    LOG('=== VT ' + clsName + ' file=0x' + vtFileOffset.toString(16) + ' rt=' + vt + ' ===');
 
     for (let i = 0; i < MAX_SLOT_DUMPS; i++) {
-        const slot = vt.add(i * 8);
         let raw;
-        try { raw = slot.readPointer(); } catch (e) { break; }
+        try { raw = vt.add(i * 8).readPointer(); } catch (e) { break; }
         if (!raw || raw.isNull()) break;
 
         const fnFile = fileOffset(raw);
@@ -300,16 +286,15 @@ function dumpVtable(clsName, vtFileOffset) {
 
 function dumpAllVtables() {
     LOG('=== DUMPING ALL KNOWN VTABLES ===');
-    for (const cls of Object.keys(VTABLES)) {
-        dumpVtable(cls, VTABLES[cls]);
+    const keys = Object.keys(VTABLES);
+    for (let i = 0; i < keys.length; i++) {
+        dumpVtable(keys[i], VTABLES[keys[i]]);
     }
 }
 
 function scanDataForVtableRuns() {
     LOG('=== SCANNING DATA FOR VTABLE RUNS ===');
-    const totalSlots = (DATA_HI - DATA_LO) / 8;
     const CHUNK = 0x10000;
-
     let runLen = 0;
     let runStart = 0;
     let prevSlot = 0;
@@ -320,19 +305,13 @@ function scanDataForVtableRuns() {
             const chunkSize = Math.min(CHUNK, DATA_HI - DATA_LO - off);
             const fileAddr = DATA_LO + off;
             const rtAddr = gBase.add(fileAddr);
-
             const n = Math.floor(chunkSize / 8);
+
             for (let i = 0; i < n; i++) {
                 const slotFile = fileAddr + i * 8;
-                let raw;
-                try { raw = rtAddr.add(i * 8).readPointer(); } catch (e) {
-                    if (runLen >= 4) {
-                        totalRuns++;
-                        LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
-                    }
-                    runLen = 0;
-                    continue;
-                }
+                let raw = null;
+                try { raw = rtAddr.add(i * 8).readPointer(); } catch (e) {}
+
                 if (!raw || raw.isNull()) {
                     if (runLen >= 4) {
                         totalRuns++;
@@ -395,8 +374,7 @@ function scanAdrpAddMap() {
             const pcFile = fileAddr + i * 4;
             const w = dv.getUint32(i * 4, true);
 
-            const isAdrp = (w & 0x9F000000) === 0x90000000;
-            if (isAdrp) {
+            if ((w & 0x9F000000) === 0x90000000) {
                 prevPc = pcFile;
                 prevRd = w & 0x1F;
                 const immlo = (w >>> 29) & 3;
@@ -425,25 +403,25 @@ function scanAdrpAddMap() {
         }
     }
 
-    const keys = Object.keys(map).length;
-    LOG('adrp+add map entries: ' + keys);
+    LOG('adrp+add map entries: ' + Object.keys(map).length);
     return map;
 }
 
 function findCtorsViaAdrpMap(adrpMap) {
     LOG('=== FINDING CTORS VIA adrp+add ===');
-    for (const cls of Object.keys(VTABLES)) {
+    const keys = Object.keys(VTABLES);
+    for (let i = 0; i < keys.length; i++) {
+        const cls = keys[i];
         const vtFile = VTABLES[cls];
         const refs = adrpMap[vtFile];
         if (!refs || refs.length === 0) {
             LOG('  ' + cls + ': no xrefs to vtable');
             continue;
         }
-        LOG('  ' + cls + ': ' + refs.length + ' xref(s) to vtable 0x' +
-            vtFile.toString(16));
-        for (const pc of refs) {
-            LOG('    ctor candidate @ file=0x' + pc.toString(16) +
-                '  rt=' + gBase.add(pc));
+        LOG('  ' + cls + ': ' + refs.length + ' xref(s) to vtable 0x' + vtFile.toString(16));
+        for (let j = 0; j < refs.length; j++) {
+            LOG('    ctor candidate @ file=0x' + refs[j].toString(16) +
+                '  rt=' + gBase.add(refs[j]));
         }
     }
 }
@@ -493,6 +471,13 @@ function main() {
     OXFlush();
 
     setInterval(OXFlush, 3000);
+}
+
+if (typeof rpc !== 'undefined' && rpc) {
+    rpc.exports = {
+        start: function () { main(); },
+        dump: function () { dumpAllVtables(); OXFlush(); },
+    };
 }
 
 setTimeout(main, 2000);
