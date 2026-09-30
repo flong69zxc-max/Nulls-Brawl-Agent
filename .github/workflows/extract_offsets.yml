@@ -22,7 +22,7 @@ env:
 
 jobs:
   prepare:
-    runs-on: ubuntu-24.04-arm
+    runs-on: macos-14
     timeout-minutes: 30
     outputs:
       ver: ${{ steps.resolve.outputs.VER }}
@@ -34,8 +34,8 @@ jobs:
       - name: Install helper tools
         run: |
           set -e
-          command -v file >/dev/null 2>&1 || sudo apt-get install -y file
-          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
+          command -v file >/dev/null 2>&1 || brew install file
+          command -v unzip >/dev/null 2>&1 || brew install unzip
 
       - name: Resolve ipa URL
         id: resolve
@@ -107,6 +107,28 @@ jobs:
 
           cp "$BIN" /tmp/brawl_bin
           file /tmp/brawl_bin
+
+      - name: Build dylibify
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/dylibify
+          git clone --depth 1 https://github.com/LiveContainer/dylibify.git /tmp/dylibify
+          cd /tmp/dylibify
+          clang main.m -framework Foundation -fobjc-arc -o /tmp/dylibify/dylibify
+          /tmp/dylibify/dylibify 2>&1 || true
+
+      - name: Convert to dylib and replace
+        run: |
+          set -euo pipefail
+          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          test -n "$APP_DIR"
+          PLIST="$APP_DIR/Info.plist"
+          EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
+          BIN="$APP_DIR/$EXEC_NAME"
+
+          /tmp/dylibify/dylibify "$BIN" "${BIN}.dylib"
+          mv "${BIN}.dylib" "$BIN"
+          file "$BIN"
 
       - uses: actions/upload-artifact@v4
         with:
