@@ -38,15 +38,16 @@ const VTABLES = {
 const LOG_LIMIT        = 10;
 const MAX_SLOT_DUMPS   = 128;
 const RUNTIME_HOOK_ALL = true;
+const LOG_FILE_NAME    = 'FRIDA_TRACE.txt';
 
 let gBase       = null;
 let gSlide      = null;
-let gLog        = null;
 let gLogPath    = null;
-let gHooks      = {};
-let gCallCounts = {};
+let gLogBuf     = [];
 let gStarted    = false;
 let gLastFlush  = 0;
+let gCallCounts = {};
+let gHooks      = {};
 
 function OXTs() {
     const d = new Date();
@@ -56,67 +57,113 @@ function OXTs() {
         pad(d.getSeconds(), 2) + '.' + pad(d.getMilliseconds(), 3);
 }
 
+function objcReady() {
+    try {
+        return typeof ObjC !== 'undefined' && ObjC && ObjC.classes && ObjC.classes.NSFileManager;
+    } catch (e) {
+        return false;
+    }
+}
+
+function nsString(str) {
+    return ObjC.classes.NSString.stringWithString_(str);
+}
+
 function resolveDocumentsPath() {
     try {
-        const NSSearchPathForDirectoriesInDomains =
-            new NativeFunction(
-                Module.findExportByName(null, 'NSSearchPathForDirectoriesInDomains'),
-                'pointer', ['uint', 'uint', 'bool']
-            );
-        const arr = new ObjC.Object(NSSearchPathForDirectoriesInDomains(9, 1, 1));
+        const fn = new NativeFunction(
+            Module.findExportByName(null, 'NSSearchPathForDirectoriesInDomains'),
+            'pointer', ['uint', 'uint', 'bool']
+        );
+        const arr = new ObjC.Object(fn(9, 1, 1));
         if (arr.count() > 0) {
             return arr.objectAtIndex_(0).toString();
         }
     } catch (e) {}
 
     try {
-        const NSBundle = ObjC.classes.NSBundle.mainBundle();
-        const path = NSBundle.bundlePath().toString();
-        if (path) return path + '/Documents';
+        const bundlePath = ObjC.classes.NSBundle.mainBundle().bundlePath().toString();
+        if (bundlePath) return bundlePath + '/Documents';
     } catch (e) {}
 
     try {
-        const NSHomeDirectory = new NativeFunction(
+        const fn = new NativeFunction(
             Module.findExportByName(null, 'NSHomeDirectory'),
             'pointer', []
         );
-        const home = new ObjC.Object(NSHomeDirectory()).toString();
-        return home + '/Documents';
+        const home = new ObjC.Object(fn()).toString();
+        if (home) return home + '/Documents';
     } catch (e) {}
 
-    return '/tmp';
+    return null;
 }
 
 function openLog() {
-    gLogPath = resolveDocumentsPath() + '/FRIDA_TRACE.txt';
+    if (!objcReady()) return false;
+    const docs = resolveDocumentsPath();
+    if (!docs) return false;
+
+    gLogPath = docs + '/' + LOG_FILE_NAME;
+
     try {
-        gLog = new File(gLogPath, 'w');
-        gLog.write('=== FRIDA TRACE START ' + OXTs() + ' ===\n');
-        gLog.flush();
+        const fileManager = ObjC.classes.NSFileManager.defaultManager();
+        const dirPath = nsString(docs);
+        if (!fileManager.fileExistsAtPath_(dirPath)) {
+            fileManager.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(
+                dirPath, true, null, null
+            );
+        }
+        nsString('').writeToFile_atomically_encoding_error_(
+            nsString(gLogPath), true, 4 /* NSUTF8StringEncoding */, null
+        );
+        return true;
     } catch (e) {
-        gLog = null;
-        console.log('[!] cannot open log at ' + gLogPath + ': ' + e);
+        console.log('[!] cannot init log: ' + e);
+        return false;
     }
 }
 
 function LOG(line) {
     const msg = '[' + OXTs() + '] ' + line;
     console.log(msg);
-    if (gLog) {
-        try {
-            gLog.write(msg + '\n');
-            const now = Date.now();
-            if (now - gLastFlush > 1000) {
-                gLog.flush();
-                gLastFlush = now;
-            }
-        } catch (e) {}
-    }
+
+    if (!gLogPath) return;
+
+    gLogBuf.push(msg);
+    const now = Date.now();
+    const doFlush = gLogBuf.length >= 16 || (now - gLastFlush) > 1000;
+    if (doFlush) OXFlush();
 }
 
 function OXFlush() {
-    if (!gLog) return;
-    try { gLog.flush(); } catch (e) {}
+    if (!gLogPath || gLogBuf.length === 0) return;
+    const chunk = gLogBuf.join('\n') + '\n';
+    gLogBuf = [];
+
+    try {
+        const fileManager = ObjC.classes.NSFileManager.defaultManager();
+        const path = nsString(gLogPath);
+        if (!fileManager.fileExistsAtPath_(path)) {
+            nsString(chunk).writeToFile_atomically_encoding_error_(
+                path, true, 4, null
+            );
+        } else {
+            const handle = ObjC.classes.NSFileHandle.fileHandleForWritingAtPath_(path);
+            if (!handle) {
+                nsString(chunk).writeToFile_atomically_encoding_error_(
+                    path, true, 4, null
+                );
+            } else {
+                handle.seekToEndOfFile();
+                const data = nsString(chunk).dataUsingEncoding_(4);
+                handle.writeData_(data);
+                handle.closeFile();
+            }
+        }
+        gLastFlush = Date.now();
+    } catch (e) {
+        console.log('[!] flush err: ' + e);
+    }
 }
 
 function readPtr(addr) {
@@ -430,7 +477,11 @@ function main() {
     if (gStarted) { LOG('already started'); return; }
     gStarted = true;
 
-    openLog();
+    const logReady = openLog();
+    LOG('=== FRIDA TRACE v1 ===');
+    LOG('objcReady = ' + objcReady());
+    LOG('logPath   = ' + (gLogPath || '(null)'));
+    LOG('logReady  = ' + logReady);
 
     const mainBin = findMainBinary();
     if (!mainBin) {
@@ -442,12 +493,10 @@ function main() {
     gBase = mainBin.base;
     gSlide = parseInt(gBase.toString(), 16) - FILE_BASE;
 
-    LOG('=== FRIDA TRACE v1 ===');
     LOG('main  = ' + mainBin.name);
     LOG('path  = ' + mainBin.path);
     LOG('base  = ' + gBase);
     LOG('slide = 0x' + gSlide.toString(16));
-    LOG('log   = ' + gLogPath);
     LOG('');
 
     if (RUNTIME_HOOK_ALL) {
@@ -473,11 +522,28 @@ function main() {
     setInterval(OXFlush, 3000);
 }
 
+function waitAndStart() {
+    let tries = 0;
+    function attempt() {
+        tries++;
+        if (objcReady()) {
+            main();
+            return;
+        }
+        if (tries > 60) {
+            console.log('[!] ObjC never became ready, giving up');
+            return;
+        }
+        setTimeout(attempt, 500);
+    }
+    attempt();
+}
+
 if (typeof rpc !== 'undefined' && rpc) {
     rpc.exports = {
-        start: function () { main(); },
+        start: function () { waitAndStart(); },
         dump: function () { dumpAllVtables(); OXFlush(); },
     };
 }
 
-setTimeout(main, 2000);
+setTimeout(waitAndStart, 2000);
