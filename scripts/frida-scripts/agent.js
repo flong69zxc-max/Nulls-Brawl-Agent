@@ -8,6 +8,8 @@ const TEXT_HI   = 0x100D8AF60;
 const DATA_LO   = 0x100F74000;
 const DATA_HI   = 0x101170000;
 
+const HARDCODED_APP_UUID = '153F36D1-2E5E-4745-A8B1-F024394FC48E';
+
 const KNOWN = {
     'NativeFont::formatString':                      0x00b3fde8,
     'MessageManager::receiveMessage':                0x0075cce0,
@@ -38,7 +40,6 @@ const VTABLES = {
 const LOG_LIMIT        = 10;
 const MAX_SLOT_DUMPS   = 128;
 const RUNTIME_HOOK_ALL = true;
-const LOG_FILE_NAME    = 'FRIDA_TRACE.txt';
 
 let gBase       = null;
 let gSlide      = null;
@@ -70,6 +71,7 @@ function nsString(str) {
 }
 
 function resolveDocumentsPath() {
+    // 1. Пытаемся через NSSearchPathForDirectoriesInDomains
     try {
         const fn = new NativeFunction(
             Module.findExportByName(null, 'NSSearchPathForDirectoriesInDomains'),
@@ -77,48 +79,70 @@ function resolveDocumentsPath() {
         );
         const arr = new ObjC.Object(fn(9, 1, 1));
         if (arr.count() > 0) {
-            return arr.objectAtIndex_(0).toString();
+            const p = arr.objectAtIndex_(0).toString();
+            if (p && p.length > 0) {
+                LOG('path via NSSearchPathForDirectoriesInDomains: ' + p);
+                return p;
+            }
         }
-    } catch (e) {}
+    } catch (e) {
+        LOG('NSSearchPathForDirectoriesInDomains fail: ' + e);
+    }
 
+    // 2. Хардкод пути к Documents в LiveContainer
     try {
-        const bundlePath = ObjC.classes.NSBundle.mainBundle().bundlePath().toString();
-        if (bundlePath) return bundlePath + '/Documents';
-    } catch (e) {}
-
-    try {
-        const fn = new NativeFunction(
+        const homeFn = new NativeFunction(
             Module.findExportByName(null, 'NSHomeDirectory'),
             'pointer', []
         );
-        const home = new ObjC.Object(fn()).toString();
-        if (home) return home + '/Documents';
-    } catch (e) {}
+        const home = new ObjC.Object(homeFn()).toString();
+        if (home && home.length > 0) {
+            const docsPath = home + '/Documents';
+            LOG('home=' + home + ' docsPath=' + docsPath);
+            return docsPath;
+        }
+    } catch (e) {
+        LOG('NSHomeDirectory fail: ' + e);
+    }
 
-    return null;
+    // 3. Fallback: хардкод UUID
+    const hardPath = '/var/mobile/Containers/Data/Application/' +
+        HARDCODED_APP_UUID + '/Documents';
+    LOG('using hardcoded path: ' + hardPath);
+    return hardPath;
 }
 
 function openLog() {
-    if (!objcReady()) return false;
+    if (!objcReady()) {
+        LOG('ObjC not ready, cannot open log');
+        return false;
+    }
     const docs = resolveDocumentsPath();
-    if (!docs) return false;
-
-    gLogPath = docs + '/' + LOG_FILE_NAME;
+    if (!docs) {
+        LOG('cannot resolve Documents path');
+        return false;
+    }
+    gLogPath = docs + '/FRIDA_TRACE.txt';
+    LOG('logPath = ' + gLogPath);
 
     try {
-        const fileManager = ObjC.classes.NSFileManager.defaultManager();
+        const fm = ObjC.classes.NSFileManager.defaultManager();
         const dirPath = nsString(docs);
-        if (!fileManager.fileExistsAtPath_(dirPath)) {
-            fileManager.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(
-                dirPath, true, null, null
+        if (!fm.fileExistsAtPath_(dirPath)) {
+            LOG('Documents dir does not exist, creating');
+            const err = Memory.alloc(Process.pointerSize);
+            err.writePointer(ptr(0));
+            const ok = fm.createDirectoryAtPath_withIntermediateDirectories_attributes_error_(
+                dirPath, true, null, err
             );
+            LOG('createDirectory ok=' + ok + ' err=' + err.readPointer());
         }
-        nsString('').writeToFile_atomically_encoding_error_(
-            nsString(gLogPath), true, 4 /* NSUTF8StringEncoding */, null
-        );
+        const filePath = nsString(gLogPath);
+        const created = fm.createFileAtPath_contents_attributes_(filePath, null, null);
+        LOG('createFileAtPath ok=' + created);
         return true;
     } catch (e) {
-        console.log('[!] cannot init log: ' + e);
+        LOG('openLog fail: ' + e);
         return false;
     }
 }
@@ -131,8 +155,9 @@ function LOG(line) {
 
     gLogBuf.push(msg);
     const now = Date.now();
-    const doFlush = gLogBuf.length >= 16 || (now - gLastFlush) > 1000;
-    if (doFlush) OXFlush();
+    if (gLogBuf.length >= 16 || (now - gLastFlush) > 1000) {
+        OXFlush();
+    }
 }
 
 function OXFlush() {
@@ -141,24 +166,25 @@ function OXFlush() {
     gLogBuf = [];
 
     try {
-        const fileManager = ObjC.classes.NSFileManager.defaultManager();
-        const path = nsString(gLogPath);
-        if (!fileManager.fileExistsAtPath_(path)) {
+        const fm = ObjC.classes.NSFileManager.defaultManager();
+        const filePath = nsString(gLogPath);
+        if (!fm.fileExistsAtPath_(filePath)) {
             nsString(chunk).writeToFile_atomically_encoding_error_(
-                path, true, 4, null
+                filePath, true, 4, null
+            );
+            gLastFlush = Date.now();
+            return;
+        }
+        const handle = ObjC.classes.NSFileHandle.fileHandleForWritingAtPath_(filePath);
+        if (!handle) {
+            nsString(chunk).writeToFile_atomically_encoding_error_(
+                filePath, true, 4, null
             );
         } else {
-            const handle = ObjC.classes.NSFileHandle.fileHandleForWritingAtPath_(path);
-            if (!handle) {
-                nsString(chunk).writeToFile_atomically_encoding_error_(
-                    path, true, 4, null
-                );
-            } else {
-                handle.seekToEndOfFile();
-                const data = nsString(chunk).dataUsingEncoding_(4);
-                handle.writeData_(data);
-                handle.closeFile();
-            }
+            handle.seekToEndOfFile();
+            const data = nsString(chunk).dataUsingEncoding_(4);
+            handle.writeData_(data);
+            handle.closeFile();
         }
         gLastFlush = Date.now();
     } catch (e) {
@@ -189,9 +215,11 @@ function findMainBinary() {
     const candidates = ['Nulls Brawl', 'NullsBrawl', 'brawl', 'Brawl'];
     for (let i = 0; i < candidates.length; i++) {
         const m = moduleByBasename(candidates[i]);
-        if (m) return m;
+        if (m) {
+            LOG('main binary via candidate "' + candidates[i] + '": ' + m.name);
+            return m;
+        }
     }
-
     const mods = Process.enumerateModules();
     let best = null;
     for (let i = 0; i < mods.length; i++) {
@@ -204,6 +232,7 @@ function findMainBinary() {
             if (!best || m.size > best.size) best = m;
         }
     }
+    if (best) LOG('main binary via largest .app module: ' + best.name);
     return best;
 }
 
