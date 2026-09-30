@@ -1,35 +1,116 @@
 #!/usr/bin/env python3
-# find_offsets_r3.py — iOS/arm64 fixed
 import os, sys, time, struct, re, bisect, traceback
 import r2pipe
 
-WS  = os.environ.get("GITHUB_WORKSPACE", "/tmp")
+WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
 BIN = os.environ.get("R2_BIN", "/tmp/brawl_bin")
-OUT    = os.path.join(WS, "offsets_resolved.js")
-VT     = os.path.join(WS, "vtables.js")
-REPORT = os.path.join(WS, "offsets_report.txt")
-DETAIL = os.path.join(WS, "ctors_detailed.log")
-START  = time.time()
+OUT = os.path.join(WS, "offsets_resolved.js")
+LOG = os.path.join(WS, "r2.log")
+START = time.time()
 
 TARGETS = [
-    # ... (список тот же, что у тебя — не трогаю)
+"String.ctor","String.equals","NativeFont.formatString",
+"StringTable.getString","StringTable.getCurrentLanguageCode",
+"GUI.showPopup","GUI.closePopup","GUI.getInstance","GUI.showFloater",
+"LoadingScreen.exit","LoadingScreen.enter",
+"GenericPopup.ctor","GenericPopup.addButton","GenericPopup.addButton2",
+"GenericPopup.setTitle","GenericPopup.onHudCloseButton",
+"ResourceManager.getMovieClip",
+"MovieClip.gotoAndStopFrameIndex","MovieClip.setText",
+"MovieClip.setTextAndScaleIfNecessary","MovieClip.getMovieClipByName",
+"MovieClip.getChildByName","MovieClip.getTextFieldByName",
+"MovieClip.playOnce","MovieClip.setChildVisible",
+"GameButton.ctor","GameButton.buttonPressed",
+"Sprite.ctor","Sprite.addChild",
+"PopupBase.ctor","PopupBase.addCloseButton",
+"GameMain.getAccountIdCtor","GameMain.getInstanceCtor",
+"GameMain.reloadGame","GameMain.reloadGameAfterContentUpdate",
+"GameMain.getStaticVideoAdListener","GameMain.getFps",
+"GameMain.update","GameMain.draw",
+"Stage.addChild","Stage.instance",
+"CountryItem.ctor","DisplayObject.setXY","DisplayObject.setPixelSnappedXY",
+"TextField.setText","TextField.fetchFont",
+"DecoratedTextField.setupDecoratedTextField",
+"TeamSearchPopup.customButtonTapped",
+"GameInputField.ctor","GameInputField.setScaleTextIfNeeded",
+"TextInput.setMaxTextLength","InputField.getInputText",
+"CustomButton.setButtonListener",
+"GameSliderComponent.ctor","GameSliderComponent.setValueBounds",
+"GameSliderComponent.setMaxValueLabel",
+"DropGUIContainer.ctor","DropGUIContainer.addGameButton",
+"ResourceListener.addFile",
+"HomeMode.enter","HomeMode.getPlayerName",
+"LogicDailyData.isBrawlPassPremiumUnlocked",
+"LogicDataTables.getColorGradientByName",
+"Application.copyString","Application.openUrl",
+"PlayerInfo.refreshPlayerHeader","HashTagCodeGenerator.toCode",
+"BandMailPopup.ctor",
+"BattleScreen.activateSkill","BattleScreen.getClosestTargetForAutoshoot",
+"BattleScreen.update","BattleScreen.isAfk",
+"BattleScreen.enter","BattleScreen.exit","BattleScreen.getInstance",
+"BattleScreen.updateCameraParameters",
+"BattleMode.getInstance","BattleMode.getInstance2",
+"BattleMode.enter","BattleMode.exit","BattleMode.update",
+"LogicBattleModeClient.getOwnCharacter","LogicBattleModeClient.update",
+"LogicBattleModeClient.setClientPredictionMoveTo",
+"LogicBattleModeClient.getOwnPlayerTeam","LogicBattleModeClient.getTileMap",
+"LogicGameObjectClient.getX","LogicGameObjectClient.getY",
+"LogicGameObjectClient.getGlobalID","LogicGameObjectClient.getData",
+"LogicGameObjectClient.getTileX",
+"LogicProjectileData.getSpeed","LogicProjectileData.getRadius",
+"LogicCharacterClient.getCharacterData",
+"LogicCharacterData.getCollisionRadius","LogicData.getName",
+"LogicConfData.getIntValue","LogicLong.getHigherInt","LogicLong.getLowerInt",
+"LogicClientAvatar.isTutorialState",
+"ClientInput.ctor","ClientInputManager.addInput",
+"MessageManager.receiveMessage","MessageManager.sendMessage",
+"MessageManager.instance",
+"TeamJoinRequestPopup.ctor","StartLoadingMessage.ctor",
+"SimpleWebView.ctor","SimpleWebView.loadURL",
+"TeamMemberItem.setMember","HomePage.ctor",
+"GameScreen.getLogicBattle",
+"GameObject.getTileX","GameObject.getTileY","GameObject.getTileZ",
+"GameObject.getLogic",
+"LogicTileData.getBaseExportName","LogicTileMap.getTile",
+"LogicTileMap.getTile2","LogicGameObjectManagerClient.getGameObjects",
+"RenderSystem.destroyTile",
+"Projectile.getAngle","Projectile.update",
+"GameStateManager.getInstance",
+"TeamManager.onTeamMessage","TeamManager.onTeamLeftMessage",
+"TeamManager.getInstance",
+"PlayerNameColorPopup.ctor","DownloadedImage.ctor",
+"DownloadedImage.createFromLocalFile",
+"ScrollArea.ctor","ScrollArea.enablePinching",
+"ScrollArea.enableHorizontalDrag","ScrollArea.enableVerticalDrag",
+"ScrollArea.setAlignment","ScrollArea.addContent",
+"AboutScreen.ctor","CombatHUD.ctor",
+"Character.update","Character.updateHealthBar",
+"FramerateManager.setSegment","FramerateManager.sm_pInstance",
+"LogicPlayer.decode","TeamMemberEntry.decode",
+"BattleLogPlayerEntry.ctor","FriendEntry.decode",
+"PlayerProfile.decode","AllianceMemberEntry.decode",
 ]
 
 CLASSES = sorted(set(t.split(".")[0] for t in TARGETS))
-SINGLETON_NAMES = ("getInstance", "instance", "sharedInstance", "getInstanceCtor")
+SINGLETON_NAMES = ("getInstance","instance","sharedInstance","getInstanceCtor")
 
-_log_fh = None
+_fh = None
 def log(m):
     line = "[%7.2f] %s" % (time.time() - START, m)
-    try: sys.stdout.write(line + "\n"); sys.stdout.flush()
-    except Exception: pass
-    if _log_fh:
-        try: _log_fh.write(line + "\n"); _log_fh.flush()
-        except Exception: pass
+    try:
+        sys.stdout.write(line + "\n"); sys.stdout.flush()
+    except Exception:
+        pass
+    if _fh:
+        try:
+            _fh.write(line + "\n"); _fh.flush()
+        except Exception:
+            pass
 
 def cmdj(r2, c):
     try: return r2.cmdj(c)
     except Exception: return None
+
 def cmd(r2, c):
     try: return r2.cmd(c)
     except Exception: return ""
@@ -38,7 +119,7 @@ def addr_of(s, base):
     va = s.get("vaddr", 0); pa = s.get("paddr", 0)
     if va and va >= base: return va
     if pa and pa >= base: return pa
-    if pa and pa > 0:     return pa + base
+    if pa and pa > 0: return pa + base
     return 0
 
 def build_string_index(r2, base):
@@ -50,33 +131,35 @@ def build_string_index(r2, base):
         if a: idx.setdefault(txt, []).append(a)
     return idx
 
-def get_sections(r2): return cmdj(r2, "iSj") or []
+def get_sections(r2):
+    return cmdj(r2, "iSj") or []
 
 def pick_sections(sections):
     text = None; data = []
     for s in sections:
-        n = s.get("name","") or ""; p = s.get("perm","") or ""
-        va = s.get("vaddr",0); sz = s.get("size",0)
+        n = s.get("name", "") or ""
+        p = s.get("perm", "") or ""
+        va = s.get("vaddr", 0); sz = s.get("size", 0)
         if sz <= 0 or va <= 0: continue
         if ("__text" in n or ".text" in n) and "x" in p:
-            text = (va, va+sz)
+            text = (va, va + sz)
         elif "x" not in p and ("w" in p or "r" in p):
-            if ("const" in n or "data" in n or "got" in n):
-                data.append((va, sz, n))
+            data.append((va, sz, n))
     return text, data
 
 def load_range(r2, va, size):
-    CH = 0x400000; chunks = []; a = va; end = va+size
+    CH = 0x400000; chunks = []; a = va; end = va + size
     while a < end:
-        n = min(CH, end-a)
+        n = min(CH, end - a)
         hx = cmd(r2, "p8 %d @ 0x%x" % (n, a)).strip()
         if not hx: return None
-        try: chunks.append(bytes.fromhex(hx))
-        except Exception: return None
+        try:
+            chunks.append(bytes.fromhex(hx))
+        except Exception:
+            return None
         a += n
     return b"".join(chunks)
 
-# ---- ARM64 decode ----
 def is_adrp(w):            return (w & 0x9F000000) == 0x90000000
 def is_add_imm64(w):       return (w & 0xFF800000) == 0x91000000
 def is_bl(w):              return (w & 0xFC000000) == 0x94000000
@@ -85,12 +168,12 @@ def is_stp_x29_x30_pre(w): return (w & 0xFFC07FFF) == 0xA9807BFD
 def is_pacibsp(w):         return w == 0xD503237F
 def is_paciasp(w):         return w == 0xD503233F
 def is_bti_c(w):           return w == 0xD503245F
+def is_bti_j(w):           return w == 0xD503249F
 def is_sub_sp(w):          return (w & 0xFF8003FF) == 0xD10003FF
 
-def is_prolog(w):
-    # iOS-совместимый набор
+def is_prolog_any(w):
     return (is_stp_x29_x30_pre(w) or is_pacibsp(w) or is_paciasp(w)
-            or is_bti_c(w) or is_sub_sp(w))
+            or is_bti_c(w) or is_bti_j(w) or is_sub_sp(w))
 
 def decode_adrp_imm(w, pc):
     immlo = (w >> 29) & 0x3; immhi = (w >> 5) & 0x7FFFF
@@ -109,55 +192,79 @@ def decode_bl_target(w, pc):
     if off & (1 << 25): off -= (1 << 26)
     return pc + (off << 2)
 
-def decode_chained(v):
-    bind = (v >> 63) & 1
-    return bind, (v & 0x7FFFFFFFFFF)
+def decode_ptr_candidates(raw, base, ts, te):
+    raw &= 0xFFFFFFFFFFFFFFFF
+    out = []
+    t43 = raw & 0x7FFFFFFFFFF
+    high8 = (raw >> 43) & 0xFF
+    out.append(t43)
+    if high8:
+        out.append((high8 << 56) | t43)
+    t36 = raw & 0xFFFFFFFFF
+    if t36:
+        out.append(t36)
+        out.append(base + t36)
+    t32 = raw & 0xFFFFFFFF
+    if t32:
+        out.append(t32)
+        out.append(base + t32)
+    out.append(raw & 0xFFFFFFFFFFFF)
+    out.append(base + (raw & 0xFFFFFFFFFFFF))
+    res = []
+    seen = set()
+    for c in out:
+        if c in seen: continue
+        seen.add(c)
+        if ts <= c < te:
+            res.append(c)
+    return res
 
 def scan_text(text, ts):
-    n = len(text)//4
-    adrp_add = []; prologs = []; bl_map = {}; str_locs = []
+    n = len(text) // 4
+    adrp_add = []; prologs = []; bl_map = {}
     for i in range(n):
-        w = struct.unpack_from("<I", text, i*4)[0]
-        pc = ts + i*4
-        if is_prolog(w): prologs.append(pc)
+        w = struct.unpack_from("<I", text, i * 4)[0]
+        pc = ts + i * 4
+        if is_prolog_any(w): prologs.append(pc)
         if is_adrp(w):
             rd_adrp = w & 0x1F
             page = decode_adrp_imm(w, pc)
-            for j in range(i+1, min(i+6, n)):
-                w2 = struct.unpack_from("<I", text, j*4)[0]
+            for j in range(i + 1, min(i + 6, n)):
+                w2 = struct.unpack_from("<I", text, j * 4)[0]
                 if is_add_imm64(w2):
                     rd, rn, imm = decode_add_imm(w2)
                     if rd == rd_adrp and rn == rd_adrp:
                         adrp_add.append((pc, page + imm)); break
         if is_bl(w):
             bl_map[pc] = decode_bl_target(w, pc)
-        if is_str_x(w):
-            rt = w & 0x1F; rn = (w >> 5) & 0x1F; imm12 = (w >> 10) & 0xFFF
-            str_locs.append((pc, rt, rn, imm12*8))
-    return adrp_add, prologs, bl_map, str_locs
+    return adrp_add, prologs, bl_map
 
-def build_ptr_index(data_blobs, ts, te):
+def build_ptr_index(data_blobs, ts, te, base):
     idx = {}
     for va, b in data_blobs:
-        for i in range(len(b)//8):
-            raw = struct.unpack_from("<Q", b, i*8)[0]
-            bind, tgt = decode_chained(raw)
-            if bind: continue
-            if ts <= tgt < te:
-                idx.setdefault(tgt, []).append(va + i*8)
+        for i in range(len(b) // 8):
+            raw = struct.unpack_from("<Q", b, i * 8)[0]
+            cands = decode_ptr_candidates(raw, base, ts, te)
+            if cands:
+                slot = va + i * 8
+                for c in cands:
+                    idx.setdefault(c, []).append(slot)
     return idx
 
 def build_slot_to_target(ptr_idx):
     out = {}
     for tgt, slots in ptr_idx.items():
-        for s in slots: out[s] = tgt
+        for s in slots:
+            if s not in out:
+                out[s] = tgt
     return out
 
 def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=2048):
     vt_start = anchor_slot
     cur = anchor_slot - 8
     for _ in range(max_back):
-        if cur in slot_to_target: vt_start = cur; cur -= 8
+        if cur in slot_to_target:
+            vt_start = cur; cur -= 8
         else: break
     slots = []; cur = vt_start
     for _ in range(max_fwd):
@@ -166,7 +273,15 @@ def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=2048):
         else: break
     return (vt_start, slots) if len(slots) >= 2 else None
 
-# ---------- ИТАНИ-деманглер для _ZN... ----------
+def ptr_lookup_fuzzy(ptr_idx, addr):
+    hits = []
+    if addr in ptr_idx: hits.append(addr)
+    for d in (4, -4, 8, -8, 12, -12, 16, -16, 20, -20, 24, -24, 28, -28, 32, -32):
+        a = addr + d
+        if a in ptr_idx and a not in hits:
+            hits.append(a)
+    return hits
+
 def demangle_itanium(s):
     if not s.startswith("_ZN"): return None
     rest = s[3:]; parts = []
@@ -180,79 +295,100 @@ def demangle_itanium(s):
     if len(parts) == 1: return parts[0], None
     return None
 
-# ============================================================
 def main():
-    global _log_fh
-    try: _log_fh = open(DETAIL, "w")
-    except Exception: _log_fh = None
+    global _fh
+    try: _fh = open(LOG, "w")
+    except Exception: _fh = None
 
-    log("=== find_offsets_r3 (iOS) ===")
+    log("=== find_offsets v19 iOS PAC ===")
+    log("targets=%d classes=%d" % (len(TARGETS), len(CLASSES)))
+
     r2 = r2pipe.open(BIN, flags=["-2"])
-    r2.cmd("e scr.color=0"); r2.cmd("e asm.arch=arm"); r2.cmd("e asm.bits=64")
+    r2.cmd("e scr.color=0")
+    r2.cmd("e asm.arch=arm")
+    r2.cmd("e asm.bits=64")
 
-    # ВАЖНО: базовый анализ функций. На 14 МБ текста ~30-90с, влезает в бюджет.
     t0 = time.time()
-    log("[*] running aa ..."); r2.cmd("aa")
-    log("[*] aa done %.1fs" % (time.time()-t0))
+    r2.cmd("aa")
+    log("aa done %.1fs" % (time.time() - t0))
 
     info = cmdj(r2, "ij") or {}
     base = info.get("baddr", 0x100000000) or 0x100000000
-    log("base: 0x%x" % base)
+    log("base=0x%x arch=%s bits=%s"
+        % (base, info.get("arch"), info.get("bits")))
 
     str_index = build_string_index(r2, base)
-    log("[*] strings: %d unique" % len(str_index))
+    log("strings=%d" % len(str_index))
 
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
-    if not text_b: return
+    if not text_b:
+        log("no .text"); return
     ts, te = text_b
-    log("[*] .text: 0x%x - 0x%x" % (ts, te))
+    log(".text 0x%x-0x%x size=%d" % (ts, te, te - ts))
+    log("data sections:")
+    for va, sz, n in data_secs:
+        log("  %-24s 0x%x size=0x%x" % (n, va, sz))
 
-    text = load_range(r2, ts, te-ts)
-    log("[*] .text %d bytes" % len(text or b""))
+    text = load_range(r2, ts, te - ts)
     if not text: return
+    log(".text loaded bytes=%d" % len(text))
 
     data_blobs = []
     for va, sz, n in data_secs:
         b = load_range(r2, va, sz)
         if b: data_blobs.append((va, b))
-    log("[*] data %d bytes" % sum(len(b) for _, b in data_blobs))
+    log("data loaded bytes=%d blobs=%d"
+        % (sum(len(b) for _, b in data_blobs), len(data_blobs)))
 
-    ptr_idx      = build_ptr_index(data_blobs, ts, te)
-    slot_to_tgt  = build_slot_to_target(ptr_idx)
-    log("[*] ptr idx: %d targets, %d slots"
-        % (len(ptr_idx), sum(len(v) for v in ptr_idx.values())))
+    ptr_idx = build_ptr_index(data_blobs, ts, te, base)
+    slot_to_tgt = build_slot_to_target(ptr_idx)
+    log("ptr_idx targets=%d slots=%d" % (len(ptr_idx), len(slot_to_tgt)))
 
-    adrp_add, prologs, bl_map, _ = scan_text(text, ts)
-    prologs_sorted = sorted(prologs)
-    log("[*] adrp_add=%d prologs=%d bl=%d"
+    nf_target = base + 0xb3fde8
+    log("check NativeFont.formatString@0x%x in ptr_idx=%s"
+        % (nf_target, nf_target in ptr_idx))
+    log("first 12 ptr_idx targets: %s"
+        % [hex(x) for x in sorted(ptr_idx)[:12]])
+
+    adrp_add, prologs, bl_map = scan_text(text, ts)
+    log("adrp_add=%d prologs=%d bl=%d"
         % (len(adrp_add), len(prologs), len(bl_map)))
 
-    # ---- объединяем прологи и aflj для надёжного поиска границ функций ----
-    func_addrs_set = set(prologs_sorted)
-    for f in (cmdj(r2, "aflj") or []):
-        a = f.get("offset") or f.get("addr") or 0
-        if a: func_addrs_set.add(a)
-    func_addrs = sorted(func_addrs_set)
-    def find_func_start(ia):
-        idx = bisect.bisect_right(func_addrs, ia) - 1
-        return func_addrs[idx] if idx >= 0 else (ia & ~0xF)
+    n_stp = n_paci = n_bti = n_subsp = 0
+    for pc in prologs:
+        off = (pc - ts) // 4
+        w = struct.unpack_from("<I", text, off * 4)[0]
+        if is_stp_x29_x30_pre(w): n_stp += 1
+        elif is_pacibsp(w) or is_paciasp(w): n_paci += 1
+        elif is_bti_c(w) or is_bti_j(w): n_bti += 1
+        elif is_sub_sp(w): n_subsp += 1
+    log("prologs: stp=%d paci=%d bti=%d subsp=%d"
+        % (n_stp, n_paci, n_bti, n_subsp))
 
-    # ---- адреса строк → PC adrp ----
+    prologs_sorted = sorted(prologs)
+
+    def find_func_start(ia):
+        idx = bisect.bisect_right(prologs_sorted, ia) - 1
+        return prologs_sorted[idx] if idx >= 0 else (ia & ~0xF)
+
+    in_ptr = 0
+    for p in prologs_sorted[:5000]:
+        if ptr_lookup_fuzzy(ptr_idx, p): in_ptr += 1
+    log("prologs[0:5000] with fuzzy ptr hit=%d" % in_ptr)
+
     str_addr_to_pc = {}
     for pc, tgt in adrp_add:
         str_addr_to_pc.setdefault(tgt, []).append(pc)
 
-    # ============================================================
-    # 1) Class::method из строк (с учётом ВСЕХ xref и выбора лучшего)
-    # ============================================================
     class_method_funcs = {}
+    cls_counts = {}
     for s, addrs in str_index.items():
         idx = s.find("::")
         if idx <= 0: continue
         cls = s[:idx]
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", cls): continue
-        rest = s[idx+2:]
+        rest = s[idx + 2:]
         m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", rest)
         if not m: continue
         method = m.group(1)
@@ -260,18 +396,21 @@ def main():
         if key in class_method_funcs: continue
         best = None
         for sa in addrs:
-            pcs = sorted(str_addr_to_pc.get(sa, []))
-            for pc in pcs[:4]:
+            for pc in sorted(str_addr_to_pc.get(sa, []))[:4]:
                 f = find_func_start(pc)
-                # предпочитаем функцию, у которой строка в первых ~60 инструкциях
-                if f and (pc - f) < 0x400:
+                if f and (pc - f) < 0x800:
                     best = f; break
                 if best is None: best = f
-            if best is not None and (pc - best) < 0x400: break
+            if best is not None: break
         if best is not None:
             class_method_funcs[key] = best
+            cls_counts[cls] = cls_counts.get(cls, 0) + 1
+    log("Class::method funcs=%d" % len(class_method_funcs))
+    log("classes with most hits:")
+    for cls, cnt in sorted(cls_counts.items(), key=lambda x: -x[1])[:12]:
+        log("  %-24s %d" % (cls, cnt))
 
-    # ---- плюс C++ манга (иногда есть в __gcc_except_tab на iOS) ----
+    mang_hits = 0
     for s, addrs in str_index.items():
         dm = demangle_itanium(s)
         if not dm: continue
@@ -283,13 +422,10 @@ def main():
             for pc in str_addr_to_pc.get(sa, [])[:3]:
                 f = find_func_start(pc)
                 if f is not None:
-                    class_method_funcs[key] = f; break
+                    class_method_funcs[key] = f; mang_hits += 1; break
             if key in class_method_funcs: break
-    log("[*] Class::method funcs: %d" % len(class_method_funcs))
+    log("+mangled hits=%d" % mang_hits)
 
-    # ============================================================
-    # 2) Плоские имена методов (без "::") — для fallback по vtable
-    # ============================================================
     method_name_xrefs = {}
     for s, addrs in str_index.items():
         if "::" in s: continue
@@ -297,74 +433,77 @@ def main():
         if s in ("null", "true", "false", "None"): continue
         for sa in addrs:
             for pc in str_addr_to_pc.get(sa, []):
-                f = find_func_start(pc)
-                method_name_xrefs.setdefault(s, set()).add(f)
-    log("[*] plain method-name strings: %d" % len(method_name_xrefs))
+                method_name_xrefs.setdefault(s, set()).add(find_func_start(pc))
+    log("plain method-name strings=%d" % len(method_name_xrefs))
 
-    # ============================================================
-    # 3) vtable по классам (через якорные функции)
-    # ============================================================
     class_to_vtable = {}
-    all_vt_starts   = set()
+    all_vt_starts = set()
+    anchor_diag = []
+
     for cls in CLASSES:
         anchor_funcs = set()
         for key, f in class_method_funcs.items():
-            if key.startswith(cls + "::"): anchor_funcs.add(f)
+            if key.startswith(cls + "::"):
+                anchor_funcs.add(f)
         for s, al in str_index.items():
             if s == cls or s.startswith(cls + "::"):
                 for sa in al:
                     for pc in str_addr_to_pc.get(sa, []):
                         anchor_funcs.add(find_func_start(pc))
         if not anchor_funcs: continue
+
+        in_ptr_direct = sum(1 for af in anchor_funcs if af in ptr_idx)
+        in_ptr_fuzzy = sum(1 for af in anchor_funcs
+                           if ptr_lookup_fuzzy(ptr_idx, af))
+
         best = None
         for af in anchor_funcs:
-            for slot in ptr_idx.get(af, [])[:6]:
-                vt = expand_vtable(slot_to_tgt, slot)
-                if vt and (best is None or len(vt[1]) > len(best[1])):
-                    best = vt
+            for sh in ptr_lookup_fuzzy(ptr_idx, af):
+                for slot in ptr_idx.get(sh, [])[:4]:
+                    vt = expand_vtable(slot_to_tgt, slot)
+                    if vt and (best is None or len(vt[1]) > len(best[1])):
+                        best = vt
         if best:
             class_to_vtable[cls] = best
             all_vt_starts.add(best[0])
-    log("[*] class→vtable (via anchors): %d" % len(class_to_vtable))
+            anchor_diag.append("%-24s anchors=%d in_ptr=%d/%d vt=0x%x slots=%d"
+                               % (cls, len(anchor_funcs), in_ptr_direct,
+                                  in_ptr_fuzzy, best[0] - base, len(best[1])))
+        else:
+            anchor_diag.append("%-24s anchors=%d in_ptr=%d/%d NO_VT"
+                               % (cls, len(anchor_funcs),
+                                  in_ptr_direct, in_ptr_fuzzy))
+    log("=== vtable anchor diagnostics ===")
+    for line in anchor_diag:
+        log("  " + line)
+    log("class->vtable=%d" % len(class_to_vtable))
 
-    # ============================================================
-    # 4) РАСПРОСТРАНЕНИЕ ПО VTABLE
-    #    Если func известен как A::m, а он же лежит в vtable класса B —
-    #    значит B унаследовал A::m (или это тот же базовый) → B::m = func.
-    # ============================================================
     func_to_names = {}
     for key, f in class_method_funcs.items():
         cls, method = key.split("::", 1)
         func_to_names.setdefault(f, []).append((cls, method))
 
-    propagated = 0
-    # несколько проходов, чтобы дошло по цепочке наследования
+    total_prop = 0
     for _ in range(3):
         added = 0
         for cls, (vt_start, slots) in class_to_vtable.items():
-            for slot_addr, func in slots:
+            for _, func in slots:
                 for other_cls, method in func_to_names.get(func, ()):
                     key = cls + "::" + method
                     if key not in class_method_funcs:
                         class_method_funcs[key] = func
                         func_to_names.setdefault(func, []).append((cls, method))
                         added += 1
-        propagated += added
+        total_prop += added
         if added == 0: break
-    log("[*] propagated class::methods via vtable: +%d" % propagated)
+    log("propagated via vtable=+%d" % total_prop)
 
-    # ============================================================
-    # 5) ctor через xref на vtable и через operator_new
-    # ============================================================
     vt_to_ctors = {}
     for pc, tgt in adrp_add:
         if tgt in all_vt_starts:
             vt_to_ctors.setdefault(tgt, set()).add(find_func_start(pc))
-    log("[*] vtables with ctor xref: %d" % len(vt_to_ctors))
+    log("vtables with ctor xref=%d" % len(vt_to_ctors))
 
-    # ============================================================
-    # 6) Разрешение таргетов
-    # ============================================================
     results = {}
     unresolved = []
 
@@ -373,61 +512,48 @@ def main():
             unresolved.append((t, "no_dot")); continue
         cls, method = t.split(".", 1)
 
-        # --- ctor ---
         if method == "ctor":
-            # 1. по строкам Class::Class / Class::ctor / Class::__ctor
             hit = None
-            for k in (cls+"::"+cls, cls+"::ctor", cls+"::__ctor",
-                      cls+"::constructor", cls+"::new"):
+            for k in (cls + "::" + cls, cls + "::ctor", cls + "::__ctor",
+                      cls + "::constructor", cls + "::new"):
                 if k in class_method_funcs:
                     hit = class_method_funcs[k]; break
             if hit is not None:
                 results[t] = hit - base; continue
-            # 2. через vtable: любой ctor-кандидат, найденный по adrp на vtable
             vt = class_to_vtable.get(cls)
             if vt:
                 for c in vt_to_ctors.get(vt[0], set()):
-                    # проверим что функция выглядит как ctor: много bl + str x0 где-то
-                    off = (c - ts)//4
-                    n = len(text)//4
-                    has_str = False; has_bl = 0
-                    for i in range(off, min(off+200, n)):
-                        w = struct.unpack_from("<I", text, i*4)[0]
+                    off = (c - ts) // 4
+                    n = len(text) // 4; has_str = False; has_bl = 0
+                    for i in range(off, min(off + 200, n)):
+                        w = struct.unpack_from("<I", text, i * 4)[0]
                         if is_bl(w): has_bl += 1
-                        if is_str_x(w) and (w & 0x1F) == 0:  # str x0
-                            has_str = True
-                        if w == 0xD65F03C0 and i > off+5: break
+                        if is_str_x(w) and (w & 0x1F) == 0: has_str = True
+                        if w == 0xD65F03C0 and i > off + 5: break
                     if has_str or has_bl >= 3:
                         results[t] = c - base; break
             if t in results: continue
             unresolved.append((t, "no_ctor")); continue
 
-        # --- singleton ---
         if method in SINGLETON_NAMES:
             hit = None
-            for cand in (cls+"::"+method, cls+"::getInstance", cls+"::instance",
-                         cls+"::sharedInstance", cls+"::getInstanceCtor"):
+            for cand in (cls + "::" + method, cls + "::getInstance",
+                         cls + "::instance", cls + "::sharedInstance",
+                         cls + "::getInstanceCtor"):
                 if cand in class_method_funcs:
                     hit = class_method_funcs[cand]; break
             if hit is not None:
                 results[t] = hit - base; continue
-            # fallback: обычная строка "getInstance"/"instance", xref +
-            # пересечение с vtable этого класса НЕ подходит (статика),
-            # но пересечение с xref на строку ИМЕНИ класса хотя бы даёт
-            # функцию-инициализатор класса — не берём.
             unresolved.append((t, "no_singleton")); continue
 
-        # --- обычный метод ---
-        # (a) прямой Class::method
         hit = class_method_funcs.get(cls + "::" + method)
         if hit is not None:
             results[t] = hit - base; continue
 
-        # (b) регистронезависимо/по префиксу
         found = None
         for k, f in class_method_funcs.items():
             if k.startswith(cls + "::") and \
-               k[len(cls)+2:].lower() == method.lower():
+               k[len(cls) + 2:].lower() == method.lower():
                 found = f; break
         if found is None:
             for k, f in class_method_funcs.items():
@@ -436,52 +562,43 @@ def main():
         if found is not None:
             results[t] = found - base; continue
 
-        # (c) fallback: xref плоской строки "method" ∩ vtable класса
         vt = class_to_vtable.get(cls)
         if vt:
             vt_funcs = set(f for _, f in vt[1])
             cands = method_name_xrefs.get(method, set()) & vt_funcs
             if cands:
                 results[t] = next(iter(cands)) - base; continue
-            # (d) vtable slot-индексы, унаследованные от известных баз:
-            #     если в class_method_funcs есть OtherClass::method, и его слот
-            #     совпадает по индексу в нашей vtable — берём этот слот.
-            #     Ищем "другую" class::method с тем же именем и одинаковой
-            #     позицией слота.
             for k, f in class_method_funcs.items():
                 if not k.endswith("::" + method): continue
                 other_cls = k.split("::", 1)[0]
                 vt2 = class_to_vtable.get(other_cls)
                 if not vt2: continue
-                # индекс f в vt2
                 idx2 = None
                 for i, (_, tf) in enumerate(vt2[1]):
                     if tf == f: idx2 = i; break
                 if idx2 is None or idx2 >= len(vt[1]): continue
-                slot_func = vt[1][idx2][1]
-                results[t] = slot_func - base; break
+                results[t] = vt[1][idx2][1] - base; break
             if t in results: continue
 
         unresolved.append((t, "no_match"))
 
     r2.quit()
 
-    # ============================================================
-    # 7) Запись результатов
-    # ============================================================
     try:
         with open(OUT, "w") as fh:
-            fh.write("// v19 auto-resolved (SCRE format) — iOS\n")
+            fh.write("// v19 auto-resolved (SCRE format) iOS PAC\n")
             fh.write("// base=0x%x\n" % base)
             fh.write("// resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
             fh.write("export const offsets = Object.freeze({\n")
             for t in TARGETS:
                 k = t.replace(".", "_")
-                if t in results: fh.write("    %s: 0x%x,\n" % (k, results[t]))
-                else:            fh.write("    // %s: unresolved\n" % k)
+                if t in results:
+                    fh.write("    %s: 0x%x,\n" % (k, results[t]))
+                else:
+                    fh.write("    // %s: unresolved\n" % k)
             fh.write("\n    // --- ctors via vtable ---\n")
             for cls in sorted(class_to_vtable):
-                vt_start, slots = class_to_vtable[cls]
+                vt_start, _ = class_to_vtable[cls]
                 for c in vt_to_ctors.get(vt_start, set()):
                     fh.write("    %s_ctor: 0x%x,\n" % (cls, c - base)); break
             fh.write("\n    // --- vtable addresses ---\n")
@@ -489,40 +606,30 @@ def main():
                 fh.write("    VTABLE_%s: 0x%x,\n"
                          % (cls.upper(), class_to_vtable[cls][0] - base))
             fh.write("});\n")
-    except Exception as e: log("out: %s" % e)
+    except Exception as e:
+        log("out: %s" % e)
 
-    try:
-        with open(VT, "w") as fh:
-            fh.write("// vtables per class\n")
-            for cls in sorted(class_to_vtable):
-                vt_start, slots = class_to_vtable[cls]
-                fh.write("\n%s: 0x%x slots=%d\n"
-                         % (cls, vt_start - base, len(slots)))
-                for i, (_, ta) in enumerate(slots[:96]):
-                    fh.write("  [%2d] 0x%08x\n" % (i, ta - base))
-    except Exception as e: log("vt: %s" % e)
-
-    try:
-        with open(REPORT, "w") as fh:
-            fh.write("# v19 report (iOS)\n# base=0x%x\n# resolved=%d/%d\n\n"
-                     % (base, len(results), len(TARGETS)))
-            fh.write("## resolved:\n")
-            for t in TARGETS:
-                if t in results: fh.write("  %-55s 0x%08x\n" % (t, results[t]))
-            fh.write("\n## unresolved:\n")
-            for t, why in unresolved: fh.write("  %-55s (%s)\n" % (t, why))
-            fh.write("\n## class→vtable:\n")
-            for cls in sorted(class_to_vtable):
-                vt_start, slots = class_to_vtable[cls]
-                fh.write("%-40s vt=0x%08x slots=%d\n"
-                         % (cls, vt_start - base, len(slots)))
-    except Exception as e: log("report: %s" % e)
-
-    log("[+] resolved %d/%d" % (len(results), len(TARGETS)))
-    log("[+] wrote %s, %s, %s" % (OUT, VT, REPORT))
-    log("[+] total %.1fs" % (time.time()-START))
+    log("")
+    log("=== resolved %d/%d ===" % (len(results), len(TARGETS)))
+    for t in TARGETS:
+        if t in results:
+            log("  %-55s 0x%08x" % (t, results[t]))
+    log("")
+    log("=== unresolved ===")
+    for t, why in unresolved:
+        log("  %-55s (%s)" % (t, why))
+    log("")
+    log("=== class->vtable ===")
+    for cls in sorted(class_to_vtable):
+        vt_start, slots = class_to_vtable[cls]
+        log("%-30s vt=0x%08x slots=%d"
+            % (cls, vt_start - base, len(slots)))
+    log("")
+    log("total %.1fs" % (time.time() - START))
 
 if __name__ == "__main__":
-    try: main()
+    try:
+        main()
     except Exception as e:
-        log("FATAL: %s" % e); traceback.print_exc()
+        log("FATAL %s" % e)
+        traceback.print_exc()
