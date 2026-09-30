@@ -1,351 +1,558 @@
-import ObjC from "frida-objc-bridge";
+// ============================================================================
+// frida_dump.js — рантайм-анализ Nulls Brawl через Frida Gadget
+// Автор: Nulls-Brawl-Agent
+// ============================================================================
 
-const LOG_NAME = "debug_menu.log";
-const UPDATED = "updated";
-const TEST_NAME = ".__dm_write_test";
-const DOC_DIR = 9;
-const USER_MASK = 1;
-const MAX_LOG_BYTES = 2097152;
+'use strict';
 
-const RVA_GETBOOL = 0xb24820;
-const RVA_ISDEV = 0xd93d80;
+// --- Базовые адреса (v19) ---------------------------------------------------
+const FILE_BASE = 0x100000000;
+const TEXT_LO   = 0x100004000;
+const TEXT_HI   = 0x100D8AF60;
+const DATA_LO   = 0x100F74000;
+const DATA_HI   = 0x101170000;
 
-const FORCE_TRUE_CONTAINS = [
-  "isDev", "isDeveloperBuild", "isDevBuild", "enableDebug",
-  "enableCheat", "disableIngameFriends", "debugMenu",
-];
-
-let logPath = null;
-let docsPath = null;
-let updatedPath = null;
-let gameModule = null;
-let getBoolAddr = null;
-let isDevAddr = null;
-let getBoolCalls = 0;
-let isDevCalls = 0;
-
-function str(v) {
-  try { return v === null || v === undefined ? null : v.toString(); } catch (e) { return null; }
-}
-
-function fileManager() { return ObjC.classes.NSFileManager.defaultManager(); }
-
-function mkdir(p) {
-  try {
-    fileManager().createDirectoryAtPath_withIntermediateDirectories_attributes_error_(p, true, null, null);
-    return true;
-  } catch (e) { return false; }
-}
-
-function exists(p) {
-  try { return fileManager().fileExistsAtPath_(p) === true; } catch (e) { return false; }
-}
-
-function readText(p) {
-  try {
-    const f = new File(p, "r");
-    const t = f.readText();
-    f.close();
-    return t;
-  } catch (e) { return null; }
-}
-
-function writeText(p, t) {
-  try {
-    const f = new File(p, "w");
-    f.write(t);
-    f.flush();
-    f.close();
-    return true;
-  } catch (e) { return false; }
-}
-
-function fileSize(p) {
-  try {
-    const f = new File(p, "r");
-    const b = f.readAllBytes();
-    f.close();
-    return b.length;
-  } catch (e) { return -1; }
-}
-
-function writable(p) {
-  if (!p) return false;
-  const t = p + "/" + TEST_NAME;
-  const payload = "p-" + Date.now();
-  if (!writeText(t, payload)) return false;
-  const ok = readText(t) === payload;
-  try { fileManager().removeItemAtPath_error_(t, null); } catch (e) {}
-  return ok;
-}
-
-function containerLike(p) {
-  if (!p) return false;
-  if (p.length < 8 || p.charAt(0) !== "/") return false;
-  if (/\/Documents$/.test(p)) return true;
-  if (p.indexOf("/Documents/") !== -1) return true;
-  if (p.indexOf("/Data/Application/") !== -1) return true;
-  return false;
-}
-
-function bundlePath() {
-  try { return str(ObjC.classes.NSBundle.mainBundle().bundlePath()); } catch (e) { return null; }
-}
-
-function filesystemDir() {
-  const list = [];
-  const seen = {};
-  const add = function (p) {
-    if (!p) return;
-    const x = String(p).replace(/\/+$/, "");
-    if (x.length < 2 || x.charAt(0) !== "/" || seen[x]) return;
-    seen[x] = true;
-    list.push(x);
-  };
-
-  try {
-    const urls = fileManager().URLsForDirectory_inDomains_(DOC_DIR, USER_MASK);
-    if (urls !== null && urls.count() > 0) add(str(urls.firstObject().path()));
-  } catch (e) {}
-
-  try {
-    const fn = new NativeFunction(Module.getGlobalExportByName("NSHomeDirectory"), "pointer", []);
-    add(fn().readUtf8String() + "/Documents");
-  } catch (e) {}
-
-  const bundle = bundlePath();
-  if (bundle) {
-    const parts = bundle.replace(/\/+$/, "").split("/");
-    if (parts.length >= 3) {
-      const parent = parts.slice(0, -2).join("/");
-      const grand = parts.slice(0, -3).join("/");
-      const folder = parts[parts.length - 2];
-      add(parent + "/" + folder + "/Documents");
-      add(grand + "/Data/Application/" + folder + "/Documents");
-    }
-  }
-
-  add("/tmp");
-
-  let loose = null;
-  for (let i = 0; i < list.length; i++) {
-    let p = list[i];
-    if (!/\/Documents$/.test(p) && exists(p + "/Documents")) p = p + "/Documents";
-    if (!exists(p)) continue;
-    if (!writable(p)) continue;
-    if (loose === null) loose = p;
-    if (containerLike(p)) return p;
-  }
-  return loose;
-}
-
-function initPaths() {
-  docsPath = filesystemDir();
-  updatedPath = docsPath === null ? null : docsPath + "/" + UPDATED;
-  if (updatedPath !== null) mkdir(updatedPath);
-
-  const chain = [];
-  if (updatedPath !== null) chain.push(updatedPath + "/" + LOG_NAME);
-  if (docsPath !== null) chain.push(docsPath + "/" + LOG_NAME);
-  chain.push("/tmp/" + LOG_NAME);
-
-  for (let i = 0; i < chain.length; i++) {
-    const c = chain[i];
-    const cut = c.lastIndexOf("/");
-    if (cut < 1) continue;
-    const dir = c.substring(0, cut);
-    if (!exists(dir)) mkdir(dir);
-    if (!writable(dir)) continue;
-    if (!writeText(c, "")) continue;
-    logPath = c;
-    break;
-  }
-
-  if (logPath !== null) log("log at " + logPath);
-  else try { console.log("console only"); } catch (e) {}
-}
-
-function log(line) {
-  const text = new Date().toISOString() + " " + line;
-  try { console.log(text); } catch (e) {}
-  if (logPath === null) return;
-  try {
-    if (fileSize(logPath) > MAX_LOG_BYTES) {
-      try { fileManager().removeItemAtPath_error_(logPath, null); } catch (e) {}
-    }
-    const f = new File(logPath, "a");
-    f.write(text + "\n");
-    f.flush();
-    f.close();
-  } catch (e) {}
-}
-
-initPaths();
-log("=== debug_menu start ===");
-log("frida=" + Frida.version + " arch=" + Process.arch + " pid=" + Process.id);
-
-function skipModule(m) {
-  const p = m.path || "";
-  if (p.indexOf("/usr/lib/") === 0) return true;
-  if (p.indexOf("/System/") === 0) return true;
-  if (p.indexOf("/Developer/") === 0) return true;
-  if (m.name === "LiveContainer") return true;
-  if (m.name === "LiveContainerShared") return true;
-  if (m.name.indexOf("Frida") !== -1) return true;
-  if (m.size < 1024 * 1024) return true;
-  return false;
-}
-
-function findGameModule() {
-  const mods = Process.enumerateModules();
-  let best = null;
-  const bundleId = (() => {
-    try { return String(ObjC.classes.NSBundle.mainBundle().bundleIdentifier()).toLowerCase(); } catch (e) { return ""; }
-  })();
-  const needle = bundleId.replace(/\./g, "");
-
-  for (let i = 0; i < mods.length; i++) {
-    const m = mods[i];
-    if (skipModule(m)) continue;
-    const hay = ((m.name || "") + " " + (m.path || "")).toLowerCase().replace(/\./g, "");
-    if (needle && hay.indexOf(needle) !== -1) {
-      gameModule = m;
-      return m;
-    }
-  }
-
-  for (let i = 0; i < mods.length; i++) {
-    const m = mods[i];
-    if (skipModule(m)) continue;
-    if (best === null || m.size > best.size) best = m;
-  }
-
-  gameModule = best || Process.mainModule;
-  return gameModule;
-}
-
-function readArgAsString(arg) {
-  if (arg === null || arg === undefined) return null;
-  if (arg.isNull()) return null;
-
-  try {
-    const obj = new ObjC.Object(arg);
-    const cls = obj.$className;
-    if (cls === "NSString" || cls === "NSMutableString" || /^NSString/.test(cls) || /^__NSCF/.test(cls) || /NSTaggedPointerString/.test(cls)) {
-      const s = obj.toString();
-      if (s !== null && s.length > 0) return s;
-    }
-  } catch (e) {}
-
-  try {
-    const s = arg.readUtf8String();
-    if (s !== null && s.length > 0 && s.length < 200) return s;
-  } catch (e) {}
-
-  try {
-    const p = arg.readPointer();
-    if (!p.isNull()) {
-      const s = p.readUtf8String();
-      if (s !== null && s.length > 0 && s.length < 200) return s;
-    }
-  } catch (e) {}
-
-  try {
-    const lenPtr = arg.add(0x4);
-    const dataPtr = arg.add(0x8);
-    const len = lenPtr.readU32();
-    if (len > 0 && len < 200) {
-      const p2 = dataPtr.readPointer();
-      if (!p2.isNull()) {
-        const s = p2.readUtf8String();
-        if (s !== null && s.length > 0 && s.length < 200) return s;
-      }
-    }
-  } catch (e) {}
-
-  return null;
-}
-
-function shouldForceTrue(name) {
-  if (!name) return false;
-  const lower = name.toLowerCase();
-  for (let i = 0; i < FORCE_TRUE_CONTAINS.length; i++) {
-    if (lower.indexOf(FORCE_TRUE_CONTAINS[i].toLowerCase()) !== -1) return true;
-  }
-  return false;
-}
-
-function hookGetBool() {
-  const addr = gameModule.base.add(RVA_GETBOOL);
-  log("hooking getBool @ " + addr + " (rva 0x" + RVA_GETBOOL.toString(16) + ")");
-  try {
-    Interceptor.attach(addr, {
-      onEnter: function (args) {
-        this.name = readArgAsString(args[0]);
-      },
-      onLeave: function (retval) {
-        const n = this.name;
-        if (n === null || n.length === 0) return;
-        getBoolCalls++;
-        const was = retval.toInt32();
-        const force = shouldForceTrue(n);
-        if (getBoolCalls <= 500 || force) {
-          log("getBool name=\"" + n + "\" was=" + was + (force ? " FORCE->1" : ""));
-        }
-        if (force && was !== 1) retval.replace(ptr(1));
-      }
-    });
-    getBoolAddr = addr;
-    log("getBool hook installed");
-  } catch (e) {
-    log("getBool hook FAILED: " + e.message);
-  }
-}
-
-function hookIsDev() {
-  const addr = gameModule.base.add(RVA_ISDEV);
-  log("hooking isDev @ " + addr + " (rva 0x" + RVA_ISDEV.toString(16) + ")");
-  try {
-    Interceptor.attach(addr, {
-      onLeave: function (retval) {
-        isDevCalls++;
-        const was = retval.toInt32();
-        if (was !== 1) {
-          retval.replace(ptr(1));
-          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") was=" + was + " FORCE->1");
-        } else {
-          if (isDevCalls <= 20) log("isDev called (#" + isDevCalls + ") already=1");
-        }
-      }
-    });
-    isDevAddr = addr;
-    log("isDev hook installed");
-  } catch (e) {
-    log("isDev hook FAILED: " + e.message);
-  }
-}
-
-function run() {
-  gameModule = findGameModule();
-  log("module: " + gameModule.name + " base=" + gameModule.base + " size=" + gameModule.size);
-  hookGetBool();
-  hookIsDev();
-  log("=== debug_menu armed ===");
-}
-
-setTimeout(run, 2000);
-
-setTimeout(function () {
-  log("timer 10s: getBool=" + getBoolCalls + " isDev=" + isDevCalls);
-}, 12000);
-
-setTimeout(function () {
-  log("timer 30s: getBool=" + getBoolCalls + " isDev=" + isDevCalls);
-}, 32000);
-
-rpc.exports = {
-  getBool_addr: function () { return getBoolAddr === null ? null : getBoolAddr.toString(); },
-  isDev_addr: function () { return isDevAddr === null ? null : isDevAddr.toString(); },
-  stats: function () { return { getBool: getBoolCalls, isDev: isDevCalls }; },
-  logPath: function () { return logPath; }
+// --- Известные оффсеты (100% подтверждённые) --------------------------------
+const KNOWN = {
+    'NativeFont::formatString':                      0x00b3fde8,
+    'MessageManager::receiveMessage':                0x0075cce0,
+    'LogicDataTables::initDataTable':                0x009a8f3c,
+    'LogicProjectileData::getIntValueFromColumn':    0x009cb098,
+    'Stage::setViewport':                            0x00ba17b8,
+    'GameButton::ctor':                              0x005425b0,
+    'HomePage::ctor':                                0x0086eb80,
+    'Character::ctor':                               0x009e3100,
+    'MessageManager::ctor':                          0x0075bb1c,
+    'MovieClip::ctor':                               0x00b5f028,
+    'NativeFont::ctor':                              0x00b3ec50,
+    'Stage::ctor':                                   0x00b9ee6c,
 };
+
+// --- Vtables (100% подтверждённые) ------------------------------------------
+const VTABLES = {
+    'GameButton':         0x00f9b0f8,
+    'HomePage':           0x00fe4008,
+    'Character':          0x00ff45c0,
+    'LogicDataTables':    0x00ff2478,
+    'LogicProjectileData':0x00ff3aa0,
+    'MessageManager':     0x00fd57e8,
+    'MovieClip':          0x01006150,
+    'NativeFont':         0x01005858,
+    'Stage':              0x010091b0,
+};
+
+// --- Настройки --------------------------------------------------------------
+const LOG_LIMIT         = 10;
+const MAX_SLOT_DUMPS    = 128;
+const RUNTIME_HOOK_ALL  = true;
+
+// --- Глобальное состояние ---------------------------------------------------
+let gBase        = null;
+let gSlide       = null;
+let gLog         = null;
+let gLogPath     = null;
+let gHooks       = {};
+let gCallCounts  = {};
+let gStarted     = false;
+let gLastFlush   = 0;
+
+// ============================================================================
+//  Работа с логом
+// ============================================================================
+function OXTs() {
+    const d = new Date();
+    const pad = (n, w) => String(n).padStart(w, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1, '0'.slice(0, 0) + '-' + pad(d.getDate(), 2) + ' ' +
+           pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) +
+           '.' + pad(d.getMilliseconds(), 3);
+}
+
+function resolveDocumentsPath() {
+    try {
+        const NSFileManager = ObjC.classes.NSFileManager;
+        const NSSearchPathForDirectoriesInDomains =
+            new NativeFunction(
+                Module.findExportByName(null, 'NSSearchPathForDirectoriesInDomains'),
+                'pointer', ['uint', 'uint', 'bool']
+            );
+        const arr = new ObjC.Object(NSSearchPathForDirectoriesInDomains(9, 1, 1)); // NSDocumentDirectory=9, NSUserDomainMask=1
+        if (arr.count() > 0) {
+            return arr.objectAtIndex_(0).toString();
+        }
+    } catch (e) { /* ignore */ }
+
+    try {
+        const NSBundle = ObjC.classes.NSBundle.mainBundle();
+        const path = NSBundle.bundlePath().toString();
+        if (path) return path + '/Documents';
+    } catch (e) { /* ignore */ }
+
+    try {
+        const NSHomeDirectory = new NativeFunction(
+            Module.findExportByName(null, 'NSHomeDirectory'),
+            'pointer', []
+        );
+        const home = new ObjC.Object(NSHomeDirectory()).toString();
+        return home + '/Documents';
+    } catch (e) { /* ignore */ }
+
+    return '/tmp';
+}
+
+function openLog() {
+    gLogPath = resolveDocumentsPath() + '/FRIDA_TRACE.txt';
+    try {
+        gLog = new File(gLogPath, 'w');
+        gLog.write('=== FRIDA TRACE START ' + OXTs() + ' ===\n');
+        gLog.flush();
+    } catch (e) {
+        gLog = null;
+        console.log('[!] cannot open log at ' + gLogPath + ': ' + e);
+    }
+}
+
+function LOG(line) {
+    const msg = '[' + OXTs() + '] ' + line;
+    console.log(msg);
+    if (gLog) {
+        try {
+            gLog.write(msg + '\n');
+            const now = Date.now();
+            if (now - gLastFlush > 1000) {
+                gLog.flush();
+                gLastFlush = now;
+            }
+        } catch (e) { /* ignore */ }
+    }
+}
+
+function OXFlush() {
+    if (!gLog) return;
+    try { gLog.flush(); } catch (e) {}
+}
+
+// ============================================================================
+//  Хелперы
+// ============================================================================
+function readPtr(addr) {
+    try { return addr.readPointer(); } catch (e) { return ptr('0'); }
+}
+
+function isInText(p) {
+    if (!p || p.isNull()) return false;
+    const v = p.toUInt32 ? p.toUInt32() : parseInt(p.toString(), 16);
+    return v >= (TEXT_LO + gSlide) && v < (TEXT_HI + gSlide);
+}
+
+function fileOffset(runtimePtr) {
+    if (!runtimePtr || runtimePtr.isNull()) return 0;
+    return parseInt(runtimePtr.toString(), 16) - gSlide - FILE_BASE;
+}
+
+function moduleByBasename(basename) {
+    const mods = Process.enumerateModules();
+    for (const m of mods) {
+        const name = m.name;
+        if (name === basename || name.endsWith('/' + basename)) return m;
+    }
+    return null;
+}
+
+// ============================================================================
+//  Динамический поиск бинарника
+// ============================================================================
+function findMainBinary() {
+    const candidates = ['Nulls Brawl', 'NullsBrawl', 'brawl', 'Brawl'];
+    for (const c of candidates) {
+        const m = moduleByBasename(c);
+        if (m) return m;
+    }
+
+    const mods = Process.enumerateModules();
+    let best = null;
+    for (const m of mods) {
+        const p = m.path || '';
+        if (p.indexOf('.app/') !== -1 &&
+            p.indexOf('.framework') === -1 &&
+            p.indexOf('.dylib') === -1 &&
+            p.indexOf('.bundle') === -1) {
+            if (!best || m.size > best.size) best = m;
+        }
+    }
+    return best;
+}
+
+// ============================================================================
+//  Установка хуков
+// ============================================================================
+function installHook(name, fileOffset, onEnterFn) {
+    if (!gBase) return false;
+    const target = gBase.add(fileOffset);
+    try {
+        const origFn = new NativeFunction(target, 'void', ['pointer']);
+        Interceptor.attach(target, {
+            onEnter: function (args) {
+                if (onEnterFn) onEnterFn(args, this);
+            }
+        });
+        gHooks[name] = { target: target, offset: fileOffset };
+        LOG('HOOK OK  ' + name + '  file=0x' + fileOffset.toString(16) +
+            '  rt=' + target);
+        return true;
+    } catch (e) {
+        LOG('HOOK FAIL ' + name + '  file=0x' + fileOffset.toString(16) +
+            '  err=' + e);
+        return false;
+    }
+}
+
+function shouldLog(name) {
+    if (!gCallCounts[name]) gCallCounts[name] = 0;
+    gCallCounts[name]++;
+    return gCallCounts[name] <= LOG_LIMIT;
+}
+
+function installAllKnownHooks() {
+    LOG('=== INSTALLING KNOWN HOOKS ===');
+
+    installHook('GameButton::ctor', KNOWN['GameButton::ctor'], (args, ctx) => {
+        if (!shouldLog('GameButton::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK GameButton::ctor #' + gCallCounts['GameButton::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
+
+    installHook('HomePage::ctor', KNOWN['HomePage::ctor'], (args, ctx) => {
+        if (!shouldLog('HomePage::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK HomePage::ctor #' + gCallCounts['HomePage::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
+
+    installHook('Character::ctor', KNOWN['Character::ctor'], (args, ctx) => {
+        if (!shouldLog('Character::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK Character::ctor #' + gCallCounts['Character::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
+
+    installHook('MessageManager::receiveMessage',
+        KNOWN['MessageManager::receiveMessage'],
+        (args, ctx) => {
+            if (!shouldLog('MessageManager::receiveMessage')) return;
+            LOG('BRK MessageManager::receiveMessage #' +
+                gCallCounts['MessageManager::receiveMessage'] +
+                ' self=' + args[0] + ' msg=' + args[1]);
+        });
+
+    installHook('NativeFont::formatString',
+        KNOWN['NativeFont::formatString'],
+        (args, ctx) => {
+            if (!shouldLog('NativeFont::formatString')) return;
+            LOG('BRK NativeFont::formatString #' +
+                gCallCounts['NativeFont::formatString'] +
+                ' self=' + args[0] + ' str=' + args[1]);
+        });
+
+    installHook('LogicDataTables::initDataTable',
+        KNOWN['LogicDataTables::initDataTable'],
+        (args, ctx) => {
+            if (!shouldLog('LogicDataTables::initDataTable')) return;
+            LOG('BRK LogicDataTables::initDataTable #' +
+                gCallCounts['LogicDataTables::initDataTable'] +
+                ' self=' + args[0] + ' a=' + args[1]);
+        });
+
+    installHook('Stage::setViewport', KNOWN['Stage::setViewport'],
+        (args, ctx) => {
+            if (!shouldLog('Stage::setViewport')) return;
+            LOG('BRK Stage::setViewport #' + gCallCounts['Stage::setViewport'] +
+                ' self=' + args[0]);
+        });
+
+    installHook('MessageManager::ctor', KNOWN['MessageManager::ctor'],
+        (args, ctx) => {
+            if (!shouldLog('MessageManager::ctor')) return;
+            const self = args[0];
+            const vt = readPtr(self);
+            LOG('BRK MessageManager::ctor #' + gCallCounts['MessageManager::ctor'] +
+                ' self=' + self + ' vt=' + vt +
+                ' file=0x' + fileOffset(vt).toString(16));
+        });
+
+    installHook('MovieClip::ctor', KNOWN['MovieClip::ctor'],
+        (args, ctx) => {
+            if (!shouldLog('MovieClip::ctor')) return;
+            const self = args[0];
+            const vt = readPtr(self);
+            LOG('BRK MovieClip::ctor #' + gCallCounts['MovieClip::ctor'] +
+                ' self=' + self + ' vt=' + vt +
+                ' file=0x' + fileOffset(vt).toString(16));
+        });
+
+    installHook('NativeFont::ctor', KNOWN['NativeFont::ctor'],
+        (args, ctx) => {
+            if (!shouldLog('NativeFont::ctor')) return;
+            const self = args[0];
+            const vt = readPtr(self);
+            LOG('BRK NativeFont::ctor #' + gCallCounts['NativeFont::ctor'] +
+                ' self=' + self + ' vt=' + vt +
+                ' file=0x' + fileOffset(vt).toString(16));
+        });
+
+    installHook('Stage::ctor', KNOWN['Stage::ctor'], (args, ctx) => {
+        if (!shouldLog('Stage::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK Stage::ctor #' + gCallCounts['Stage::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
+}
+
+// ============================================================================
+//  Дамп vtables (все слоты с file-offsets)
+// ============================================================================
+function dumpVtable(clsName, vtFileOffset) {
+    const vt = gBase.add(vtFileOffset);
+    LOG('=== VT ' + clsName + ' file=0x' + vtFileOffset.toString(16) +
+        ' rt=' + vt + ' ===');
+
+    for (let i = 0; i < MAX_SLOT_DUMPS; i++) {
+        const slot = vt.add(i * 8);
+        let raw;
+        try { raw = slot.readPointer(); } catch (e) { break; }
+        if (!raw || raw.isNull()) break;
+
+        const fnFile = fileOffset(raw);
+        if (fnFile < TEXT_LO || fnFile >= TEXT_HI) break;
+
+        LOG('  [' + String(i).padStart(3, ' ') + '] file=0x' +
+            fnFile.toString(16) + '  rt=' + raw);
+    }
+}
+
+function dumpAllVtables() {
+    LOG('=== DUMPING ALL KNOWN VTABLES ===');
+    for (const cls of Object.keys(VTABLES)) {
+        dumpVtable(cls, VTABLES[cls]);
+    }
+}
+
+// ============================================================================
+//  Скан памяти: поиск vtable-runs в data-секции
+// ============================================================================
+function scanDataForVtableRuns() {
+    LOG('=== SCANNING DATA FOR VTABLE RUNS ===');
+    const totalSlots = (DATA_HI - DATA_LO) / 8;
+    const CHUNK = 0x10000;
+
+    let runLen = 0;
+    let runStart = 0;
+    let prevSlot = 0;
+    let totalRuns = 0;
+
+    try {
+        for (let off = 0; off < (DATA_HI - DATA_LO); off += CHUNK) {
+            const chunkSize = Math.min(CHUNK, DATA_HI - DATA_LO - off);
+            const fileAddr = DATA_LO + off;
+            const rtAddr = gBase.add(fileAddr);
+
+            let buf;
+            try { buf = rtAddr.readByteArray(chunkSize); } catch (e) { break; }
+            if (!buf) break;
+
+            const n = Math.floor(chunkSize / 8);
+            for (let i = 0; i < n; i++) {
+                const slotFile = fileAddr + i * 8;
+                let raw;
+                try { raw = rtAddr.add(i * 8).readPointer(); } catch (e) { continue; }
+                if (!raw || raw.isNull()) {
+                    if (runLen >= 4) {
+                        totalRuns++;
+                        LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
+                    }
+                    runLen = 0;
+                    continue;
+                }
+                const fnFile = fileOffset(raw);
+                const valid = (fnFile >= TEXT_LO && fnFile < TEXT_HI);
+                if (valid) {
+                    if (runLen === 0) { runStart = slotFile; runLen = 1; }
+                    else if (slotFile === prevSlot + 8) { runLen++; }
+                    else {
+                        if (runLen >= 4) {
+                            totalRuns++;
+                            LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
+                        }
+                        runStart = slotFile; runLen = 1;
+                    }
+                    prevSlot = slotFile;
+                } else {
+                    if (runLen >= 4) {
+                        totalRuns++;
+                        LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
+                    }
+                    runLen = 0;
+                }
+            }
+        }
+        if (runLen >= 4) {
+            totalRuns++;
+            LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
+        }
+    } catch (e) {
+        LOG('scan err: ' + e);
+    }
+    LOG('total vtable-like runs: ' + totalRuns);
+}
+
+// ============================================================================
+//  Скан .text: adrp+add → map для поиска ctor'ов
+// ============================================================================
+function scanAdrpAddMap() {
+    LOG('=== SCANNING .text FOR adrp+add ===');
+    const map = {};
+    const CHUNK = 0x100000;
+
+    for (let off = 0; off < (TEXT_HI - TEXT_LO); off += CHUNK) {
+        const chunkSize = Math.min(CHUNK, TEXT_HI - TEXT_LO - off);
+        const fileAddr = TEXT_LO + off;
+        const rtAddr = gBase.add(fileAddr);
+
+        let buf;
+        try { buf = rtAddr.readByteArray(chunkSize); } catch (e) { break; }
+        if (!buf) break;
+
+        const dv = new DataView(buf);
+        const words = Math.floor(chunkSize / 4);
+        let prevPc = 0, prevRd = 0, prevPage = 0;
+
+        for (let i = 0; i < words; i++) {
+            const pcFile = fileAddr + i * 4;
+            const w = dv.getUint32(i * 4, true);
+
+            const isAdrp = (w & 0x9F000000) === 0x90000000;
+            if (isAdrp) {
+                prevPc = pcFile;
+                prevRd = w & 0x1F;
+                const immlo = (w >>> 29) & 3;
+                const immhi = (w >>> 5) & 0x7FFFF;
+                let imm = (immhi << 2) | immlo;
+                if (imm & (1 << 20)) imm -= (1 << 21);
+                prevPage = (pcFile & ~0xFFF) + (imm << 12);
+                continue;
+            }
+
+            if (prevPc && (w & 0xFF800000) === 0x91000000) {
+                const rd = w & 0x1F;
+                const rn = (w >>> 5) & 0x1F;
+                let imm12 = (w >>> 10) & 0xFFF;
+                const sh = (w >>> 22) & 1;
+                if (sh) imm12 <<= 12;
+                if (rd === prevRd && rn === prevRd) {
+                    const target = prevPage + imm12;
+                    if (target >= FILE_BASE && target < DATA_HI + 0x100000) {
+                        if (!map[target]) map[target] = [];
+                        if (map[target].length < 16) map[target].push(prevPc);
+                    }
+                }
+            }
+            prevPc = 0;
+        }
+    }
+
+    const keys = Object.keys(map).length;
+    LOG('adrp+add map entries: ' + keys);
+    return map;
+}
+
+// ============================================================================
+//  Поиск ctor'ов через map
+// ============================================================================
+function findCtorsViaAdrpMap(adrpMap) {
+    LOG('=== FINDING CTORS VIA adrp+add ===');
+    for (const cls of Object.keys(VTABLES)) {
+        const vtFile = VTABLES[cls];
+        const refs = adrpMap[vtFile];
+        if (!refs || refs.length === 0) {
+            LOG('  ' + cls + ': no xrefs to vtable');
+            continue;
+        }
+        LOG('  ' + cls + ': ' + refs.length + ' xref(s) to vtable 0x' +
+            vtFile.toString(16));
+        for (const pc of refs) {
+            LOG('    ctor candidate @ file=0x' + pc.toString(16) +
+                '  rt=' + gBase.add(pc));
+        }
+    }
+}
+
+// ============================================================================
+//  Периодический дамп регистров при срабатывании хука
+// ============================================================================
+function dumpContext(ctx, name) {
+    try {
+        LOG('  ctx ' + name + ' x0=' + ctx.x0 + ' x1=' + ctx.x1 +
+            ' x2=' + ctx.x2 + ' x8=' + ctx.x8 +
+            ' pc=' + ctx.pc + ' lr=' + ctx.lr);
+    } catch (e) {}
+}
+
+// ============================================================================
+//  Точка входа
+// ============================================================================
+function main() {
+    if (gStarted) { LOG('already started'); return; }
+    gStarted = true;
+
+    openLog();
+
+    const mainBin = findMainBinary();
+    if (!mainBin) {
+        LOG('FATAL: cannot locate main binary');
+        OXFlush();
+        return;
+    }
+
+    gBase = mainBin.base;
+    gSlide = parseInt(gBase.toString(), 16) - FILE_BASE;
+
+    LOG('=== FRIDA TRACE v1 ===');
+    LOG('main  = ' + mainBin.name);
+    LOG('path  = ' + mainBin.path);
+    LOG('base  = ' + gBase);
+    LOG('slide = 0x' + gSlide.toString(16));
+    LOG('log   = ' + gLogPath);
+    LOG('');
+
+    if (RUNTIME_HOOK_ALL) {
+        installAllKnownHooks();
+        LOG('');
+    }
+
+    dumpAllVtables();
+    LOG('');
+
+    const adrpMap = scanAdrpAddMap();
+    LOG('');
+
+    findCtorsViaAdrpMap(adrpMap);
+    LOG('');
+
+    scanDataForVtableRuns();
+    LOG('');
+
+    LOG('=== TRACE READY ===');
+    OXFlush();
+
+    setInterval(OXFlush, 3000);
+}
+
+setTimeout(main, 2000);
