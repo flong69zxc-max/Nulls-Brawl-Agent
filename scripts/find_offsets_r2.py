@@ -17,8 +17,6 @@ DETAIL = os.path.join(WS, "ctors_detailed.log")
 BUDGET = 1800
 START = time.time()
 
-# (key, kind_hint)
-# kind_hint: method | ctor | singleton | global | skip
 TARGETS = [
     ("String.ctor", "ctor"),
     ("String.equals", "method"),
@@ -168,32 +166,9 @@ TARGETS = [
     ("FriendEntry.decode", "method"),
     ("PlayerProfile.decode", "method"),
     ("AllianceMemberEntry.decode", "method"),
-    ("Messages.ClientHelloMessage", "skip"),
-    ("Messages.LoginMessage", "skip"),
-    ("Messages.TeamMemberStatusMessage", "skip"),
-    ("Messages.PlayAgainMessage_PlayAgainMessage", "skip"),
-    ("Messages.TeamChatMessage_encode", "skip"),
-    ("Messages.TeamChatMessage", "skip"),
-    ("Messages.TeamInviteMessage", "skip"),
-    ("Messages.TeamAllianceMemberInviteMessage", "skip"),
-    ("Messages.StartSpectateMessage", "skip"),
-    ("Messages.PlayerStatusMessage", "skip"),
-    ("Messages.LatencyTestMessage", "skip"),
-    ("Messages.SendLatencyTestResultsMessage", "skip"),
-    ("Other.ModifierOffset", "skip"),
-    ("Other.EmojiAnimations", "skip"),
-    ("Other.unknownStringOffset", "skip"),
-    ("Other.onclickMultiLineInputOkFunc", "skip"),
-    ("Other.onclickInputOkFunc", "skip"),
-    ("Other.BattleEndScreen_enterAddr", "skip"),
-    ("Other.NativeDialog", "skip"),
-    ("Other.CustomInputOffset1", "skip"),
-    ("Other.CustomInputOffset2", "skip"),
-    ("Other.SpectateWithIDOffset1", "skip"),
-    ("Other.SpectateWithIDOffset2", "skip"),
 ]
 
-# Все классы, для которых ищем vtable/ctor
+# Классы, для которых ищем vtable и ctor
 CLASSES = sorted(set([t[0].split(".")[0] for t in TARGETS if "." in t[0]]))
 
 _log_fh = None
@@ -441,7 +416,7 @@ def main():
     except Exception:
         _log_fh = None
 
-    log("=== find_offsets_r2 v17 (user targets) ===")
+    log("=== find_offsets_r2 v18 (SCRE format) ===")
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
@@ -458,7 +433,6 @@ def main():
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
     if not text_b:
-        log("[!] no .text")
         return
     ts, te = text_b
     log("[*] .text: 0x%x - 0x%x" % (ts, te))
@@ -487,13 +461,11 @@ def main():
     log("[*] adrp_add=%d prologs=%d %.1fs"
         % (len(adrp_add), len(prologs), time.time() - t0))
 
-    # построим str_addr → [pc] один раз
     str_addr_to_pc = {}
     for pc, tgt in adrp_add:
         str_addr_to_pc.setdefault(tgt, []).append(pc)
 
-    # индекс Class::method из строк
-    class_method_funcs = {}  # "Class::method" -> func_addr
+    class_method_funcs = {}
     for s, al in str_index.items():
         idx = s.find("::")
         if idx <= 0:
@@ -517,16 +489,13 @@ def main():
                 break
     log("[*] Class::method funcs: %d" % len(class_method_funcs))
 
-    # vtable по классам
     class_to_vtable = {}
     all_vt_starts = set()
     for cls in CLASSES:
-        # strings of class
         anchor_funcs = set()
         for key, f in class_method_funcs.items():
             if key.startswith(cls + "::"):
                 anchor_funcs.add(f)
-        # strings exact match (asserts)
         for s, al in str_index.items():
             if s == cls or s.startswith(cls + "::"):
                 for sa in al:
@@ -545,7 +514,6 @@ def main():
             all_vt_starts.add(best[0])
     log("[*] class→vtable: %d" % len(class_to_vtable))
 
-    # xref на vtable → ctor
     vt_to_ctors = {}
     for pc, tgt in adrp_add:
         if tgt in all_vt_starts:
@@ -553,19 +521,16 @@ def main():
             vt_to_ctors.setdefault(tgt, set()).add(f)
     log("[*] vtables with ctor xref: %d" % len(vt_to_ctors))
 
-    # resolve каждого таргета
     results = {}
     unresolved = []
     for key, kind in TARGETS:
         if kind == "skip":
-            unresolved.append((key, "skip"))
             continue
         if "." not in key:
             unresolved.append((key, "no_dot"))
             continue
         cls, method = key.split(".", 1)
 
-        # ctor → через vtable
         if kind == "ctor" or method == "ctor":
             vt = class_to_vtable.get(cls)
             if vt:
@@ -583,7 +548,6 @@ def main():
                     if best_ctor is not None:
                         results[key] = best_ctor - base
                         continue
-            # fallback: строка Class::Class
             for pattern in (cls + "::" + cls, cls + "::ctor"):
                 if pattern in class_method_funcs:
                     results[key] = class_method_funcs[pattern] - base
@@ -593,7 +557,6 @@ def main():
             unresolved.append((key, "no_ctor"))
             continue
 
-        # singleton → строка Class::getInstance / instance / sharedInstance
         if kind == "singleton":
             for cand in (cls + "::getInstance", cls + "::instance",
                          cls + "::sharedInstance", cls + "::getInstanceCtor"):
@@ -605,7 +568,6 @@ def main():
             unresolved.append((key, "no_singleton"))
             continue
 
-        # global (поле-указатель) — ищем через строку Class::method
         if kind == "global":
             for cand in (cls + "::" + method, cls + "::get" + method,
                          cls + "::instance"):
@@ -617,14 +579,11 @@ def main():
             unresolved.append((key, "no_global"))
             continue
 
-        # method → строка Class::method
         if kind == "method":
-            # точное совпадение
             cand = cls + "::" + method
             if cand in class_method_funcs:
                 results[key] = class_method_funcs[cand] - base
                 continue
-            # перебор похожих: setTextAndScaleIfNecessary → setTextAndScale...
             found = None
             for k, f in class_method_funcs.items():
                 if k.startswith(cls + "::") and \
@@ -634,7 +593,6 @@ def main():
             if found:
                 results[key] = found - base
                 continue
-            # префиксное
             for k, f in class_method_funcs.items():
                 if k.startswith(cls + "::" + method):
                     found = f
@@ -645,22 +603,33 @@ def main():
             unresolved.append((key, "no_string_match"))
             continue
 
-        unresolved.append((key, "unknown_kind"))
-
     r2.quit()
 
-    # пишем offsets_resolved.js
+    # пишем offsets_resolved.js в формате SCRE
     try:
         with open(OUT, "w") as fh:
-            fh.write("// v17 auto-resolved\n")
+            fh.write("// v18 auto-resolved (SCRE format)\n")
             fh.write("// base=0x%x\n" % base)
             fh.write("// resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
             fh.write("export const offsets = Object.freeze({\n")
             for key, _ in TARGETS:
+                js_key = key.replace(".", "_")
                 if key in results:
-                    fh.write("    %s: 0x%x,\n" % (key.replace(".", "_"), results[key]))
+                    fh.write("    %s: 0x%x,\n" % (js_key, results[key]))
                 else:
-                    fh.write("    // %s: unresolved\n" % key.replace(".", "_"))
+                    fh.write("    // %s: unresolved\n" % js_key)
+            fh.write("\n    // --- ctors via vtable ---\n")
+            for cls in sorted(class_to_vtable):
+                vt_start, slots = class_to_vtable[cls]
+                for ctor in vt_to_ctors.get(vt_start, []):
+                    info = analyze_at(text, ts, ctor)
+                    if info and info["n_bl"] >= 5:
+                        fh.write("    %s_ctor: 0x%x,\n" % (cls, ctor - base))
+                        break
+            fh.write("\n    // --- vtable addresses ---\n")
+            for cls in sorted(class_to_vtable):
+                vt_start, slots = class_to_vtable[cls]
+                fh.write("    VTABLE_%s: 0x%x,\n" % (cls.upper(), vt_start - base))
             fh.write("});\n")
     except Exception as e:
         log("out: %s" % e)
@@ -685,7 +654,7 @@ def main():
     # отчёт
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# v17 report\n")
+            fh.write("# v18 report\n")
             fh.write("# base=0x%x\n" % base)
             fh.write("# resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
             fh.write("## resolved:\n")
