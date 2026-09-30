@@ -75,21 +75,38 @@ jobs:
           unzip -oq ipa_cache/bs.ipa -d extract
           APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
           test -n "$APP_DIR"
-          BIN="$APP_DIR/Nulls Brawl"
+          echo "APP_DIR=$APP_DIR"
+
+          PLIST="$APP_DIR/Info.plist"
+          test -f "$PLIST" || { echo "Info.plist missing"; ls -la "$APP_DIR"; exit 1; }
+
+          EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
+          echo "CFBundleExecutable=$EXEC_NAME"
+
+          BIN="$APP_DIR/$EXEC_NAME"
           if [ ! -f "$BIN" ]; then
+            echo "not found at $BIN, scanning .app root for Mach-O executable"
             BIN=""
             for f in "$APP_DIR"/*; do
               [ -f "$f" ] || continue
-              case "$f" in
-                *.dylib|*.png|*.jpg|*.jpeg|*.plist|*.car|*.ttf|*.otf|*.json|*.xml|*.txt|*.html) continue ;;
-              esac
-              if file "$f" | grep -qi "Mach-O"; then BIN="$f"; break; fi
+              if file "$f" | grep -q "Mach-O 64-bit executable"; then
+                BIN="$f"
+                break
+              fi
             done
           fi
-          test -n "$BIN"
+          test -n "$BIN" || { echo "no Mach-O executable found"; ls -la "$APP_DIR"; exit 1; }
           test -f "$BIN"
-          file "$BIN"
+
+          FILE_OUT=$(file "$BIN")
+          echo "$FILE_OUT"
+          case "$FILE_OUT" in
+            *"Mach-O 64-bit executable"*) ;;
+            *) echo "wrong file type: $FILE_OUT"; exit 1 ;;
+          esac
+
           cp "$BIN" /tmp/brawl_bin
+          file /tmp/brawl_bin
 
       - uses: actions/upload-artifact@v4
         with:
