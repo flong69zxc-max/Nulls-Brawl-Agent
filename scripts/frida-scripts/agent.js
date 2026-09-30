@@ -1,18 +1,11 @@
-// ============================================================================
-// frida_dump.js — рантайм-анализ Nulls Brawl через Frida Gadget
-// Автор: Nulls-Brawl-Agent
-// ============================================================================
-
 'use strict';
 
-// --- Базовые адреса (v19) ---------------------------------------------------
 const FILE_BASE = 0x100000000;
 const TEXT_LO   = 0x100004000;
 const TEXT_HI   = 0x100D8AF60;
 const DATA_LO   = 0x100F74000;
 const DATA_HI   = 0x101170000;
 
-// --- Известные оффсеты (100% подтверждённые) --------------------------------
 const KNOWN = {
     'NativeFont::formatString':                      0x00b3fde8,
     'MessageManager::receiveMessage':                0x0075cce0,
@@ -28,7 +21,6 @@ const KNOWN = {
     'Stage::ctor':                                   0x00b9ee6c,
 };
 
-// --- Vtables (100% подтверждённые) ------------------------------------------
 const VTABLES = {
     'GameButton':         0x00f9b0f8,
     'HomePage':           0x00fe4008,
@@ -41,51 +33,45 @@ const VTABLES = {
     'Stage':              0x010091b0,
 };
 
-// --- Настройки --------------------------------------------------------------
-const LOG_LIMIT         = 10;
-const MAX_SLOT_DUMPS    = 128;
-const RUNTIME_HOOK_ALL  = true;
+const LOG_LIMIT        = 10;
+const MAX_SLOT_DUMPS   = 128;
+const RUNTIME_HOOK_ALL = true;
 
-// --- Глобальное состояние ---------------------------------------------------
-let gBase        = null;
-let gSlide       = null;
-let gLog         = null;
-let gLogPath     = null;
-let gHooks       = {};
-let gCallCounts  = {};
-let gStarted     = false;
-let gLastFlush   = 0;
+let gBase       = null;
+let gSlide      = null;
+let gLog        = null;
+let gLogPath    = null;
+let gHooks      = {};
+let gCallCounts = {};
+let gStarted    = false;
+let gLastFlush  = 0;
 
-// ============================================================================
-//  Работа с логом
-// ============================================================================
 function OXTs() {
     const d = new Date();
     const pad = (n, w) => String(n).padStart(w, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1, '0'.slice(0, 0) + '-' + pad(d.getDate(), 2) + ' ' +
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2) + ' ' +
            pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) +
            '.' + pad(d.getMilliseconds(), 3);
 }
 
 function resolveDocumentsPath() {
     try {
-        const NSFileManager = ObjC.classes.NSFileManager;
         const NSSearchPathForDirectoriesInDomains =
             new NativeFunction(
                 Module.findExportByName(null, 'NSSearchPathForDirectoriesInDomains'),
                 'pointer', ['uint', 'uint', 'bool']
             );
-        const arr = new ObjC.Object(NSSearchPathForDirectoriesInDomains(9, 1, 1)); // NSDocumentDirectory=9, NSUserDomainMask=1
+        const arr = new ObjC.Object(NSSearchPathForDirectoriesInDomains(9, 1, 1));
         if (arr.count() > 0) {
             return arr.objectAtIndex_(0).toString();
         }
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
 
     try {
         const NSBundle = ObjC.classes.NSBundle.mainBundle();
         const path = NSBundle.bundlePath().toString();
         if (path) return path + '/Documents';
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
 
     try {
         const NSHomeDirectory = new NativeFunction(
@@ -94,7 +80,7 @@ function resolveDocumentsPath() {
         );
         const home = new ObjC.Object(NSHomeDirectory()).toString();
         return home + '/Documents';
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
 
     return '/tmp';
 }
@@ -122,7 +108,7 @@ function LOG(line) {
                 gLog.flush();
                 gLastFlush = now;
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
     }
 }
 
@@ -131,17 +117,8 @@ function OXFlush() {
     try { gLog.flush(); } catch (e) {}
 }
 
-// ============================================================================
-//  Хелперы
-// ============================================================================
 function readPtr(addr) {
     try { return addr.readPointer(); } catch (e) { return ptr('0'); }
-}
-
-function isInText(p) {
-    if (!p || p.isNull()) return false;
-    const v = p.toUInt32 ? p.toUInt32() : parseInt(p.toString(), 16);
-    return v >= (TEXT_LO + gSlide) && v < (TEXT_HI + gSlide);
 }
 
 function fileOffset(runtimePtr) {
@@ -158,9 +135,6 @@ function moduleByBasename(basename) {
     return null;
 }
 
-// ============================================================================
-//  Динамический поиск бинарника
-// ============================================================================
 function findMainBinary() {
     const candidates = ['Nulls Brawl', 'NullsBrawl', 'brawl', 'Brawl'];
     for (const c of candidates) {
@@ -182,25 +156,21 @@ function findMainBinary() {
     return best;
 }
 
-// ============================================================================
-//  Установка хуков
-// ============================================================================
-function installHook(name, fileOffset, onEnterFn) {
+function installHook(name, fileOffsetVal, onEnterFn) {
     if (!gBase) return false;
-    const target = gBase.add(fileOffset);
+    const target = gBase.add(fileOffsetVal);
     try {
-        const origFn = new NativeFunction(target, 'void', ['pointer']);
         Interceptor.attach(target, {
             onEnter: function (args) {
                 if (onEnterFn) onEnterFn(args, this);
             }
         });
-        gHooks[name] = { target: target, offset: fileOffset };
-        LOG('HOOK OK  ' + name + '  file=0x' + fileOffset.toString(16) +
+        gHooks[name] = { target: target, offset: fileOffsetVal };
+        LOG('HOOK OK  ' + name + '  file=0x' + fileOffsetVal.toString(16) +
             '  rt=' + target);
         return true;
     } catch (e) {
-        LOG('HOOK FAIL ' + name + '  file=0x' + fileOffset.toString(16) +
+        LOG('HOOK FAIL ' + name + '  file=0x' + fileOffsetVal.toString(16) +
             '  err=' + e);
         return false;
     }
@@ -215,7 +185,7 @@ function shouldLog(name) {
 function installAllKnownHooks() {
     LOG('=== INSTALLING KNOWN HOOKS ===');
 
-    installHook('GameButton::ctor', KNOWN['GameButton::ctor'], (args, ctx) => {
+    installHook('GameButton::ctor', KNOWN['GameButton::ctor'], (args) => {
         if (!shouldLog('GameButton::ctor')) return;
         const self = args[0];
         const vt = readPtr(self);
@@ -224,7 +194,7 @@ function installAllKnownHooks() {
             ' file=0x' + fileOffset(vt).toString(16));
     });
 
-    installHook('HomePage::ctor', KNOWN['HomePage::ctor'], (args, ctx) => {
+    installHook('HomePage::ctor', KNOWN['HomePage::ctor'], (args) => {
         if (!shouldLog('HomePage::ctor')) return;
         const self = args[0];
         const vt = readPtr(self);
@@ -233,7 +203,7 @@ function installAllKnownHooks() {
             ' file=0x' + fileOffset(vt).toString(16));
     });
 
-    installHook('Character::ctor', KNOWN['Character::ctor'], (args, ctx) => {
+    installHook('Character::ctor', KNOWN['Character::ctor'], (args) => {
         if (!shouldLog('Character::ctor')) return;
         const self = args[0];
         const vt = readPtr(self);
@@ -243,8 +213,7 @@ function installAllKnownHooks() {
     });
 
     installHook('MessageManager::receiveMessage',
-        KNOWN['MessageManager::receiveMessage'],
-        (args, ctx) => {
+        KNOWN['MessageManager::receiveMessage'], (args) => {
             if (!shouldLog('MessageManager::receiveMessage')) return;
             LOG('BRK MessageManager::receiveMessage #' +
                 gCallCounts['MessageManager::receiveMessage'] +
@@ -252,8 +221,7 @@ function installAllKnownHooks() {
         });
 
     installHook('NativeFont::formatString',
-        KNOWN['NativeFont::formatString'],
-        (args, ctx) => {
+        KNOWN['NativeFont::formatString'], (args) => {
             if (!shouldLog('NativeFont::formatString')) return;
             LOG('BRK NativeFont::formatString #' +
                 gCallCounts['NativeFont::formatString'] +
@@ -261,52 +229,47 @@ function installAllKnownHooks() {
         });
 
     installHook('LogicDataTables::initDataTable',
-        KNOWN['LogicDataTables::initDataTable'],
-        (args, ctx) => {
+        KNOWN['LogicDataTables::initDataTable'], (args) => {
             if (!shouldLog('LogicDataTables::initDataTable')) return;
             LOG('BRK LogicDataTables::initDataTable #' +
                 gCallCounts['LogicDataTables::initDataTable'] +
                 ' self=' + args[0] + ' a=' + args[1]);
         });
 
-    installHook('Stage::setViewport', KNOWN['Stage::setViewport'],
-        (args, ctx) => {
-            if (!shouldLog('Stage::setViewport')) return;
-            LOG('BRK Stage::setViewport #' + gCallCounts['Stage::setViewport'] +
-                ' self=' + args[0]);
-        });
+    installHook('Stage::setViewport', KNOWN['Stage::setViewport'], (args) => {
+        if (!shouldLog('Stage::setViewport')) return;
+        LOG('BRK Stage::setViewport #' + gCallCounts['Stage::setViewport'] +
+            ' self=' + args[0]);
+    });
 
-    installHook('MessageManager::ctor', KNOWN['MessageManager::ctor'],
-        (args, ctx) => {
-            if (!shouldLog('MessageManager::ctor')) return;
-            const self = args[0];
-            const vt = readPtr(self);
-            LOG('BRK MessageManager::ctor #' + gCallCounts['MessageManager::ctor'] +
-                ' self=' + self + ' vt=' + vt +
-                ' file=0x' + fileOffset(vt).toString(16));
-        });
+    installHook('MessageManager::ctor', KNOWN['MessageManager::ctor'], (args) => {
+        if (!shouldLog('MessageManager::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK MessageManager::ctor #' + gCallCounts['MessageManager::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
 
-    installHook('MovieClip::ctor', KNOWN['MovieClip::ctor'],
-        (args, ctx) => {
-            if (!shouldLog('MovieClip::ctor')) return;
-            const self = args[0];
-            const vt = readPtr(self);
-            LOG('BRK MovieClip::ctor #' + gCallCounts['MovieClip::ctor'] +
-                ' self=' + self + ' vt=' + vt +
-                ' file=0x' + fileOffset(vt).toString(16));
-        });
+    installHook('MovieClip::ctor', KNOWN['MovieClip::ctor'], (args) => {
+        if (!shouldLog('MovieClip::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK MovieClip::ctor #' + gCallCounts['MovieClip::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
 
-    installHook('NativeFont::ctor', KNOWN['NativeFont::ctor'],
-        (args, ctx) => {
-            if (!shouldLog('NativeFont::ctor')) return;
-            const self = args[0];
-            const vt = readPtr(self);
-            LOG('BRK NativeFont::ctor #' + gCallCounts['NativeFont::ctor'] +
-                ' self=' + self + ' vt=' + vt +
-                ' file=0x' + fileOffset(vt).toString(16));
-        });
+    installHook('NativeFont::ctor', KNOWN['NativeFont::ctor'], (args) => {
+        if (!shouldLog('NativeFont::ctor')) return;
+        const self = args[0];
+        const vt = readPtr(self);
+        LOG('BRK NativeFont::ctor #' + gCallCounts['NativeFont::ctor'] +
+            ' self=' + self + ' vt=' + vt +
+            ' file=0x' + fileOffset(vt).toString(16));
+    });
 
-    installHook('Stage::ctor', KNOWN['Stage::ctor'], (args, ctx) => {
+    installHook('Stage::ctor', KNOWN['Stage::ctor'], (args) => {
         if (!shouldLog('Stage::ctor')) return;
         const self = args[0];
         const vt = readPtr(self);
@@ -316,9 +279,6 @@ function installAllKnownHooks() {
     });
 }
 
-// ============================================================================
-//  Дамп vtables (все слоты с file-offsets)
-// ============================================================================
 function dumpVtable(clsName, vtFileOffset) {
     const vt = gBase.add(vtFileOffset);
     LOG('=== VT ' + clsName + ' file=0x' + vtFileOffset.toString(16) +
@@ -345,9 +305,6 @@ function dumpAllVtables() {
     }
 }
 
-// ============================================================================
-//  Скан памяти: поиск vtable-runs в data-секции
-// ============================================================================
 function scanDataForVtableRuns() {
     LOG('=== SCANNING DATA FOR VTABLE RUNS ===');
     const totalSlots = (DATA_HI - DATA_LO) / 8;
@@ -364,15 +321,18 @@ function scanDataForVtableRuns() {
             const fileAddr = DATA_LO + off;
             const rtAddr = gBase.add(fileAddr);
 
-            let buf;
-            try { buf = rtAddr.readByteArray(chunkSize); } catch (e) { break; }
-            if (!buf) break;
-
             const n = Math.floor(chunkSize / 8);
             for (let i = 0; i < n; i++) {
                 const slotFile = fileAddr + i * 8;
                 let raw;
-                try { raw = rtAddr.add(i * 8).readPointer(); } catch (e) { continue; }
+                try { raw = rtAddr.add(i * 8).readPointer(); } catch (e) {
+                    if (runLen >= 4) {
+                        totalRuns++;
+                        LOG('VT 0x' + runStart.toString(16) + ' slots=' + runLen);
+                    }
+                    runLen = 0;
+                    continue;
+                }
                 if (!raw || raw.isNull()) {
                     if (runLen >= 4) {
                         totalRuns++;
@@ -413,9 +373,6 @@ function scanDataForVtableRuns() {
     LOG('total vtable-like runs: ' + totalRuns);
 }
 
-// ============================================================================
-//  Скан .text: adrp+add → map для поиска ctor'ов
-// ============================================================================
 function scanAdrpAddMap() {
     LOG('=== SCANNING .text FOR adrp+add ===');
     const map = {};
@@ -473,9 +430,6 @@ function scanAdrpAddMap() {
     return map;
 }
 
-// ============================================================================
-//  Поиск ctor'ов через map
-// ============================================================================
 function findCtorsViaAdrpMap(adrpMap) {
     LOG('=== FINDING CTORS VIA adrp+add ===');
     for (const cls of Object.keys(VTABLES)) {
@@ -494,20 +448,6 @@ function findCtorsViaAdrpMap(adrpMap) {
     }
 }
 
-// ============================================================================
-//  Периодический дамп регистров при срабатывании хука
-// ============================================================================
-function dumpContext(ctx, name) {
-    try {
-        LOG('  ctx ' + name + ' x0=' + ctx.x0 + ' x1=' + ctx.x1 +
-            ' x2=' + ctx.x2 + ' x8=' + ctx.x8 +
-            ' pc=' + ctx.pc + ' lr=' + ctx.lr);
-    } catch (e) {}
-}
-
-// ============================================================================
-//  Точка входа
-// ============================================================================
 function main() {
     if (gStarted) { LOG('already started'); return; }
     gStarted = true;
