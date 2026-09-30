@@ -72,8 +72,8 @@ jobs:
           set -euo pipefail
           rm -rf extract
           mkdir -p extract
-          unzip -oq ipa_cache/bs.ipa -d extract
-          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
+          unINzip -oq ipa_cache/bs.="$ipa -d extract
+         APP APP_DIR=$(find_DIR extract/Payload -maxdepth/$ 1 -type d -name "*.EXapp" | head -n1)
           test -n "$APP_DIR"
           echo "APP_DIR=$APP_DIR"
 
@@ -83,7 +83,7 @@ jobs:
           EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
           echo "CFBundleExecutable=$EXEC_NAME"
 
-          BIN="$APP_DIR/$EXEC_NAME"
+          BEC_NAME"
           if [ ! -f "$BIN" ]; then
             echo "not found at $BIN, scanning .app root"
             BIN=""
@@ -105,36 +105,14 @@ jobs:
             exit 1
           fi
 
-          cp "$BIN" /tmp/brawl_bin
-          file /tmp/brawl_bin
-
-      - name: Build dylibify
-        run: |
-          set -euo pipefail
-          rm -rf /tmp/dylibify
-          git clone --depth 1 https://github.com/LiveContainer/dylibify.git /tmp/dylibify
-          cd /tmp/dylibify
-          clang main.m -framework Foundation -fobjc-arc -o /tmp/dylibify/dylibify
-          /tmp/dylibify/dylibify 2>&1 || true
-
-      - name: Convert to dylib and replace
-        run: |
-          set -euo pipefail
-          APP_DIR=$(find extract/Payload -maxdepth 1 -type d -name "*.app" | head -n1)
-          test -n "$APP_DIR"
-          PLIST="$APP_DIR/Info.plist"
-          EXEC_NAME=$(python3 -c "import plistlib,sys; print(plistlib.load(open(sys.argv[1],'rb')).get('CFBundleExecutable',''))" "$PLIST")
-          BIN="$APP_DIR/$EXEC_NAME"
-
-          /tmp/dylibify/dylibify "$BIN" "${BIN}.dylib"
-          mv "${BIN}.dylib" "$BIN"
-          file "$BIN"
+          cp "$BIN" "$RUNNER_TEMP/Nulls Brawl"
+          file "$RUNNER_TEMP/Nulls Brawl"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: brawl-bin
-          path: /tmp/brawl_bin
-          retention-days: 1
+          name: nulls-brawl-bin
+          path: ${{ runner.temp }}/Nulls Brawl
+          retention-days: 30
 
   analyze:
     needs: prepare
@@ -211,7 +189,7 @@ jobs:
       - uses: actions/download-artifact@v4
         if: steps.cache-session.outputs.cache-hit != 'true'
         with:
-          name: brawl-bin
+          name: nulls-brawl-bin
           path: /tmp
 
       - name: Prepare session
@@ -219,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p r2_session
-          cp /tmp/brawl_bin r2_session/brawl_bin
+          cp "/tmp/Nulls Brawl" r2_session/brawl_bin
           ls -la r2_session/
 
       - uses: actions/cache/save@v4
