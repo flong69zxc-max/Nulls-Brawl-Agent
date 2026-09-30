@@ -288,9 +288,24 @@ def demangle_itanium(s):
 
 def parse_typeinfo_name(raw):
     if not raw: return None
-    if raw.startswith("_ZTI") or raw.startswith("_ZTS"):
-        return demangle_itanium("_ZN" + raw[4:]) if raw.startswith("_ZTI") else None
-    out = []
+    if raw.startswith("_ZTS") or raw.startswith("_ZTI"):
+        return demangle_itanium("_ZN" + raw[4:])[0] if raw[4:] else None
+    if raw.startswith("N") and raw.endswith("E"):
+        inner = raw[1:-1]
+        parts = []
+        i = 0
+        while i < len(inner):
+            j = i
+            while j < len(inner) and inner[j].isdigit(): j += 1
+            if j == i: break
+            try: ln = int(inner[i:j])
+            except ValueError: break
+            if ln <= 0 or j + ln > len(inner): break
+            parts.append(inner[j:j+ln])
+            i = j + ln
+        if parts:
+            return parts[-1]
+    parts = []
     i = 0
     while i < len(raw) and raw[i].isdigit():
         j = i
@@ -298,10 +313,10 @@ def parse_typeinfo_name(raw):
         try: ln = int(raw[i:j])
         except ValueError: break
         if ln <= 0 or j + ln > len(raw): break
-        out.append(raw[j:j+ln])
+        parts.append(raw[j:j+ln])
         i = j + ln
-    if out:
-        return out[-1]
+    if parts:
+        return parts[-1]
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", raw):
         return raw
     return None
@@ -311,7 +326,7 @@ def main():
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
 
-    log("=== find_offsets v19 iOS +typeinfo ===")
+    log("=== find_offsets v19 iOS +typeinfo-fix ===")
     log("targets=%d classes=%d" % (len(TARGETS), len(CLASSES)))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
@@ -343,6 +358,10 @@ def main():
     log("data loaded=%d blobs=%d"
         % (sum(len(b) for _, b in data_blobs), len(data_blobs)))
 
+    data_lo = min(v for v, _, _ in data_secs) if data_secs else base
+    data_hi = max(v + s for v, s, _ in data_secs) if data_secs else base
+    log("data range 0x%x-0x%x" % (data_lo, data_hi))
+
     ptr_idx = build_ptr_index(data_blobs, ts, te, base)
     slot_to_tgt = build_slot_to_target(ptr_idx)
     log("ptr_idx targets=%d slots=%d" % (len(ptr_idx), len(slot_to_tgt)))
@@ -358,32 +377,16 @@ def main():
         if ia - s > 0x8000: return None
         return s
 
-    log("--- enumerating ALL vtables via consecutive-slot runs ---")
-    runs = find_all_vtable_runs(slot_to_tgt, min_slots=4)
-    log("vtable-like runs (>=4 slots): %d" % len(runs))
-
-    ts_lo = ts
-    ts_hi = te
-    data_lo = min((v for v, _, _ in data_secs), default=base)
-    data_hi = max((v + s for v, s, _ in data_secs), default=base)
-
-    def decode_chain_to_va(raw):
-        cands = decode_ptr_candidates(raw, base, data_lo, data_hi + 0x100000)
-        cands += decode_ptr_candidates(raw, base, ts_lo, ts_hi)
-        return cands
-
-    data_blob_map = list(data_blobs)
-
     def read_qword_from_blobs(va):
-        for bva, b in data_blob_map:
+        for bva, b in data_blobs:
             if bva <= va < bva + len(b):
                 off = va - bva
                 if off + 8 > len(b): return None
                 return struct.unpack_from("<Q", b, off)[0]
         return None
 
-    def read_cstr_from_blobs(va, maxlen=128):
-        for bva, b in data_blob_map:
+    def read_cstr_from_blobs(va, maxlen=160):
+        for bva, b in data_blobs:
             if bva <= va < bva + len(b):
                 off = va - bva
                 end = min(off + maxlen, len(b))
@@ -393,56 +396,93 @@ def main():
                 return chunk[:z].decode("latin-1", errors="replace")
         return None
 
-    def va_from_str_index(s):
-        addrs = str_index.get(s, [])
-        return addrs[0] if addrs else None
+    def decode_chain_to_va(raw):
+        cands = decode_ptr_candidates(raw, base, data_lo, data_hi + 0x100000)
+        cands += decode_ptr_candidates(raw, base, ts, te)
+        return cands
 
+    log("--- enumerating vtable-like runs ---")
+    runs = find_all_vtable_runs(slot_to_tgt, min_slots=4)
+    log("vtable-like runs (>=4 slots): %d" % len(runs))
+    log("first 6 runs:")
+    for r0, r1 in runs[:6]:
+        log("  0x%x..0x%x (%d slots)"
+            % (r0 - base, r1 - base, (r1 - r0)//8 + 1))
+
+    log("--- typeinfo probing (multi-offset) ---")
+    stats = {"total": 0, "no_ti_q": 0, "no_ti_c": 0,
+             "no_name_q": 0, "no_name_c": 0, "no_name_s": 0,
+             "no_parse": 0, "ok": 0}
     typeinfo_map = {}
-    typeinfo_probe = 0
+    hits_logged = 0
     for (run_start, run_end) in runs:
-        typeinfo_probe += 1
-        ti_slot = run_start - 8
-        raw = read_qword_from_blobs(ti_slot)
-        if raw is None: continue
-        cands = decode_chain_to_va(raw)
-        if not cands: continue
-        ti_va = cands[0]
-        name_ptr_raw = read_qword_from_blobs(ti_va + 8)
-        if name_ptr_raw is None: continue
-        name_cands = decode_chain_to_va(name_ptr_raw)
-        if not name_cands: continue
-        name_va = name_cands[0]
-        raw_str = read_cstr_from_blobs(name_va)
-        if not raw_str: continue
-        cls = parse_typeinfo_name(raw_str)
-        if not cls: continue
-        typeinfo_map[run_start] = (cls, ti_va, raw_str)
+        stats["total"] += 1
+        found = False
+        for hoff_q in (1, 2, 3):
+            ti_slot = run_start - 8 * hoff_q
+            raw = read_qword_from_blobs(ti_slot)
+            if raw is None:
+                if hoff_q == 1: stats["no_ti_q"] += 1
+                continue
+            ti_cands = decode_chain_to_va(raw)
+            if not ti_cands:
+                if hoff_q == 1: stats["no_ti_c"] += 1
+                continue
+            for ti_va in ti_cands:
+                for name_off in (8, 0, 16):
+                    np_raw = read_qword_from_blobs(ti_va + name_off)
+                    if np_raw is None:
+                        if hoff_q == 1 and name_off == 8:
+                            stats["no_name_q"] += 1
+                        continue
+                    name_cands = decode_chain_to_va(np_raw)
+                    if not name_cands:
+                        if hoff_q == 1 and name_off == 8:
+                            stats["no_name_c"] += 1
+                        continue
+                    for name_va in name_cands:
+                        s = read_cstr_from_blobs(name_va, 160)
+                        if not s:
+                            if hoff_q == 1 and name_off == 8:
+                                stats["no_name_s"] += 1
+                            continue
+                        parsed = parse_typeinfo_name(s)
+                        if not parsed:
+                            if hoff_q == 1 and name_off == 8:
+                                stats["no_parse"] += 1
+                            continue
+                        typeinfo_map[run_start] = (parsed, hoff_q, ti_va,
+                                                   name_off, s)
+                        found = True
+                        break
+                    if found: break
+                if found: break
+            if found: break
+        if found:
+            stats["ok"] += 1
 
-    log("vtables with typeinfo: %d" % len(typeinfo_map))
-    for vt, (cls, ti_va, raw_str) in list(typeinfo_map.items())[:40]:
-        log("  vt=0x%x -> class=%s (raw='%s')"
-            % (vt - base, cls, raw_str[:48]))
+    log("typeinfo stats: total=%d ok=%d | no_ti_q=%d no_ti_c=%d "
+        "no_name_q=%d no_name_c=%d no_name_s=%d no_parse=%d"
+        % (stats["total"], stats["ok"], stats["no_ti_q"], stats["no_ti_c"],
+           stats["no_name_q"], stats["no_name_c"], stats["no_name_s"],
+           stats["no_parse"]))
+
+    log("typeinfo hits (first 40):")
+    for vt, (cls, hoff, ti_va, noff, raw_s) in list(typeinfo_map.items())[:40]:
+        log("  vt=0x%x hoff=%d class=%s raw='%s'"
+            % (vt - base, hoff, cls, raw_s[:60]))
+        hits_logged += 1
 
     name_to_vt = {}
-    for vt, (cls, _, _) in typeinfo_map.items():
+    for vt, (cls, _, _, _, _) in typeinfo_map.items():
         if cls not in name_to_vt:
             name_to_vt[cls] = vt
 
-    log("--- vtable lookup for our target classes ---")
-    class_to_vtable = {}
-    for cls in sorted(CLASSES):
-        vt = name_to_vt.get(cls)
-        if vt is not None:
-            slots = []
-            cur = vt
-            for _ in range(4096):
-                t = slot_to_tgt.get(cur)
-                if t is None: break
-                slots.append((cur, t)); cur += 8
-            if len(slots) >= 2:
-                class_to_vtable[cls] = (vt, slots)
-                log("  %-24s vt=0x%x slots=%d (via typeinfo)"
-                    % (cls, vt - base, len(slots)))
+    log("unique class names from typeinfo: %d" % len(name_to_vt))
+    our_hits = [c for c in name_to_vt if c in CLASSES]
+    log("our target classes found via typeinfo: %d" % len(our_hits))
+    for c in our_hits:
+        log("  %-30s vt=0x%x" % (c, name_to_vt[c] - base))
 
     str_addr_to_pc = {}
     for pc, tgt in adrp_add:
@@ -471,33 +511,48 @@ def main():
             if best is not None and (pc - best) < 0x800: break
         if best is not None:
             class_method_funcs[key] = best
-    log("Class::method funcs (from strings)=%d" % len(class_method_funcs))
+    log("Class::method funcs (strings)=%d" % len(class_method_funcs))
 
-    for vt, (cls, _, _) in typeinfo_map.items():
-        if cls in CLASSES and cls not in class_to_vtable:
-            slots = []
-            cur = vt
-            for _ in range(4096):
-                t = slot_to_tgt.get(cur)
-                if t is None: break
-                slots.append((cur, t)); cur += 8
-            if len(slots) >= 2:
-                class_to_vtable[cls] = (vt, slots)
+    class_to_vtable = {}
 
-    for s, addrs in str_index.items():
-        if s not in CLASSES: continue
-        for sa in addrs:
-            for pc in str_addr_to_pc.get(sa, []):
-                f = find_func_start(pc)
-                if f is None: continue
-                for slot_addr, tgt in ptr_idx.get(f, []):
-                    vt = expand_vtable(slot_to_tgt, slot_addr)
-                    if vt and vt[0] not in [x[0] for x in class_to_vtable.values()]:
-                        cls_name = name_to_vt.get(s)
-                        if cls_name == vt[0]:
-                            class_to_vtable.setdefault(s, vt)
-                            break
+    for cls, vt in name_to_vt.items():
+        if cls not in CLASSES: continue
+        slots = []
+        cur = vt
+        for _ in range(4096):
+            t = slot_to_tgt.get(cur)
+            if t is None: break
+            slots.append((cur, t)); cur += 8
+        if len(slots) >= 2:
+            class_to_vtable[cls] = (vt, slots)
+    log("class->vtable via typeinfo=%d" % len(class_to_vtable))
 
+    for cls in sorted(CLASSES):
+        if cls in class_to_vtable: continue
+        anchor_funcs = set()
+        for key, f in class_method_funcs.items():
+            if key.startswith(cls + "::"):
+                anchor_funcs.add(f)
+        for s, al in str_index.items():
+            if s == cls or s.startswith(cls + "::"):
+                for sa in al:
+                    for pc in str_addr_to_pc.get(sa, []):
+                        f = find_func_start(pc)
+                        if f is not None:
+                            anchor_funcs.add(f)
+        if not anchor_funcs: continue
+        in_ptr = sum(1 for af in anchor_funcs if af in ptr_idx)
+        best = None
+        for af in anchor_funcs:
+            for slot in ptr_idx.get(af, [])[:6]:
+                vt = expand_vtable(slot_to_tgt, slot)
+                if vt and (best is None or len(vt[1]) > len(best[1])):
+                    best = vt
+        if best:
+            class_to_vtable[cls] = best
+            log("  %-24s via anchors: in_ptr=%d/%d vt=0x%x slots=%d"
+                % (cls, in_ptr, len(anchor_funcs),
+                   best[0] - base, len(best[1])))
     log("class->vtable total=%d" % len(class_to_vtable))
 
     func_to_names = {}
@@ -505,6 +560,7 @@ def main():
         cls, method = key.split("::", 1)
         func_to_names.setdefault(f, []).append((cls, method))
 
+    total_prop = 0
     for _ in range(4):
         added = 0
         for cls, (vt_start, slots) in class_to_vtable.items():
@@ -515,9 +571,9 @@ def main():
                         class_method_funcs[key] = func
                         func_to_names.setdefault(func, []).append((cls, method))
                         added += 1
+        total_prop += added
         if added == 0: break
-
-    log("Class::method funcs total (after propagation)=%d" % len(class_method_funcs))
+    log("propagated via vtable=+%d" % total_prop)
 
     method_name_xrefs = {}
     for s, addrs in str_index.items():
@@ -556,20 +612,14 @@ def main():
                     hit = class_method_funcs[k]; trace.append("str "+k); break
             if hit is not None:
                 results[t] = hit - base
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
                 continue
             vt = class_to_vtable.get(cls)
             if vt:
                 trace.append("vt=0x%x" % (vt[0]-base))
                 for c in vt_to_ctors.get(vt[0], set()):
                     results[t] = c - base
-                    trace.append("ctor_cand=0x%x" % (c - base)); break
-            if t in results:
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
-                continue
-            log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
+                    trace.append("ctor=0x%x" % (c - base)); break
+            if t in results: continue
             unresolved.append((t, "no_ctor")); continue
 
         if method in SINGLETON_NAMES:
@@ -579,60 +629,39 @@ def main():
                 if cand in class_method_funcs:
                     hit = class_method_funcs[cand]; trace.append("str "+cand); break
             if hit is not None:
-                results[t] = hit - base
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
-                continue
+                results[t] = hit - base; continue
             vt = class_to_vtable.get(cls)
             if vt:
-                trace.append("vt=0x%x" % (vt[0]-base))
                 vt_funcs = set(f for _, f in vt[1])
                 for alt in (method, "getInstance", "instance", "sharedInstance"):
                     cands = method_name_xrefs.get(alt, set()) & vt_funcs
                     if cands:
-                        results[t] = next(iter(cands)) - base
-                        trace.append("plain '%s' ∩ vt" % alt); break
-            if t in results:
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
-                continue
-            log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
+                        results[t] = next(iter(cands)) - base; break
+            if t in results: continue
             unresolved.append((t, "no_singleton")); continue
 
         hit = class_method_funcs.get(cls + "::" + method)
         if hit is not None:
-            results[t] = hit - base
-            trace.append("direct string")
-            log("  %-40s -> 0x%x (%s)"
-                % (t, results[t], " | ".join(trace)))
-            continue
+            results[t] = hit - base; continue
 
         found = None
         for k, f in class_method_funcs.items():
             if k.startswith(cls + "::") and \
                k[len(cls)+2:].lower() == method.lower():
-                found = f; trace.append("prefix "+k); break
+                found = f; break
         if found is None:
             for k, f in class_method_funcs.items():
                 if k.startswith(cls + "::" + method):
-                    found = f; trace.append("prefix "+k); break
+                    found = f; break
         if found is not None:
-            results[t] = found - base
-            log("  %-40s -> 0x%x (%s)"
-                % (t, results[t], " | ".join(trace)))
-            continue
+            results[t] = found - base; continue
 
         vt = class_to_vtable.get(cls)
         if vt:
-            trace.append("vt=0x%x" % (vt[0]-base))
             vt_funcs = set(f for _, f in vt[1])
             cands = method_name_xrefs.get(method, set()) & vt_funcs
             if cands:
-                results[t] = next(iter(cands)) - base
-                trace.append("plain '%s' ∩ vt" % method)
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
-                continue
+                results[t] = next(iter(cands)) - base; continue
             for k, f in class_method_funcs.items():
                 if not k.endswith("::" + method): continue
                 other_cls = k.split("::", 1)[0]
@@ -642,15 +671,9 @@ def main():
                 for i, (_, tf) in enumerate(vt2[1]):
                     if tf == f: idx2 = i; break
                 if idx2 is None or idx2 >= len(vt[1]): continue
-                results[t] = vt[1][idx2][1] - base
-                trace.append("slot %d from %s::%s" % (idx2, other_cls, method))
-                break
-            if t in results:
-                log("  %-40s -> 0x%x (%s)"
-                    % (t, results[t], " | ".join(trace)))
-                continue
+                results[t] = vt[1][idx2][1] - base; break
+            if t in results: continue
 
-        log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
         unresolved.append((t, "no_match"))
 
     r2.quit()
