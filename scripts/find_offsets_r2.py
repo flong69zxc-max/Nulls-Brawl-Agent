@@ -11,220 +11,190 @@ import r2pipe
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
 BIN = os.environ.get("R2_BIN", "/tmp/brawl_bin")
 OUT = os.path.join(WS, "offsets_resolved.js")
+VT = os.path.join(WS, "vtables.js")
 REPORT = os.path.join(WS, "offsets_report.txt")
 DETAIL = os.path.join(WS, "ctors_detailed.log")
 BUDGET = 1800
 START = time.time()
 
+# (key, kind_hint)
+# kind_hint: method | ctor | singleton | global | skip
 TARGETS = [
-    "LogicBattleModeClient_update",
-    "BattleMode_getInstance",
-    "LogicGameObjectClient_getX",
-    "LogicGameObjectClient_getY",
-    "LogicGameObjectClient_getZ",
-    "LogicBattleModeClient_getOwnCharacter",
-    "BattleScreen_activateSkill",
-    "StringCtor",
-    "Gui_showFloaterTextAtDefaultPos",
-    "LogicBattleModeClient_getOwnPlayerTeam",
-    "LogicGameObjectClient_getGlobalID",
-    "LogicGameObjectClient_getData",
-    "LogicProjectileData_getRadius",
-    "LogicProjectileData_getSpeed",
-    "LogicProjectileData_getRendering",
-    "LogicCharacterData_getCollisionRadius",
-    "decoratedTextFieldSetPlayerName",
-    "TextField_setText_ui",
-    "TextField_setText",
-    "handleJoystick",
-    "ClientInput_constructor_int",
-    "ClientInputManager_addInput",
-    "LogicBattleModeClient_setClientPredictionMoveTo",
-    "Sprite_Sprite",
-    "LogicTileData__blocksProjectiles",
-    "ResourceManager__isResourceLoaded",
-    "GameMain__update",
-    "DecalManager__DecalManager",
-    "LogicProjectileData__IsOwnTeamProjectile",
-    "GameObjectManager__GameObjectManager",
-    "Projectile_ctor",
-    "Projectile__update",
-    "RenderSystem__RenderSystem",
-    "CombatHUD__toggleEditing",
-    "BattleScreen__updateCameraParameters",
-    "Character__updateHealthBar",
-    "CombatHUD__setShootStickState",
-    "CombatHUD__setMoveStickState",
-    "GUI__getDefaultFloaterPos",
-    "GUI__showFloaterTextAt",
-    "GUI__showPopup",
-    "GameButtonCtor",
-    "DropGUIContainer__ctorFromExport",
-    "GameSliderComponent__GameSliderComponent",
-    "GameSliderComponent__setValueBounds",
-    "MapEditorModifierItem__MapEditorModifierItem",
-    "MapEditorModifierPopup__MapEditorModifierPopup",
-    "MapEditorModifierPopup__addModifierItem",
-    "PopupBase__PopupBase",
-    "MessageManager__receiveMessage",
-    "BattleScreen__BattleScreen",
-    "BattleScreen__stopWithStick",
-    "BattleScreen__handleTouchReleased",
-    "BattleScreen__update",
-    "BattleScreen__updateAutoshoot",
-    "BattleScreen_getClosestTargetForAutoshoot",
-    "BattleScreen__updateMovement",
-    "BattleScreen__tryToActivateSkill",
-    "BattleScreen__shouldShowAccessoryButton",
-    "BattleScreen__calculateProjectilePath",
-    "BattleScreen__joystickToWorld",
-    "GameScreen__getLogicBattle",
-    "MapEditorScreen__initRenderSystem",
-    "MapEditorScreen__initItems",
-    "MapEditorScreen__initCharacters",
-    "GameSettings__isFixedJoystickEnabled",
-    "BattleMode__enter",
-    "BattleMode__addResourcesToLoad",
-    "GameStateManager__getInstance",
-    "GameStateManager__isState",
-    "HomeMode__getInstance",
-    "StringTable__getMovieClip",
-    "MovieClipHelper__setTextAndScaleIfNecessary",
-    "LogicTile__setData",
-    "LogicTileMap__LogicTileMap",
-    "LogicTileMap__isPlayerLineOfSightClear",
-    "LogicTileMap__isPlayerLineOfSightClear1",
-    "LogicDataTables__getOpenTileData",
-    "LogicDataTables__getBaseTileData",
-    "LogicDataTables__getSiegeBoltTileData",
-    "LogicProjectileData__isBeam",
-    "LogicCharacterData_getSpeed",
-    "LogicProjectileData__getNumEarlyTicks",
-    "LogicSkillData__getActiveTime",
-    "LogicSkillData__getRechargeTime",
-    "LogicSkillData__getMaxCharge",
-    "LogicSkillData__getMsBetweenAttacks",
-    "LogicSkillData__getCastingRange",
-    "LogicTileData__blocksMovement",
-    "LogicCharacterClient__getCarryableData",
-    "LogicCharacterClient__getWeaponSkill",
-    "LogicCharacterClient__canMoveAndUseThisSkillSimultaneously",
-    "LogicCharacterClient__getLinkedCarryable",
-    "LogicCharacterClient__getCurrentActiveOrCastingSkill",
-    "LogicCharacterClient__getSkillAt",
-    "LogicSkillClient__getData",
-    "LogicSkillClient__canActivate",
-    "LogicSkillData__getBehaviour",
-    "LogicSkillData__getLinkedSkill",
-    "LogicCharacterClientOwn__clientPredictionPauseMovementForSkillCasting",
-    "LogicCharacterClientOwn__clientPredictionUpdateAttackDirection",
-    "LogicGameObjectManagerClient__LogicGameObjectManagerClient",
-    "LogicGameObjectManagerClient__getGameObjects",
-    "LogicGameObjectManagerClient__findGameObject",
-    "LogicGameObjectServer__getData",
-    "LogicProjectileServer__shootProjectile",
-    "LogicProjectileServer__runEarlyTicks",
-    "GlobalID__getInstanceID",
-    "LogicPlayerMap__save",
-    "LogicPlayerMapUtil__tileDataToTileCode",
-    "AnalyticEvent__AnalyticEvent",
-    "AnalyticEvent__setString",
-    "LogicBattleModeClient__LogicBattleModeClient",
-    "LogicBattleModeClient__setRandomSeed",
-    "LogicBattleModeClient__setPlayerAvatar",
-    "LogicBattleModeClient__getOwnPlayerIndex",
-    "LogicBattleModeClient__getTileMap",
-    "SetClientPrediction",
-    "ScrollArea__scrollTo",
-    "StringTable_getMovieClip",
-    "DisplayObject__setXY",
-    "DisplayObject__removeFromParent",
-    "MovieClip__getTextFieldByName",
-    "Sprite__addChild",
-    "Sprite__addChildAt",
-    "Sprite__removeChild",
-    "ScrollArea__updateBounds",
-    "ScrollArea__addContent",
-    "ScrollArea__removeAllContent",
-    "CSVRow__getIntegerValueAt",
-    "CSVRow__getName",
-    "CSVRow__getValueAt",
-    "CSVRow__getBooleanValueAt",
-    "CSVTable__getColumnIndexByName",
-    "LogicJSONObject__put",
-    "LogicRandom__setIteratedRandomSeed",
-    "LogicCompressedString__LogicCompressedString",
-    "LogicLongToCodeConverterUtil__LogicLongToCodeConverterUtil",
-    "LogicLongToCodeConverterUtil__convert",
-    "LogicLongToCodeConverterUtil__toCode",
-    "ResourceListener__addFile",
-    "String__format",
-    "FramerateManager__setSegment",
-    "FramerateManager__setLimit",
-    "Application__copyString",
-    "BattleScreen_fireWrapperFn",
-    "Stage_addChild",
-    "GameButton_setText",
-    "nativeCopyToClipboard",
-    "ResourceManager__getCSV",
-    "MovieClip__gotoAndStopFrameIndex",
-    "MovieClip_gotoAndStop",
-    "LogicCharacterClient__isImmuneOrUntargetable",
-    "operator_new",
-    "TeamChatMessage__ctor",
-    "TeamSetMemberReadyMessage__ctor",
-    "MessageManager__sendMessage",
-    "StartSpectateMessage__ctor",
-    "HashTagCodeGenerator__ctor",
-    "HashTagCodeGenerator__toId",
-    "Gui_getInstance",
-    "PiranhaMessage_ctor",
-    "LogicSkillData__getProjectileData",
-    "Name_setupDecorated",
-    "Name_applyDecoration",
-    "AllianceManager__startSpectate",
-    "ClientInputMessage_sendMovement",
-    "CombatHUD__update",
-    "CombatHUD__sendPinCommand",
-    "CombatHUD__sendSprayCommand",
-    "CustomButton_onButtonPressed",
-    "HashTagCodeGenerator__dtor",
-    "HashTagCodeGenerator__isValid",
-    "LogicGameModeUtil__isTileOnPoisonArea",
-    "LogicTileMap_getTile",
-    "LogicProjectileClient_ctor",
-    "LogicProjectileClient_destruct",
-    "LogicProjectileClient_getData",
-    "LogicProjectileClient_getTargetX",
-    "LogicProjectileClient_getTargetY",
-    "LogicProjectileData__getSpawnAreaEffect",
-    "AreaEffectData__getRadius",
-    "AreaEffectData__getActiveTimeMs",
-    "LogicData_getName",
-    "MapEditorScreen__updateCameraParameters",
-    "MovieClip__getChildClipByName",
-    "MovieClip__setChildVisible",
-    "Screen__getDpiClass",
-    "Screen__getHeight",
-    "Screen__getWidth",
+    ("String.ctor", "ctor"),
+    ("String.equals", "method"),
+    ("NativeFont.formatString", "method"),
+    ("StringTable.getString", "method"),
+    ("StringTable.getCurrentLanguageCode", "method"),
+    ("GUI.showPopup", "method"),
+    ("GUI.closePopup", "method"),
+    ("GUI.getInstance", "singleton"),
+    ("GUI.showFloater", "method"),
+    ("LoadingScreen.exit", "method"),
+    ("LoadingScreen.enter", "method"),
+    ("GenericPopup.ctor", "ctor"),
+    ("GenericPopup.addButton", "method"),
+    ("GenericPopup.addButton2", "method"),
+    ("GenericPopup.setTitle", "method"),
+    ("GenericPopup.onHudCloseButton", "method"),
+    ("ResourceManager.getMovieClip", "method"),
+    ("MovieClip.gotoAndStopFrameIndex", "method"),
+    ("MovieClip.setText", "method"),
+    ("MovieClip.setTextAndScaleIfNecessary", "method"),
+    ("MovieClip.getMovieClipByName", "method"),
+    ("MovieClip.getChildByName", "method"),
+    ("MovieClip.getTextFieldByName", "method"),
+    ("MovieClip.playOnce", "method"),
+    ("MovieClip.setChildVisible", "method"),
+    ("GameButton.ctor", "ctor"),
+    ("GameButton.buttonPressed", "method"),
+    ("Sprite.ctor", "ctor"),
+    ("Sprite.addChild", "method"),
+    ("PopupBase.ctor", "ctor"),
+    ("PopupBase.addCloseButton", "method"),
+    ("GameMain.getAccountIdCtor", "ctor"),
+    ("GameMain.getInstanceCtor", "ctor"),
+    ("GameMain.reloadGame", "method"),
+    ("GameMain.reloadGameAfterContentUpdate", "method"),
+    ("GameMain.getStaticVideoAdListener", "method"),
+    ("GameMain.getFps", "method"),
+    ("GameMain.update", "method"),
+    ("GameMain.draw", "method"),
+    ("Stage.addChild", "method"),
+    ("Stage.instance", "singleton"),
+    ("CountryItem.ctor", "ctor"),
+    ("DisplayObject.setXY", "method"),
+    ("DisplayObject.setPixelSnappedXY", "method"),
+    ("TextField.setText", "method"),
+    ("TextField.fetchFont", "method"),
+    ("DecoratedTextField.setupDecoratedTextField", "method"),
+    ("TeamSearchPopup.customButtonTapped", "method"),
+    ("GameInputField.ctor", "ctor"),
+    ("GameInputField.setScaleTextIfNeeded", "method"),
+    ("TextInput.setMaxTextLength", "method"),
+    ("InputField.getInputText", "method"),
+    ("CustomButton.setButtonListener", "method"),
+    ("GameSliderComponent.ctor", "ctor"),
+    ("GameSliderComponent.setValueBounds", "method"),
+    ("GameSliderComponent.setMaxValueLabel", "method"),
+    ("DropGUIContainer.ctor", "ctor"),
+    ("DropGUIContainer.addGameButton", "method"),
+    ("ResourceListener.addFile", "method"),
+    ("HomeMode.enter", "method"),
+    ("HomeMode.getPlayerName", "method"),
+    ("LogicDailyData.isBrawlPassPremiumUnlocked", "method"),
+    ("LogicDataTables.getColorGradientByName", "method"),
+    ("Application.copyString", "method"),
+    ("Application.openUrl", "method"),
+    ("PlayerInfo.refreshPlayerHeader", "method"),
+    ("HashTagCodeGenerator.toCode", "method"),
+    ("BandMailPopup.ctor", "ctor"),
+    ("BattleScreen.activateSkill", "method"),
+    ("BattleScreen.getClosestTargetForAutoshoot", "method"),
+    ("BattleScreen.update", "method"),
+    ("BattleScreen.isAfk", "method"),
+    ("BattleScreen.enter", "method"),
+    ("BattleScreen.exit", "method"),
+    ("BattleScreen.getInstance", "singleton"),
+    ("BattleScreen.updateCameraParameters", "method"),
+    ("BattleMode.getInstance", "singleton"),
+    ("BattleMode.getInstance2", "singleton"),
+    ("BattleMode.enter", "method"),
+    ("BattleMode.exit", "method"),
+    ("BattleMode.update", "method"),
+    ("LogicBattleModeClient.getOwnCharacter", "method"),
+    ("LogicBattleModeClient.update", "method"),
+    ("LogicBattleModeClient.setClientPredictionMoveTo", "method"),
+    ("LogicBattleModeClient.getOwnPlayerTeam", "method"),
+    ("LogicBattleModeClient.getTileMap", "method"),
+    ("LogicGameObjectClient.getX", "method"),
+    ("LogicGameObjectClient.getY", "method"),
+    ("LogicGameObjectClient.getGlobalID", "method"),
+    ("LogicGameObjectClient.getData", "method"),
+    ("LogicGameObjectClient.getTileX", "method"),
+    ("LogicProjectileData.getSpeed", "method"),
+    ("LogicProjectileData.getRadius", "method"),
+    ("LogicCharacterClient.getCharacterData", "method"),
+    ("LogicCharacterData.getCollisionRadius", "method"),
+    ("LogicData.getName", "method"),
+    ("LogicConfData.getIntValue", "method"),
+    ("LogicLong.getHigherInt", "method"),
+    ("LogicLong.getLowerInt", "method"),
+    ("LogicClientAvatar.isTutorialState", "method"),
+    ("ClientInput.ctor", "ctor"),
+    ("ClientInputManager.addInput", "method"),
+    ("MessageManager.receiveMessage", "method"),
+    ("MessageManager.sendMessage", "method"),
+    ("MessageManager.instance", "singleton"),
+    ("TeamJoinRequestPopup.ctor", "ctor"),
+    ("StartLoadingMessage.ctor", "ctor"),
+    ("SimpleWebView.ctor", "ctor"),
+    ("SimpleWebView.loadURL", "method"),
+    ("TeamMemberItem.setMember", "method"),
+    ("HomePage.ctor", "ctor"),
+    ("GameScreen.getLogicBattle", "method"),
+    ("GameObject.getTileX", "method"),
+    ("GameObject.getTileY", "method"),
+    ("GameObject.getTileZ", "method"),
+    ("GameObject.getLogic", "method"),
+    ("LogicTileData.getBaseExportName", "method"),
+    ("LogicTileMap.getTile", "method"),
+    ("LogicTileMap.getTile2", "method"),
+    ("LogicGameObjectManagerClient.getGameObjects", "method"),
+    ("RenderSystem.destroyTile", "method"),
+    ("Projectile.getAngle", "method"),
+    ("Projectile.update", "method"),
+    ("GameStateManager.getInstance", "singleton"),
+    ("TeamManager.onTeamMessage", "method"),
+    ("TeamManager.onTeamLeftMessage", "method"),
+    ("TeamManager.getInstance", "singleton"),
+    ("PlayerNameColorPopup.ctor", "ctor"),
+    ("DownloadedImage.ctor", "ctor"),
+    ("DownloadedImage.createFromLocalFile", "method"),
+    ("ScrollArea.ctor", "ctor"),
+    ("ScrollArea.enablePinching", "method"),
+    ("ScrollArea.enableHorizontalDrag", "method"),
+    ("ScrollArea.enableVerticalDrag", "method"),
+    ("ScrollArea.setAlignment", "method"),
+    ("ScrollArea.addContent", "method"),
+    ("AboutScreen.ctor", "ctor"),
+    ("CombatHUD.ctor", "ctor"),
+    ("Character.update", "method"),
+    ("Character.updateHealthBar", "method"),
+    ("FramerateManager.setSegment", "method"),
+    ("FramerateManager.sm_pInstance", "global"),
+    ("LogicPlayer.decode", "method"),
+    ("TeamMemberEntry.decode", "method"),
+    ("BattleLogPlayerEntry.ctor", "ctor"),
+    ("FriendEntry.decode", "method"),
+    ("PlayerProfile.decode", "method"),
+    ("AllianceMemberEntry.decode", "method"),
+    ("Messages.ClientHelloMessage", "skip"),
+    ("Messages.LoginMessage", "skip"),
+    ("Messages.TeamMemberStatusMessage", "skip"),
+    ("Messages.PlayAgainMessage_PlayAgainMessage", "skip"),
+    ("Messages.TeamChatMessage_encode", "skip"),
+    ("Messages.TeamChatMessage", "skip"),
+    ("Messages.TeamInviteMessage", "skip"),
+    ("Messages.TeamAllianceMemberInviteMessage", "skip"),
+    ("Messages.StartSpectateMessage", "skip"),
+    ("Messages.PlayerStatusMessage", "skip"),
+    ("Messages.LatencyTestMessage", "skip"),
+    ("Messages.SendLatencyTestResultsMessage", "skip"),
+    ("Other.ModifierOffset", "skip"),
+    ("Other.EmojiAnimations", "skip"),
+    ("Other.unknownStringOffset", "skip"),
+    ("Other.onclickMultiLineInputOkFunc", "skip"),
+    ("Other.onclickInputOkFunc", "skip"),
+    ("Other.BattleEndScreen_enterAddr", "skip"),
+    ("Other.NativeDialog", "skip"),
+    ("Other.CustomInputOffset1", "skip"),
+    ("Other.CustomInputOffset2", "skip"),
+    ("Other.SpectateWithIDOffset1", "skip"),
+    ("Other.SpectateWithIDOffset2", "skip"),
 ]
 
-# Классы, для которых через vtable-путь ищем ctors
-CTOR_CLASSES = [
-    "LogicBattleModeClient", "BattleMode", "LogicGameObjectClient",
-    "LogicProjectileData", "LogicCharacterData",
-    "GameButton", "GameSelectableButton", "RadioButton",
-    "Stage", "MovieClip", "MovieClipHelper", "DecoratedTextField",
-    "Application", "Name", "Projectile", "ResourceManager",
-    "StringTable", "MessageManager", "AllianceManager", "CombatHUD",
-    "Character", "HomePage", "HomeScreen", "Screen",
-    "AnalyticEvent", "CSVTable", "LogicTileMap",
-    "LogicGameObjectManagerClient", "LogicProjectileClient",
-    "LogicCharacterClient", "LogicCharacterClientOwn",
-    "GameStateManager", "HomeMode", "Gui", "GUI",
-    "StringTable", "GameObjectManager", "RenderSystem",
-    "GameMain", "DecalManager",
-]
+# Все классы, для которых ищем vtable/ctor
+CLASSES = sorted(set([t[0].split(".")[0] for t in TARGETS if "." in t[0]]))
 
 _log_fh = None
 
@@ -281,7 +251,6 @@ def build_string_index(r2, base):
         if not a:
             continue
         idx.setdefault(txt, []).append(a)
-    log("[*] strings: %d unique: %d" % (sum(len(v) for v in idx.values()), len(idx)))
     return idx
 
 
@@ -377,7 +346,6 @@ def decode_bl_target(w, pc):
 def scan_text(text, ts):
     n = len(text) // 4
     adrp_add = []
-    bl_map = {}
     prologs = []
     i = 0
     while i < n:
@@ -395,10 +363,8 @@ def scan_text(text, ts):
                     if rd == rd_adrp and rn == rd_adrp:
                         adrp_add.append((pc, page + imm))
                         break
-        if is_bl(w):
-            bl_map[pc] = decode_bl_target(w, pc)
         i += 1
-    return adrp_add, bl_map, prologs
+    return adrp_add, prologs
 
 
 def build_ptr_index(data_blobs, text_start, text_end):
@@ -423,7 +389,7 @@ def build_slot_to_target(ptr_idx):
     return out
 
 
-def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=256):
+def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=512):
     vt_start = anchor_slot
     cur = anchor_slot - 8
     for _ in range(max_back):
@@ -451,14 +417,13 @@ def analyze_at(text, ts, func_start, max_instr=300):
     if off < 0 or off >= n:
         return None
     n_bl = 0
-    n_ret = 0
     for i in range(off, min(off + max_instr, n)):
         w = struct.unpack_from("<I", text, i * 4)[0]
         if is_bl(w):
             n_bl += 1
         elif w == 0xD65F03C0:
-            n_ret += 1
-    return {"n_bl": n_bl, "n_ret": n_ret}
+            break
+    return {"n_bl": n_bl}
 
 
 def find_func_start(prologs_sorted, ia):
@@ -469,34 +434,6 @@ def find_func_start(prologs_sorted, ia):
     return ia & ~0xF
 
 
-# --- parse target list ---
-
-def parse_target(t):
-    # "LogicBattleModeClient__update" -> ("LogicBattleModeClient", "update", "method")
-    # "LogicBattleModeClient_update"  -> same
-    # "StringCtor"                    -> ("String", "ctor", "ctor")
-    # "GameButtonCtor"                -> ("GameButton", "ctor", "ctor")
-    # "operator_new"                  -> ("", "operator_new", "operator")
-    # "SetClientPrediction"           -> ("", "SetClientPrediction", "unknown")
-    if t == "operator_new":
-        return ("", "operator_new", "operator")
-    m = re.match(r"^([A-Za-z][A-Za-z0-9]+?)Ctor$", t)
-    if m:
-        return (m.group(1), "ctor", "ctor")
-    if "__" in t:
-        parts = t.split("__", 1)
-        cls, method = parts[0], parts[1]
-        kind = "ctor" if method == cls else "method"
-        return (cls, method, kind)
-    if "_" in t:
-        # first underscore where left part is a KnownClass-like name
-        parts = t.split("_", 1)
-        cls, method = parts[0], parts[1]
-        kind = "ctor" if method == "ctor" else "method"
-        return (cls, method, kind)
-    return ("", t, "unknown")
-
-
 def main():
     global _log_fh
     try:
@@ -504,7 +441,7 @@ def main():
     except Exception:
         _log_fh = None
 
-    log("=== find_offsets_r2 v15 (targets) ===")
+    log("=== find_offsets_r2 v17 (user targets) ===")
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
@@ -516,35 +453,19 @@ def main():
     log("base: 0x%x" % base)
 
     str_index = build_string_index(r2, base)
-    if not str_index:
-        return
-
-    # for fast string lookup: build lookup: substring "Class::method" -> addr
-    # 49300 keys, using direct dict
-    pattern_addr = {}
-    for s, al in str_index.items():
-        if "::" in s:
-            # Ключ: "Class::method" без хвоста
-            idx = s.find("::")
-            if idx > 0:
-                # отрезаем пробелы/префиксы после ::, до не-идентификатора
-                rest = s[idx+2:]
-                m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", rest)
-                if m:
-                    key = s[:idx+2] + m.group(1)
-                    pattern_addr.setdefault(key, []).append(al[0])
-    log("[*] string patterns 'Class::method': %d" % len(pattern_addr))
+    log("[*] strings: %d unique" % len(str_index))
 
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
     if not text_b:
+        log("[!] no .text")
         return
     ts, te = text_b
     log("[*] .text: 0x%x - 0x%x" % (ts, te))
 
     t0 = time.time()
     text = load_range(r2, ts, te - ts)
-    log("[*] .text loaded %d bytes %.1fs" % (len(text or b""), time.time() - t0))
+    log("[*] .text %d bytes %.1fs" % (len(text or b""), time.time() - t0))
     if not text:
         return
 
@@ -557,160 +478,233 @@ def main():
 
     ptr_idx = build_ptr_index(data_blobs, ts, te)
     slot_to_target = build_slot_to_target(ptr_idx)
-    log("[*] chained ptr idx: %d targets, %d slots" % (len(ptr_idx), sum(len(v) for v in ptr_idx.values())))
+    log("[*] ptr idx: %d targets, %d slots"
+        % (len(ptr_idx), sum(len(v) for v in ptr_idx.values())))
 
     t0 = time.time()
-    adrp_add, bl_map, prologs = scan_text(text, ts)
+    adrp_add, prologs = scan_text(text, ts)
     prologs_sorted = sorted(prologs)
-    log("[*] adrp_add=%d bl=%d prologs=%d %.1fs"
-        % (len(adrp_add), len(bl_map), len(prologs), time.time() - t0))
+    log("[*] adrp_add=%d prologs=%d %.1fs"
+        % (len(adrp_add), len(prologs), time.time() - t0))
 
-    # инверт: string_addr -> [pc_ref] (только строки, к которым мы уже искали)
-    str_to_pc = {}
-    target_set_strings = set()
-    for al in str_index.values():
-        for a in al:
-            target_set_strings.add(a)
+    # построим str_addr → [pc] один раз
+    str_addr_to_pc = {}
     for pc, tgt in adrp_add:
-        if tgt in target_set_strings:
-            str_to_pc.setdefault(tgt, []).append(pc)
+        str_addr_to_pc.setdefault(tgt, []).append(pc)
+
+    # индекс Class::method из строк
+    class_method_funcs = {}  # "Class::method" -> func_addr
+    for s, al in str_index.items():
+        idx = s.find("::")
+        if idx <= 0:
+            continue
+        cls = s[:idx]
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", cls):
+            continue
+        rest = s[idx+2:]
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)", rest)
+        if not m:
+            continue
+        method = m.group(1)
+        key = cls + "::" + method
+        if key in class_method_funcs:
+            continue
+        for sa in al:
+            pcs = str_addr_to_pc.get(sa, [])
+            if pcs:
+                f = find_func_start(prologs_sorted, pcs[0])
+                class_method_funcs[key] = f
+                break
+    log("[*] Class::method funcs: %d" % len(class_method_funcs))
+
+    # vtable по классам
+    class_to_vtable = {}
+    all_vt_starts = set()
+    for cls in CLASSES:
+        # strings of class
+        anchor_funcs = set()
+        for key, f in class_method_funcs.items():
+            if key.startswith(cls + "::"):
+                anchor_funcs.add(f)
+        # strings exact match (asserts)
+        for s, al in str_index.items():
+            if s == cls or s.startswith(cls + "::"):
+                for sa in al:
+                    for pc in str_addr_to_pc.get(sa, []):
+                        anchor_funcs.add(find_func_start(prologs_sorted, pc))
+        if not anchor_funcs:
+            continue
+        best = None
+        for af in anchor_funcs:
+            for slot in ptr_idx.get(af, [])[:3]:
+                vt = expand_vtable(slot_to_target, slot)
+                if vt and (best is None or len(vt[1]) > len(best[1])):
+                    best = vt
+        if best:
+            class_to_vtable[cls] = best
+            all_vt_starts.add(best[0])
+    log("[*] class→vtable: %d" % len(class_to_vtable))
+
+    # xref на vtable → ctor
+    vt_to_ctors = {}
+    for pc, tgt in adrp_add:
+        if tgt in all_vt_starts:
+            f = find_func_start(prologs_sorted, pc)
+            vt_to_ctors.setdefault(tgt, set()).add(f)
+    log("[*] vtables with ctor xref: %d" % len(vt_to_ctors))
+
+    # resolve каждого таргета
+    results = {}
+    unresolved = []
+    for key, kind in TARGETS:
+        if kind == "skip":
+            unresolved.append((key, "skip"))
+            continue
+        if "." not in key:
+            unresolved.append((key, "no_dot"))
+            continue
+        cls, method = key.split(".", 1)
+
+        # ctor → через vtable
+        if kind == "ctor" or method == "ctor":
+            vt = class_to_vtable.get(cls)
+            if vt:
+                ctors = vt_to_ctors.get(vt[0], set())
+                if ctors:
+                    best_ctor = None
+                    best_score = -1
+                    for c in ctors:
+                        info = analyze_at(text, ts, c)
+                        if not info:
+                            continue
+                        if info["n_bl"] > best_score:
+                            best_score = info["n_bl"]
+                            best_ctor = c
+                    if best_ctor is not None:
+                        results[key] = best_ctor - base
+                        continue
+            # fallback: строка Class::Class
+            for pattern in (cls + "::" + cls, cls + "::ctor"):
+                if pattern in class_method_funcs:
+                    results[key] = class_method_funcs[pattern] - base
+                    break
+            if key in results:
+                continue
+            unresolved.append((key, "no_ctor"))
+            continue
+
+        # singleton → строка Class::getInstance / instance / sharedInstance
+        if kind == "singleton":
+            for cand in (cls + "::getInstance", cls + "::instance",
+                         cls + "::sharedInstance", cls + "::getInstanceCtor"):
+                if cand in class_method_funcs:
+                    results[key] = class_method_funcs[cand] - base
+                    break
+            if key in results:
+                continue
+            unresolved.append((key, "no_singleton"))
+            continue
+
+        # global (поле-указатель) — ищем через строку Class::method
+        if kind == "global":
+            for cand in (cls + "::" + method, cls + "::get" + method,
+                         cls + "::instance"):
+                if cand in class_method_funcs:
+                    results[key] = class_method_funcs[cand] - base
+                    break
+            if key in results:
+                continue
+            unresolved.append((key, "no_global"))
+            continue
+
+        # method → строка Class::method
+        if kind == "method":
+            # точное совпадение
+            cand = cls + "::" + method
+            if cand in class_method_funcs:
+                results[key] = class_method_funcs[cand] - base
+                continue
+            # перебор похожих: setTextAndScaleIfNecessary → setTextAndScale...
+            found = None
+            for k, f in class_method_funcs.items():
+                if k.startswith(cls + "::") and \
+                   k[len(cls)+2:].lower() == method.lower():
+                    found = f
+                    break
+            if found:
+                results[key] = found - base
+                continue
+            # префиксное
+            for k, f in class_method_funcs.items():
+                if k.startswith(cls + "::" + method):
+                    found = f
+                    break
+            if found:
+                results[key] = found - base
+                continue
+            unresolved.append((key, "no_string_match"))
+            continue
+
+        unresolved.append((key, "unknown_kind"))
 
     r2.quit()
 
-    results = {}
-    unresolved = []
-
-    # 1) resolve methods via string "Class::method"
-    for t in TARGETS:
-        cls, method, kind = parse_target(t)
-        if not method:
-            unresolved.append((t, "no_method"))
-            continue
-        if kind == "unknown":
-            # попробуем как есть в строках
-            found = None
-            for key in (t,):
-                if key in str_index:
-                    found = str_index[key]
-                    break
-            if found:
-                pcs = str_to_pc.get(found[0], [])
-                if pcs:
-                    f = find_func_start(prologs_sorted, pcs[0])
-                    results[t] = f - base
-                    log("[%s] resolved via exact string -> 0x%x" % (t, f))
-                    continue
-            unresolved.append((t, "unknown"))
-            continue
-
-        # строим ключ "Class::method"
-        patterns = []
-        if cls:
-            patterns.append(cls + "::" + method)
-            patterns.append(cls + "::" + method + ":")
-        patterns.append(method)
-
-        addr = None
-        chosen_key = None
-        for pat in patterns:
-            if pat in str_index:
-                addr = str_index[pat][0]
-                chosen_key = pat
-                break
-        if addr is None:
-            # ищем префиксно
-            for key, al in str_index.items():
-                if key.startswith((cls + "::" + method) if cls else method):
-                    addr = al[0]
-                    chosen_key = key
-                    break
-
-        if addr is None:
-            unresolved.append((t, "no_string"))
-            continue
-
-        pcs = str_to_pc.get(addr, [])
-        if not pcs:
-            unresolved.append((t, "no_xref"))
-            continue
-
-        f = find_func_start(prologs_sorted, pcs[0])
-        results[t] = f - base
-        log("[%s] str=%r -> func 0x%x" % (t, chosen_key[:50], f))
-
-    # 2) ctors через vtable
-    # для каждого класса ищем vtable и ctor
-    ctor_out = {}
-    for cls in CTOR_CLASSES:
-        addrs = []
-        for s, al in str_index.items():
-            if s == cls or s.startswith(cls + "::") or ("::" + cls) in s \
-               or s.startswith(cls + " ") or s.startswith(cls + "\t"):
-                addrs.extend(al)
-        if not addrs:
-            continue
-        anchor_funcs = set()
-        for sa in addrs:
-            for pc in str_to_pc.get(sa, []):
-                anchor_funcs.add(find_func_start(prologs_sorted, pc))
-        vt_starts = set()
-        for af in anchor_funcs:
-            slots = ptr_idx.get(af, [])
-            for slot in slots[:3]:
-                vt = expand_vtable(slot_to_target, slot)
-                if vt:
-                    vt_starts.add(vt[0])
-                    break
-        if not vt_starts:
-            continue
-        # ищем xref на vt через adrp+add
-        for pc, tgt in adrp_add:
-            if tgt in vt_starts:
-                f = find_func_start(prologs_sorted, pc)
-                info = analyze_at(text, ts, f)
-                if info and info["n_bl"] > 0:
-                    ctor_out[cls] = (f, tgt, info["n_bl"])
-                    break
-    log("[*] ctors resolved via vtable: %d" % len(ctor_out))
-
-    # 3) записать
+    # пишем offsets_resolved.js
     try:
         with open(OUT, "w") as fh:
-            fh.write("// Auto-generated offsets (v15)\n")
-            fh.write("// Resolved: %d / %d targets, ctors: %d\n\n"
-                     % (len(results), len(TARGETS), len(ctor_out)))
+            fh.write("// v17 auto-resolved\n")
+            fh.write("// base=0x%x\n" % base)
+            fh.write("// resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
             fh.write("export const offsets = Object.freeze({\n")
-            for t in TARGETS:
-                if t in results:
-                    fh.write("    %s: 0x%x,\n" % (t, results[t]))
+            for key, _ in TARGETS:
+                if key in results:
+                    fh.write("    %s: 0x%x,\n" % (key.replace(".", "_"), results[key]))
                 else:
-                    fh.write("    // %s: unresolved\n" % t)
-            fh.write("\n    // ctors via vtable\n")
-            for cls, (f, vt, nbl) in ctor_out.items():
-                fh.write("    %s__ctor: 0x%x,\n" % (cls, f - base))
+                    fh.write("    // %s: unresolved\n" % key.replace(".", "_"))
             fh.write("});\n")
     except Exception as e:
-        log("out error: %s" % e)
+        log("out: %s" % e)
 
+    # vtables.js
+    try:
+        with open(VT, "w") as fh:
+            fh.write("// vtable slots per class (rva)\n")
+            fh.write("export const vtables = Object.freeze({\n")
+            for cls in sorted(class_to_vtable):
+                vt_start, slots = class_to_vtable[cls]
+                fh.write("  %s: {\n" % cls)
+                fh.write("    addr: 0x%x,\n" % (vt_start - base))
+                fh.write("    slots: [\n")
+                for i, (sa, ta) in enumerate(slots):
+                    fh.write("      0x%x, // [%d]\n" % (ta - base, i))
+                fh.write("    ],\n  },\n")
+            fh.write("});\n")
+    except Exception as e:
+        log("vtables: %s" % e)
+
+    # отчёт
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# v15 target resolution\n")
+            fh.write("# v17 report\n")
             fh.write("# base=0x%x\n" % base)
             fh.write("# resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
-            for t in TARGETS:
-                if t in results:
-                    fh.write("%-55s 0x%08x\n" % (t, results[t]))
-                else:
-                    fh.write("%-55s UNRESOLVED\n" % t)
-            fh.write("\n# ctors via vtable\n")
-            for cls, (f, vt, nbl) in ctor_out.items():
-                fh.write("%-40s ctor=0x%08x vt=0x%08x n_bl=%d\n"
-                         % (cls, f - base, vt - base, nbl))
+            fh.write("## resolved:\n")
+            for key, _ in TARGETS:
+                if key in results:
+                    fh.write("  %-55s 0x%08x\n" % (key, results[key]))
+            fh.write("\n## unresolved:\n")
+            for key, why in unresolved:
+                fh.write("  %-55s (%s)\n" % (key, why))
+            fh.write("\n## vtables:\n")
+            for cls in sorted(class_to_vtable):
+                vt_start, slots = class_to_vtable[cls]
+                fh.write("%-40s vt=0x%08x slots=%d\n"
+                         % (cls, vt_start - base, len(slots)))
     except Exception as e:
-        log("report error: %s" % e)
+        log("report: %s" % e)
 
-    log("[+] resolved %d/%d via strings, %d ctors via vtable"
-        % (len(results), len(TARGETS), len(ctor_out)))
+    log("[+] resolved %d/%d" % (len(results), len(TARGETS)))
+    log("[+] wrote %s, %s, %s" % (OUT, VT, REPORT))
     log("[+] total %.1fs" % (time.time() - START))
 
 
