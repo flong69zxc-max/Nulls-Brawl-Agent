@@ -90,7 +90,6 @@ TARGETS = [
 "BattleLogPlayerEntry.ctor","FriendEntry.decode",
 "PlayerProfile.decode","AllianceMemberEntry.decode",
 ]
-
 CLASSES = sorted(set(t.split(".")[0] for t in TARGETS))
 SINGLETON_NAMES = ("getInstance","instance","sharedInstance","getInstanceCtor")
 
@@ -140,14 +139,14 @@ def pick_sections(sections):
         n = s.get("name", "") or ""
         p = s.get("perm", "") or ""
         va = s.get("vaddr", 0); sz = s.get("size", 0)
-        if sz <= 0 or va <= 0: continue
-        if ("__text" in n or ".text" in n) and "x" in p:
-            text = (va, va + sz)
-        elif "x" not in p and ("w" in p or "r" in p):
-            data.append((va, sz, n))
-    return text, data
+        if sz <= ,0 or va <= n 0: continue
+       ))
+ if ("__text" in n or ".text   " in n) and " returnx" in text p:
+            text =, (va, va + sz data)
+        elif "x
 
-def load_range(r2, va, size):
+" not in p and ("defw" in p or " loadr" in p):
+            data.append((va,_range sz(r2, va, size):
     CH = 0x400000; chunks = []; a = va; end = va + size
     while a < end:
         n = min(CH, end - a)
@@ -163,17 +162,17 @@ def load_range(r2, va, size):
 def is_adrp(w):            return (w & 0x9F000000) == 0x90000000
 def is_add_imm64(w):       return (w & 0xFF800000) == 0x91000000
 def is_bl(w):              return (w & 0xFC000000) == 0x94000000
+def is_blr(w):             return (w & 0xFFFFFC1F) == 0xD63F0000
 def is_str_x(w):           return (w & 0xFFC00000) == 0xF9000000
 def is_stp_x29_x30_pre(w): return (w & 0xFFC07FFF) == 0xA9807BFD
 def is_pacibsp(w):         return w == 0xD503237F
 def is_paciasp(w):         return w == 0xD503233F
 def is_bti_c(w):           return w == 0xD503245F
 def is_bti_j(w):           return w == 0xD503249F
-def is_sub_sp(w):          return (w & 0xFF8003FF) == 0xD10003FF
 
-def is_prolog_any(w):
+def is_real_prolog(w):
     return (is_stp_x29_x30_pre(w) or is_pacibsp(w) or is_paciasp(w)
-            or is_bti_c(w) or is_bti_j(w) or is_sub_sp(w))
+            or is_bti_c(w) or is_bti_j(w))
 
 def decode_adrp_imm(w, pc):
     immlo = (w >> 29) & 0x3; immhi = (w >> 5) & 0x7FFFF
@@ -210,34 +209,36 @@ def decode_ptr_candidates(raw, base, ts, te):
         out.append(base + t32)
     out.append(raw & 0xFFFFFFFFFFFF)
     out.append(base + (raw & 0xFFFFFFFFFFFF))
-    res = []
-    seen = set()
+    res = []; seen = set()
     for c in out:
         if c in seen: continue
         seen.add(c)
-        if ts <= c < te:
+        if ts <= c < te and (c & 3) == 0:
             res.append(c)
     return res
 
 def scan_text(text, ts):
     n = len(text) // 4
-    adrp_add = []; prologs = []; bl_map = {}
+    adrp_add = []; prologs = []; bl_targets = set()
     for i in range(n):
         w = struct.unpack_from("<I", text, i * 4)[0]
         pc = ts + i * 4
-        if is_prolog_any(w): prologs.append(pc)
+        if is_real_prolog(w): prologs.append(pc)
         if is_adrp(w):
             rd_adrp = w & 0x1F
             page = decode_adrp_imm(w, pc)
-            for j in range(i + 1, min(i + 6, n)):
+            for j in range(i + 1, min(i + 8, n)):
                 w2 = struct.unpack_from("<I", text, j * 4)[0]
                 if is_add_imm64(w2):
                     rd, rn, imm = decode_add_imm(w2)
-                    if rd == rd_adrp and rn == rd_adrp:
-                        adrp_add.append((pc, page + imm)); break
+                    if rn == rd_adrp:
+                        adrp_add.append((pc, page + imm))
+                        break
         if is_bl(w):
-            bl_map[pc] = decode_bl_target(w, pc)
-    return adrp_add, prologs, bl_map
+            t = decode_bl_target(w, pc)
+            if ts <= t < ts + len(text):
+                bl_targets.add(t)
+    return adrp_add, prologs, bl_targets
 
 def build_ptr_index(data_blobs, ts, te, base):
     idx = {}
@@ -255,11 +256,10 @@ def build_slot_to_target(ptr_idx):
     out = {}
     for tgt, slots in ptr_idx.items():
         for s in slots:
-            if s not in out:
-                out[s] = tgt
+            if s not in out: out[s] = tgt
     return out
 
-def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=2048):
+def expand_vtable(slot_to_target, anchor_slot, max_back=128, max_fwd=4096):
     vt_start = anchor_slot
     cur = anchor_slot - 8
     for _ in range(max_back):
@@ -276,7 +276,7 @@ def expand_vtable(slot_to_target, anchor_slot, max_back=64, max_fwd=2048):
 def ptr_lookup_fuzzy(ptr_idx, addr):
     hits = []
     if addr in ptr_idx: hits.append(addr)
-    for d in (4, -4, 8, -8, 12, -12, 16, -16, 20, -20, 24, -24, 28, -28, 32, -32):
+    for d in (4, -4, 8, -8, 12, -12, 16, -16, 20, -20, 24, -24, 32, -32, 64, -64):
         a = addr + d
         if a in ptr_idx and a not in hits:
             hits.append(a)
@@ -300,45 +300,36 @@ def main():
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
 
-    log("=== find_offsets v19 iOS PAC ===")
+    log("=== find_offsets v19 iOS (no-PAC fix) ===")
     log("targets=%d classes=%d" % (len(TARGETS), len(CLASSES)))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
-    r2.cmd("e scr.color=0")
-    r2.cmd("e asm.arch=arm")
-    r2.cmd("e asm.bits=64")
-
-    t0 = time.time()
+    r2.cmd("e scr.color=0"); r2.cmd("e asm.arch=arm"); r2.cmd("e asm.bits=64")
     r2.cmd("aa")
-    log("aa done %.1fs" % (time.time() - t0))
+    log("aa done")
 
     info = cmdj(r2, "ij") or {}
     base = info.get("baddr", 0x100000000) or 0x100000000
-    log("base=0x%x arch=%s bits=%s"
-        % (base, info.get("arch"), info.get("bits")))
+    log("base=0x%x" % base)
 
     str_index = build_string_index(r2, base)
     log("strings=%d" % len(str_index))
 
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
-    if not text_b:
-        log("no .text"); return
+    if not text_b: log("no .text"); return
     ts, te = text_b
     log(".text 0x%x-0x%x size=%d" % (ts, te, te - ts))
-    log("data sections:")
-    for va, sz, n in data_secs:
-        log("  %-24s 0x%x size=0x%x" % (n, va, sz))
 
     text = load_range(r2, ts, te - ts)
     if not text: return
-    log(".text loaded bytes=%d" % len(text))
+    log(".text loaded=%d bytes" % len(text))
 
     data_blobs = []
     for va, sz, n in data_secs:
         b = load_range(r2, va, sz)
         if b: data_blobs.append((va, b))
-    log("data loaded bytes=%d blobs=%d"
+    log("data loaded=%d bytes blobs=%d"
         % (sum(len(b) for _, b in data_blobs), len(data_blobs)))
 
     ptr_idx = build_ptr_index(data_blobs, ts, te, base)
@@ -348,34 +339,37 @@ def main():
     nf_target = base + 0xb3fde8
     log("check NativeFont.formatString@0x%x in ptr_idx=%s"
         % (nf_target, nf_target in ptr_idx))
-    log("first 12 ptr_idx targets: %s"
-        % [hex(x) for x in sorted(ptr_idx)[:12]])
 
-    adrp_add, prologs, bl_map = scan_text(text, ts)
-    log("adrp_add=%d prologs=%d bl=%d"
-        % (len(adrp_add), len(prologs), len(bl_map)))
+    adrp_add, prologs, bl_targets = scan_text(text, ts)
+    log("adrp_add=%d prologs=%d bl_targets=%d"
+        % (len(adrp_add), len(prologs), len(bl_targets)))
 
-    n_stp = n_paci = n_bti = n_subsp = 0
+    n_stp = n_paci = n_bti = 0
     for pc in prologs:
         off = (pc - ts) // 4
         w = struct.unpack_from("<I", text, off * 4)[0]
         if is_stp_x29_x30_pre(w): n_stp += 1
         elif is_pacibsp(w) or is_paciasp(w): n_paci += 1
         elif is_bti_c(w) or is_bti_j(w): n_bti += 1
-        elif is_sub_sp(w): n_subsp += 1
-    log("prologs: stp=%d paci=%d bti=%d subsp=%d"
-        % (n_stp, n_paci, n_bti, n_subsp))
+    log("prologs breakdown: stp=%d paci=%d bti=%d"
+        % (n_stp, n_paci, n_bti))
 
-    prologs_sorted = sorted(prologs)
+    func_starts = set(prologs)
+    func_starts.update(bl_targets)
+    func_starts_sorted = sorted(func_starts)
+    log("func_starts total=%d (prologs+bl)" % len(func_starts_sorted))
 
     def find_func_start(ia):
-        idx = bisect.bisect_right(prologs_sorted, ia) - 1
-        return prologs_sorted[idx] if idx >= 0 else (ia & ~0xF)
+        idx = bisect.bisect_right(func_starts_sorted, ia) - 1
+        if idx < 0: return None
+        s = func_starts_sorted[idx]
+        if ia - s > 0x4000: return None
+        return s
 
     in_ptr = 0
-    for p in prologs_sorted[:5000]:
+    for p in func_starts_sorted[:8000]:
         if ptr_lookup_fuzzy(ptr_idx, p): in_ptr += 1
-    log("prologs[0:5000] with fuzzy ptr hit=%d" % in_ptr)
+    log("func_starts[0:8000] fuzzy ptr hit=%d" % in_ptr)
 
     str_addr_to_pc = {}
     for pc, tgt in adrp_add:
@@ -400,13 +394,13 @@ def main():
                 f = find_func_start(pc)
                 if f and (pc - f) < 0x800:
                     best = f; break
-                if best is None: best = f
+                if best is None and f is not None: best = f
             if best is not None: break
         if best is not None:
             class_method_funcs[key] = best
             cls_counts[cls] = cls_counts.get(cls, 0) + 1
     log("Class::method funcs=%d" % len(class_method_funcs))
-    log("classes with most hits:")
+    log("top classes by anchors:")
     for cls, cnt in sorted(cls_counts.items(), key=lambda x: -x[1])[:12]:
         log("  %-24s %d" % (cls, cnt))
 
@@ -424,7 +418,7 @@ def main():
                 if f is not None:
                     class_method_funcs[key] = f; mang_hits += 1; break
             if key in class_method_funcs: break
-    log("+mangled hits=%d" % mang_hits)
+    log("+mangled=%d" % mang_hits)
 
     method_name_xrefs = {}
     for s, addrs in str_index.items():
@@ -433,7 +427,9 @@ def main():
         if s in ("null", "true", "false", "None"): continue
         for sa in addrs:
             for pc in str_addr_to_pc.get(sa, []):
-                method_name_xrefs.setdefault(s, set()).add(find_func_start(pc))
+                f = find_func_start(pc)
+                if f is not None:
+                    method_name_xrefs.setdefault(s, set()).add(f)
     log("plain method-name strings=%d" % len(method_name_xrefs))
 
     class_to_vtable = {}
@@ -443,13 +439,13 @@ def main():
     for cls in CLASSES:
         anchor_funcs = set()
         for key, f in class_method_funcs.items():
-            if key.startswith(cls + "::"):
-                anchor_funcs.add(f)
+            if key.startswith(cls + "::"): anchor_funcs.add(f)
         for s, al in str_index.items():
             if s == cls or s.startswith(cls + "::"):
                 for sa in al:
                     for pc in str_addr_to_pc.get(sa, []):
-                        anchor_funcs.add(find_func_start(pc))
+                        f = find_func_start(pc)
+                        if f is not None: anchor_funcs.add(f)
         if not anchor_funcs: continue
 
         in_ptr_direct = sum(1 for af in anchor_funcs if af in ptr_idx)
@@ -474,8 +470,7 @@ def main():
                                % (cls, len(anchor_funcs),
                                   in_ptr_direct, in_ptr_fuzzy))
     log("=== vtable anchor diagnostics ===")
-    for line in anchor_diag:
-        log("  " + line)
+    for line in anchor_diag: log("  " + line)
     log("class->vtable=%d" % len(class_to_vtable))
 
     func_to_names = {}
@@ -484,7 +479,7 @@ def main():
         func_to_names.setdefault(f, []).append((cls, method))
 
     total_prop = 0
-    for _ in range(3):
+    for _ in range(4):
         added = 0
         for cls, (vt_start, slots) in class_to_vtable.items():
             for _, func in slots:
@@ -501,7 +496,9 @@ def main():
     vt_to_ctors = {}
     for pc, tgt in adrp_add:
         if tgt in all_vt_starts:
-            vt_to_ctors.setdefault(tgt, set()).add(find_func_start(pc))
+            f = find_func_start(pc)
+            if f is not None:
+                vt_to_ctors.setdefault(tgt, set()).add(f)
     log("vtables with ctor xref=%d" % len(vt_to_ctors))
 
     results = {}
@@ -514,8 +511,8 @@ def main():
 
         if method == "ctor":
             hit = None
-            for k in (cls + "::" + cls, cls + "::ctor", cls + "::__ctor",
-                      cls + "::constructor", cls + "::new"):
+            for k in (cls+"::"+cls, cls+"::ctor", cls+"::__ctor",
+                      cls+"::constructor", cls+"::new"):
                 if k in class_method_funcs:
                     hit = class_method_funcs[k]; break
             if hit is not None:
@@ -525,7 +522,7 @@ def main():
                 for c in vt_to_ctors.get(vt[0], set()):
                     off = (c - ts) // 4
                     n = len(text) // 4; has_str = False; has_bl = 0
-                    for i in range(off, min(off + 200, n)):
+                    for i in range(off, min(off + 300, n)):
                         w = struct.unpack_from("<I", text, i * 4)[0]
                         if is_bl(w): has_bl += 1
                         if is_str_x(w) and (w & 0x1F) == 0: has_str = True
@@ -537,13 +534,22 @@ def main():
 
         if method in SINGLETON_NAMES:
             hit = None
-            for cand in (cls + "::" + method, cls + "::getInstance",
-                         cls + "::instance", cls + "::sharedInstance",
-                         cls + "::getInstanceCtor"):
+            for cand in (cls+"::"+method, cls+"::getInstance", cls+"::instance",
+                         cls+"::sharedInstance", cls+"::getInstanceCtor"):
                 if cand in class_method_funcs:
                     hit = class_method_funcs[cand]; break
             if hit is not None:
                 results[t] = hit - base; continue
+            vt = class_to_vtable.get(cls)
+            if vt:
+                vt_funcs = set(f for _, f in vt[1])
+                cands = method_name_xrefs.get(method, set()) & vt_funcs
+                if not cands:
+                    for alt in ("getInstance", "instance", "sharedInstance"):
+                        cands = method_name_xrefs.get(alt, set()) & vt_funcs
+                        if cands: break
+                if cands:
+                    results[t] = next(iter(cands)) - base; continue
             unresolved.append((t, "no_singleton")); continue
 
         hit = class_method_funcs.get(cls + "::" + method)
@@ -586,7 +592,7 @@ def main():
 
     try:
         with open(OUT, "w") as fh:
-            fh.write("// v19 auto-resolved (SCRE format) iOS PAC\n")
+            fh.write("// v19 auto-resolved (SCRE format) iOS\n")
             fh.write("// base=0x%x\n" % base)
             fh.write("// resolved=%d/%d\n\n" % (len(results), len(TARGETS)))
             fh.write("export const offsets = Object.freeze({\n")
