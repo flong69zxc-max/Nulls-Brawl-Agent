@@ -117,10 +117,7 @@ def build_string_index(r2, base):
 
 
 def get_sections(r2):
-    secs = cmdj(r2, "iSj")
-    if not secs:
-        return []
-    return secs
+    return cmdj(r2, "iSj") or []
 
 
 def get_text_bounds(sections):
@@ -141,7 +138,6 @@ def get_data_bounds_list(sections):
             continue
         if "w" not in p and "r" not in p:
             continue
-        # интересуют .const, .data, .got, __got, __const, .data.rel.ro
         if ("const" in n or "data" in n or "got" in n):
             va = s.get("vaddr", 0)
             sz = s.get("size", 0)
@@ -149,8 +145,6 @@ def get_data_bounds_list(sections):
                 out.append((va, sz, n))
     return out
 
-
-# --- ARM64 decoders ---
 
 def is_adrp(w):
     return (w & 0x9F000000) == 0x90000000
@@ -179,19 +173,6 @@ def decode_add_imm(w):
     return (rd, rn, imm12)
 
 
-def is_str_x_to_x(w):
-    # STR Xt, [Xn, #imm]  32-bit variant, 64-bit store
-    # bits 31:22 = 1111100100, 21:10 = imm12, 9:5 = Rn, 4:0 = Rt
-    return (w & 0xFFC00000) == 0xF9000000
-
-
-def decode_str_x(w):
-    rt = w & 0x1F
-    rn = (w >> 5) & 0x1F
-    imm12 = (w >> 10) & 0xFFF
-    return (rt, rn, imm12 * 8)
-
-
 def scan_adrp_add(r2, ts, te, target_set):
     CHUNK = 0x100000
     overlap = 32
@@ -200,7 +181,7 @@ def scan_adrp_add(r2, ts, te, target_set):
     carry = b""
     carry_addr = ts
     while addr < te:
-        if time.time() - START > BUDGET - 400:
+        if time.time() - START > BUDGET - 500:
             break
         size = min(CHUNK, te - addr)
         hx = cmd(r2, "p8 %d @ 0x%x" % (size, addr)).strip()
@@ -237,129 +218,58 @@ def scan_adrp_add(r2, ts, te, target_set):
     return results
 
 
-def scan_adrp_add_str_to(r2, ts, te, target_set):
-    """Ищем ADRP+ADD, дающие target, за которыми следует STR xN, [xM, #0].
-    Возвращает dict target -> list of (str_instr_addr, add_instr_addr, reg_of_target).
-    Это признак записи vtable в this.
-    """
-    CHUNK = 0x100000
-    overlap = 64
-    results = {}
-    addr = ts
-    carry = b""
-    carry_addr = ts
-    while addr < te:
-        if time.time() - START > BUDGET - 400:
-            break
-        size = min(CHUNK, te - addr)
-        hx = cmd(r2, "p8 %d @ 0x%x" % (size, addr)).strip()
-        if not hx:
-            addr += size
-            continue
-        try:
-            data = bytes.fromhex(hx)
-        except Exception:
-            addr += size
-            continue
-        data = carry + data
-        data_start = carry_addr
-        n = len(data) // 4
-        for i in range(n):
-            off = i * 4
-            w = struct.unpack_from("<I", data, off)[0]
-            ia = data_start + off
-            if is_adrp(w):
-                rd_adrp = w & 0x1F
-                page = decode_adrp_imm(w, ia)
-                for j in range(i + 1, min(i + 7, n)):
-                    w2 = struct.unpack_from("<I", data, j * 4)[0]
-                    if is_add_imm64(w2):
-                        rd, rn, imm = decode_add_imm(w2)
-                        if rd == rd_adrp and rn == rd_adrp:
-                            target = page + imm
-                            if target in target_set:
-                                # ищем STR xRd, [xM] в следующих 4 инструкциях
-                                for k in range(j + 1, min(j + 5, n)):
-                                    w3 = struct.unpack_from("<I", data, k * 4)[0]
-                                    if is_str_x_to_x(w3):
-                                        rt, rn2, off3 = decode_str_x(w3)
-                                        if rt == rd:
-                                            # store target (vtable) в [rn2]
-                                            results.setdefault(target, []).append(
-                                                (ia, data_start + k * 4, rn2))
-                                            break
-                            break
-        carry = data[-overlap:] if len(data) > overlap else data
-        carry_addr = addr + size - len(carry)
-        addr += size
-    return results
-
-
 def find_vtable_in_data(r2, func_addr, data_secs):
-    """Ищем 8-байтовые слоты в data-секциях, равные func_addr."""
     hits = []
-    needle = struct.pack("<Q", func_addr & 0xFFFFFFFFFFFFFFFF)
+    needle_hex = "%016x" % (func_addr & 0xFFFFFFFFFFFFFFFF)
+    res = cmdj(r2, "/v8 %s" % needle_hex)
+    if res and isinstance(res, list):
+        for h in res:
+            if isinstance(h, dict) and "addr" in h:
+                hits.append((h["addr"], ""))
+        return hits
     for va, sz, name in data_secs:
-        # читаем чанками, чтобы не завалить r2
-        CHUNK = 0x80000
-        a = va
-        while a < va + sz:
-            n = min(CHUNK, va + sz - a)
-            hx = cmd(r2, "p8 %d @ 0x%x" % (n, a)).strip()
-            if not hx:
-                break
-            try:
-                b = bytes.fromhex(hx)
-            except Exception:
-                break
-            start = 0
-            while True:
-                idx = b.find(needle, start)
-                if idx < 0:
-                    break
-                if (a + idx) % 8 == 0:
-                    hits.append((a + idx, name))
-                start = idx + 1
-            a += n
+        res = cmdj(r2, "/v8 %s @ 0x%x" % (needle_hex, va))
+        if res and isinstance(res, list):
+            for h in res:
+                if isinstance(h, dict) and "addr" in h:
+                    hits.append((h["addr"], name))
     return hits
 
 
 def expand_vtable(r2, anchor):
-    """Расширяем массив вперёд и назад, все слоты — указатели в .text."""
-    # читаем 256 слотов вперёд и 256 назад
     PTR = 8
+    back_off = 0x800
+    fwd_off = 0x1000
     start = anchor
-    # назад
-    prev = anchor - PTR
-    for _ in range(256):
-        hx = cmd(r2, "pxq 8 @ 0x%x" % prev).strip()
-        if not hx:
-            break
+
+    hx = cmd(r2, "p8 %d @ 0x%x" % (back_off, anchor - back_off)).strip()
+    if hx:
         try:
-            v = int(hx.split()[1], 16)
+            b = bytes.fromhex(hx)
+            n = len(b) // 8
+            for i in range(n - 1, -1, -1):
+                v = struct.unpack_from("<Q", b, i * 8)[0]
+                if v == 0:
+                    break
+                if v < 0x100000000:
+                    break
+                start = anchor - back_off + i * 8
         except Exception:
-            break
-        if v == 0 or v < 0x100000000:
-            break
-        # проверим, что v в .text
-        # пропустим, но попробуем прочитать как адрес
-        start = prev
-        prev -= PTR
-    # вперёд
+            pass
+
     slots = []
-    cur = start
-    for _ in range(512):
-        hx = cmd(r2, "pxq 8 @ 0x%x" % cur).strip()
-        if not hx:
-            break
+    hx = cmd(r2, "p8 %d @ 0x%x" % (fwd_off, start)).strip()
+    if hx:
         try:
-            v = int(hx.split()[1], 16)
+            b = bytes.fromhex(hx)
+            n = len(b) // 8
+            for i in range(n):
+                v = struct.unpack_from("<Q", b, i * 8)[0]
+                if v == 0:
+                    break
+                slots.append((start + i * 8, v))
         except Exception:
-            break
-        if v == 0:
-            break
-        slots.append((cur, v))
-        cur += PTR
+            pass
     return start, slots
 
 
@@ -405,20 +315,15 @@ def analyze_function(r2, func_addr):
     n_call = 0
     n_ret = 0
     n_str_x0 = 0
-    n_bl_plt = 0
     for o in ops:
         t = o.get("type", "")
         if t == "call":
             n_call += 1
         elif t == "ret":
             n_ret += 1
-        elif t in ("store", "mov", "str"):
-            pass
         dis = (o.get("disasm") or "").strip()
         if dis.startswith("str x0,"):
             n_str_x0 += 1
-        if dis.startswith("bl ") and "sym.imp" in dis:
-            n_bl_plt += 1
     return {
         "func": func_addr,
         "size": size,
@@ -426,8 +331,6 @@ def analyze_function(r2, func_addr):
         "n_call": n_call,
         "n_ret": n_ret,
         "n_str_x0": n_str_x0,
-        "n_bl_plt": n_bl_plt,
-        "ops_sample": ops[:10],
     }
 
 
@@ -449,16 +352,13 @@ def score_function(info):
 
 
 def find_xrefs_to(r2, addr):
-    """Ищем xref в .text через ADRP+ADD."""
-    # уже считали adrp_hits для строк; но здесь общий случай
     x = cmdj(r2, "axtj @ 0x%x" % addr)
     if x:
         return [xx.get("from") for xx in x if xx.get("from")]
     return []
 
 
-def scan_class_via_vtable(r2, cls, anchor_func, data_secs, adrp_str_hits, base):
-    """От якорь-функции к vtable, потом от vtable к ctor."""
+def scan_class_via_vtable(r2, cls, anchor_func, data_secs, base):
     log("[%s] looking for vtable containing func 0x%x" % (cls, anchor_func))
     vt_hits = find_vtable_in_data(r2, anchor_func, data_secs)
     if not vt_hits:
@@ -467,20 +367,14 @@ def scan_class_via_vtable(r2, cls, anchor_func, data_secs, adrp_str_hits, base):
 
     log("[%s] vtable candidates: %d" % (cls, len(vt_hits)))
     for v, name in vt_hits[:5]:
-        log("[%s]   slot in %s @ 0x%x" % (cls, name, v))
+        log("[%s]   slot in %s @ 0x%x" % (cls, name or "?", v))
 
-    # расширим первую
     start, slots = expand_vtable(r2, vt_hits[0][0])
-    log("[%s] expanded vtable: start=0x%x, slots=%d"
-        % (cls, start, len(slots)))
+    log("[%s] expanded vtable: start=0x%x slots=%d" % (cls, start, len(slots)))
 
-    # ищем ADRP+ADD на start (ctor пишет vtable в this)
-    # у нас уже есть полный скан — но только на строки
-    # так что сделаем точечный axtj на start
     xrefs = find_xrefs_to(r2, start)
     if not xrefs:
-        # попробуем ручной скан — можно позже
-        log("[%s] axtj on 0x%x empty" % (cls, start))
+        log("[%s] axtj on vtable 0x%x empty" % (cls, start))
         return None
 
     log("[%s] xrefs on vtable start: %d" % (cls, len(xrefs)))
@@ -503,17 +397,16 @@ def scan_class_via_vtable(r2, cls, anchor_func, data_secs, adrp_str_hits, base):
 
 
 def scan_class_via_init(r2, cls, anchor_funcs, init_offsets, base):
-    """Ищем init_offset-функцию, которая вызывает один из наших якорей."""
     anchor_set = set(anchor_funcs)
     cands = []
     for io in init_offsets[:400]:
+        if time.time() - START > BUDGET - 200:
+            break
         f_io = get_function_at(r2, io)
         if not f_io:
             continue
-        # только не-логи
         if is_logger(f_io[1]):
             continue
-        # посмотрим, что вызывает f_io
         ops = cmdj(r2, "pdj 80 @ 0x%x" % f_io[0])
         if not ops:
             continue
@@ -523,7 +416,6 @@ def scan_class_via_init(r2, cls, anchor_funcs, init_offsets, base):
                 tgt = o.get("jump", 0) or o.get("ptr", 0)
                 if tgt:
                     calls.append(tgt)
-        # если вызывает наш якорь
         hit_anchor = False
         for c in calls:
             if c in anchor_set:
@@ -531,7 +423,6 @@ def scan_class_via_init(r2, cls, anchor_funcs, init_offsets, base):
                 break
         if not hit_anchor:
             continue
-        # ctor — следующая функция, вызываемая из f_io
         for c in calls:
             if c in anchor_set:
                 continue
@@ -566,7 +457,6 @@ def scan_class(r2, cls, str_index, adrp_hits, data_secs, init_offsets, base):
     for s in strings_used[:3]:
         log("[%s]   text: %r" % (cls, s[:80]))
 
-    # якоря-функции
     anchor_funcs = []
     for sa in addrs:
         for ia in adrp_hits.get(sa, []):
@@ -584,14 +474,13 @@ def scan_class(r2, cls, str_index, adrp_hits, data_secs, init_offsets, base):
     log("[%s] anchor funcs: %s" % (cls, ["0x%x" % a for a in anchor_funcs[:5]]))
 
     candidates = []
-
-    # подход 1: vtable
     for af in anchor_funcs[:3]:
-        res = scan_class_via_vtable(r2, cls, af, data_secs, adrp_hits, base)
+        if time.time() - START > BUDGET - 120:
+            break
+        res = scan_class_via_vtable(r2, cls, af, data_secs, base)
         if res:
             candidates.extend(res)
 
-    # подход 2: init_offsets
     if not candidates:
         log("[%s] vtable path failed, trying init_offsets ..." % cls)
         res = scan_class_via_init(r2, cls, anchor_funcs, init_offsets, base)
@@ -599,7 +488,6 @@ def scan_class(r2, cls, str_index, adrp_hits, data_secs, init_offsets, base):
             candidates.extend(res)
 
     if not candidates:
-        # fallback — сам якорь, но помечаем что не ctor
         af = anchor_funcs[0]
         info = analyze_function(r2, af)
         if info:
@@ -661,8 +549,12 @@ def main():
     base = (info or {}).get("baddr", 0x100000000) or 0x100000000
     log("base: 0x%x" % base)
 
+    t0 = time.time()
     r2.cmd("aaa")
+    log("aaa %.1fs" % (time.time() - t0))
+    t0 = time.time()
     r2.cmd("aac")
+    log("aac %.1fs" % (time.time() - t0))
 
     str_index = build_string_index(r2, base)
     if not str_index:
@@ -689,8 +581,10 @@ def main():
     for va, sz, n in data_secs:
         log("    %s @ 0x%x size 0x%x" % (n, va, sz))
 
+    t0 = time.time()
     adrp_hits = scan_adrp_add(r2, ts, te, target_set)
-    log("[*] adrp+add hits: %d" % sum(len(v) for v in adrp_hits.values()))
+    log("[*] adrp+add scan %.1fs hits=%d" % (time.time() - t0,
+                                             sum(len(v) for v in adrp_hits.values())))
 
     init_offsets = []
     for s in sections:
@@ -728,7 +622,7 @@ def main():
 
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# r2 ctor resolution (v8, vtable path)\n")
+            fh.write("# r2 ctor resolution (v8)\n")
             fh.write("# base=0x%x\n\n" % base)
             for r in results:
                 fh.write("=== %s ===\n" % r["class"])
@@ -758,6 +652,7 @@ def main():
         log("write OUT failed: %s" % e)
 
     log("[+] wrote %s and %s" % (OUT, REPORT))
+    log("[+] total time %.1fs" % (time.time() - START))
 
 
 if __name__ == "__main__":
