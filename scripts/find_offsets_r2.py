@@ -92,6 +92,13 @@ TARGETS = [
 ]
 CLASSES = sorted(set(t.split(".")[0] for t in TARGETS))
 SINGLETON_NAMES = ("getInstance","instance","sharedInstance","getInstanceCtor")
+METHOD_NAMES = sorted(set(
+    t.split(".", 1)[1] for t in TARGETS if "." in t
+))
+
+PROBE_CLASSES = ["GameButton", "Character", "NativeFont", "MessageManager",
+                 "Stage", "MovieClip", "HomePage", "LogicDataTables",
+                 "LogicProjectileData", "LoadingScreen", "GUI"]
 
 _fh = None
 def log(m):
@@ -158,9 +165,17 @@ def load_range(r2, va, size):
 def is_adrp(w): return (w & 0x9F000000) == 0x90000000
 def is_add_imm64(w): return (w & 0xFF800000) == 0x91000000
 def is_bl(w): return (w & 0xFC000000) == 0x94000000
+def is_b_uncond(w): return (w & 0xFC000000) == 0x14000000
 def is_str_x(w): return (w & 0xFFC00000) == 0xF9000000
+def is_ret(w): return w == 0xD65F03C0
+def is_nop(w): return w == 0xD503201F
+def is_brk(w): return w == 0xD4200000
+def is_udf_any(w): return (w & 0xFFF00000) == 0x00000000
 
-def is_stp_sp_pre(w):
+def is_stp_x29_x30_pre(w):
+    return (w & 0xFFC07FFF) == 0xA9807BFD
+
+def is_any_stp_sp_pre(w):
     if (w & 0xFFC00000) != 0xA9800000: return False
     if ((w >> 5) & 0x1F) != 31: return False
     return True
@@ -169,10 +184,6 @@ def is_pacibsp(w): return w == 0xD503237F
 def is_paciasp(w): return w == 0xD503233F
 def is_bti_c(w): return w == 0xD503245F
 def is_bti_j(w): return w == 0xD503249F
-
-def is_real_prolog(w):
-    return is_stp_sp_pre(w) or is_pacibsp(w) or is_paciasp(w) \
-        or is_bti_c(w) or is_bti_j(w)
 
 def decode_adrp_imm(w, pc):
     immlo = (w >> 29) & 0x3; immhi = (w >> 5) & 0x7FFFF
@@ -219,11 +230,21 @@ def decode_ptr_candidates(raw, base, ts, te):
 
 def scan_text(text, ts):
     n = len(text) // 4
-    adrp_add = []; prologs = []
+    adrp_add = []; prologs = []; prologs_loose = []
     for i in range(n):
         w = struct.unpack_from("<I", text, i * 4)[0]
         pc = ts + i * 4
-        if is_real_prolog(w): prologs.append(pc)
+        if is_stp_x29_x30_pre(w) or is_pacibsp(w) or is_paciasp(w) \
+           or is_bti_c(w) or is_bti_j(w):
+            prologs.append(pc)
+        elif is_any_stp_sp_pre(w):
+            prev_ok = False
+            if i > 0:
+                wp = struct.unpack_from("<I", text, (i - 1) * 4)[0]
+                if is_ret(wp) or is_nop(wp) or is_brk(wp) or is_b_uncond(wp):
+                    prev_ok = True
+            if prev_ok:
+                prologs_loose.append(pc)
         if is_adrp(w):
             rd_adrp = w & 0x1F
             page = decode_adrp_imm(w, pc)
@@ -234,7 +255,7 @@ def scan_text(text, ts):
                     if rn == rd_adrp:
                         adrp_add.append((pc, page + imm))
                         break
-    return adrp_add, prologs
+    return adrp_add, prologs, prologs_loose
 
 def build_ptr_index(data_blobs, ts, te, base):
     idx = {}
@@ -287,8 +308,9 @@ def main():
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
 
-    log("=== find_offsets v19 iOS (stp-only) ===")
-    log("targets=%d classes=%d" % (len(TARGETS), len(CLASSES)))
+    log("=== find_offsets v19 iOS VERBOSE ===")
+    log("targets=%d classes=%d methods=%d"
+        % (len(TARGETS), len(CLASSES), len(METHOD_NAMES)))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0"); r2.cmd("e asm.arch=arm"); r2.cmd("e asm.bits=64")
@@ -300,25 +322,47 @@ def main():
     log("base=0x%x" % base)
 
     str_index = build_string_index(r2, base)
-    log("strings=%d" % len(str_index))
+    log("strings total=%d" % len(str_index))
+
+    log("--- string inventory check (only our classes) ---")
+    for cls in CLASSES[:30]:
+        cnt_direct = sum(1 for s in str_index
+                         if s == cls or s.startswith(cls + "::"))
+        cnt_methods = 0
+        for s in str_index:
+            if s.startswith(cls + "::"):
+                cnt_methods += 1
+        log("  %-24s strings=%d (incl %d Class::method)"
+            % (cls, cnt_direct, cnt_methods))
+    log("  ... %d more classes" % max(0, len(CLASSES) - 30))
+
+    log("--- string inventory check (only our methods) ---")
+    method_count = {}
+    for s in str_index:
+        if s in METHOD_NAMES:
+            method_count[s] = len(str_index[s])
+    log("  plain method-name strings found: %d/%d"
+        % (len(method_count), len(METHOD_NAMES)))
+    for m in sorted(method_count)[:20]:
+        log("    %-32s %d" % (m, method_count[m]))
 
     sections = get_sections(r2)
     text_b, data_secs = pick_sections(sections)
     if not text_b:
-        log("no .text"); return
+        log("FATAL no .text"); return
     ts, te = text_b
     log(".text 0x%x-0x%x size=%d" % (ts, te, te - ts))
 
     text = load_range(r2, ts, te - ts)
     if not text:
-        log("failed to load .text"); return
-    log(".text loaded bytes=%d" % len(text))
+        log("FATAL load .text"); return
+    log(".text loaded=%d" % len(text))
 
     data_blobs = []
     for va, sz, n in data_secs:
         b = load_range(r2, va, sz)
         if b: data_blobs.append((va, b))
-    log("data loaded bytes=%d blobs=%d"
+    log("data loaded=%d blobs=%d"
         % (sum(len(b) for _, b in data_blobs), len(data_blobs)))
 
     ptr_idx = build_ptr_index(data_blobs, ts, te, base)
@@ -326,14 +370,15 @@ def main():
     log("ptr_idx targets=%d slots=%d" % (len(ptr_idx), len(slot_to_tgt)))
 
     nf_target = base + 0xb3fde8
-    log("check NativeFont.formatString@0x%x in ptr_idx=%s"
+    log("sanity: NativeFont.formatString@0x%x in_ptr=%s"
         % (nf_target, nf_target in ptr_idx))
 
-    adrp_add, prologs = scan_text(text, ts)
-    log("adrp_add=%d prologs=%d" % (len(adrp_add), len(prologs)))
+    adrp_add, prologs, prologs_loose = scan_text(text, ts)
+    log("adrp_add=%d prologs_strict=%d prologs_loose=%d"
+        % (len(adrp_add), len(prologs), len(prologs_loose)))
 
     prologs_sorted = sorted(prologs)
-    log("func_starts (stp-only) total=%d" % len(prologs_sorted))
+    log("func_starts(strict) total=%d" % len(prologs_sorted))
 
     def find_func_start(ia):
         idx = bisect.bisect_right(prologs_sorted, ia) - 1
@@ -342,11 +387,25 @@ def main():
         if ia - s > 0x8000: return None
         return s
 
-    in_ptr = 0
-    limit = min(8000, len(prologs_sorted))
-    for p in prologs_sorted[:limit]:
-        if p in ptr_idx: in_ptr += 1
-    log("prologs[0:%d] in ptr_idx=%d" % (limit, in_ptr))
+    log("--- probe: anchor → func_start sanity ---")
+    for cls in PROBE_CLASSES:
+        anchors_from_strings = []
+        for s, al in str_index.items():
+            if s == cls or s.startswith(cls + "::"):
+                for sa in al:
+                    for pc in [p for p, t in adrp_add if t == sa][:3]:
+                        f = find_func_start(pc)
+                        if f is not None:
+                            anchors_from_strings.append((s, pc, f))
+        if anchors_from_strings:
+            log("  %s: %d string-anchor candidates"
+                % (cls, len(anchors_from_strings)))
+            for s, pc, f in anchors_from_strings[:5]:
+                in_ptr = f in ptr_idx
+                log("    str='%s' pc=0x%x func=0x%x in_ptr=%s"
+                    % (s[:40], pc, f, in_ptr))
+        else:
+            log("  %s: no string anchors" % cls)
 
     str_addr_to_pc = {}
     for pc, tgt in adrp_add:
@@ -378,9 +437,15 @@ def main():
             class_method_funcs[key] = best
             cls_counts[cls] = cls_counts.get(cls, 0) + 1
     log("Class::method funcs=%d" % len(class_method_funcs))
-    log("top classes by anchor count:")
-    for cls, cnt in sorted(cls_counts.items(), key=lambda x: -x[1])[:12]:
-        log("  %-24s %d" % (cls, cnt))
+
+    log("--- Class::method anchors only for OUR classes ---")
+    for cls in CLASSES:
+        keys = [k for k in class_method_funcs if k.startswith(cls + "::")]
+        if keys:
+            log("  %s: %d" % (cls, len(keys)))
+            for k in keys[:6]:
+                log("    %-50s 0x%x"
+                    % (k, class_method_funcs[k] - base))
 
     mang_hits = 0
     for s, addrs in str_index.items():
@@ -401,19 +466,19 @@ def main():
     method_name_xrefs = {}
     for s, addrs in str_index.items():
         if "::" in s: continue
-        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]{2,48}$", s): continue
-        if s in ("null", "true", "false", "None"): continue
+        if s not in METHOD_NAMES: continue
         for sa in addrs:
             for pc in str_addr_to_pc.get(sa, []):
                 f = find_func_start(pc)
                 if f is not None:
                     method_name_xrefs.setdefault(s, set()).add(f)
-    log("plain method-name strings=%d" % len(method_name_xrefs))
+    log("method-name xrefs for our methods: %d unique names"
+        % len(method_name_xrefs))
 
     class_to_vtable = {}
     all_vt_starts = set()
-    anchor_diag = []
 
+    log("--- vtable anchor diagnostics (all our classes) ---")
     for cls in CLASSES:
         anchor_funcs = set()
         for key, f in class_method_funcs.items():
@@ -426,9 +491,13 @@ def main():
                         f = find_func_start(pc)
                         if f is not None:
                             anchor_funcs.add(f)
-        if not anchor_funcs: continue
+        if not anchor_funcs:
+            log("  %-24s anchors=0" % cls)
+            continue
 
-        in_ptr_direct = sum(1 for af in anchor_funcs if af in ptr_idx)
+        in_ptr_list = [af for af in anchor_funcs if af in ptr_idx]
+        log("  %-24s anchors=%d in_ptr=%d"
+            % (cls, len(anchor_funcs), len(in_ptr_list)))
 
         best = None
         for af in anchor_funcs:
@@ -439,16 +508,11 @@ def main():
         if best:
             class_to_vtable[cls] = best
             all_vt_starts.add(best[0])
-            anchor_diag.append(
-                "%-24s anchors=%d in_ptr=%d vt=0x%x slots=%d"
-                % (cls, len(anchor_funcs), in_ptr_direct,
-                   best[0] - base, len(best[1])))
+            log("    -> vtable@0x%x slots=%d"
+                % (best[0] - base, len(best[1])))
         else:
-            anchor_diag.append(
-                "%-24s anchors=%d in_ptr=%d NO_VT"
-                % (cls, len(anchor_funcs), in_ptr_direct))
-    log("=== vtable anchor diagnostics ===")
-    for line in anchor_diag: log("  " + line)
+            log("    -> NO_VT")
+
     log("class->vtable=%d" % len(class_to_vtable))
 
     func_to_names = {}
@@ -479,6 +543,7 @@ def main():
                 vt_to_ctors.setdefault(tgt, set()).add(f)
     log("vtables with ctor xref=%d" % len(vt_to_ctors))
 
+    log("--- resolution trace ---")
     results = {}
     unresolved = []
 
@@ -486,28 +551,30 @@ def main():
         if "." not in t:
             unresolved.append((t, "no_dot")); continue
         cls, method = t.split(".", 1)
+        trace = []
 
         if method == "ctor":
             hit = None
             for k in (cls+"::"+cls, cls+"::ctor", cls+"::__ctor",
                       cls+"::constructor", cls+"::new"):
                 if k in class_method_funcs:
-                    hit = class_method_funcs[k]; break
+                    hit = class_method_funcs[k]
+                    trace.append("string %s" % k)
+                    break
             if hit is not None:
-                results[t] = hit - base; continue
+                results[t] = hit - base
+                log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+                continue
             vt = class_to_vtable.get(cls)
             if vt:
+                trace.append("vt=0x%x" % (vt[0]-base))
                 for c in vt_to_ctors.get(vt[0], set()):
-                    off = (c - ts) // 4
-                    n = len(text) // 4; has_str = False; has_bl = 0
-                    for i in range(off, min(off + 300, n)):
-                        w = struct.unpack_from("<I", text, i * 4)[0]
-                        if is_bl(w): has_bl += 1
-                        if is_str_x(w) and (w & 0x1F) == 0: has_str = True
-                        if w == 0xD65F03C0 and i > off + 5: break
-                    if has_str or has_bl >= 3:
-                        results[t] = c - base; break
-            if t in results: continue
+                    trace.append("ctor_cand=0x%x" % (c - base))
+                    results[t] = c - base; break
+            if t in results:
+                log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+                continue
+            log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
             unresolved.append((t, "no_ctor")); continue
 
         if method in SINGLETON_NAMES:
@@ -515,43 +582,62 @@ def main():
             for cand in (cls+"::"+method, cls+"::getInstance", cls+"::instance",
                          cls+"::sharedInstance", cls+"::getInstanceCtor"):
                 if cand in class_method_funcs:
-                    hit = class_method_funcs[cand]; break
+                    hit = class_method_funcs[cand]
+                    trace.append("string %s" % cand); break
             if hit is not None:
-                results[t] = hit - base; continue
+                results[t] = hit - base
+                log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+                continue
             vt = class_to_vtable.get(cls)
             if vt:
+                trace.append("vt=0x%x" % (vt[0]-base))
                 vt_funcs = set(f for _, f in vt[1])
-                cands = method_name_xrefs.get(method, set()) & vt_funcs
-                if not cands:
-                    for alt in ("getInstance", "instance", "sharedInstance"):
-                        cands = method_name_xrefs.get(alt, set()) & vt_funcs
-                        if cands: break
-                if cands:
-                    results[t] = next(iter(cands)) - base; continue
+                for alt in (method, "getInstance", "instance", "sharedInstance"):
+                    cands = method_name_xrefs.get(alt, set()) & vt_funcs
+                    if cands:
+                        results[t] = next(iter(cands)) - base
+                        trace.append("plain '%s' in vt" % alt)
+                        break
+            if t in results:
+                log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+                continue
+            log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
             unresolved.append((t, "no_singleton")); continue
 
         hit = class_method_funcs.get(cls + "::" + method)
         if hit is not None:
-            results[t] = hit - base; continue
+            results[t] = hit - base
+            trace.append("direct string")
+            log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+            continue
 
         found = None
         for k, f in class_method_funcs.items():
             if k.startswith(cls + "::") and \
-               k[len(cls) + 2:].lower() == method.lower():
-                found = f; break
+               k[len(cls)+2:].lower() == method.lower():
+                found = f
+                trace.append("prefix %s" % k); break
         if found is None:
             for k, f in class_method_funcs.items():
                 if k.startswith(cls + "::" + method):
-                    found = f; break
+                    found = f
+                    trace.append("prefix %s" % k); break
         if found is not None:
-            results[t] = found - base; continue
+            results[t] = found - base
+            log("  %-40s -> 0x%x (%s)" % (t, results[t], " | ".join(trace)))
+            continue
 
         vt = class_to_vtable.get(cls)
         if vt:
+            trace.append("vt=0x%x" % (vt[0]-base))
             vt_funcs = set(f for _, f in vt[1])
             cands = method_name_xrefs.get(method, set()) & vt_funcs
             if cands:
-                results[t] = next(iter(cands)) - base; continue
+                results[t] = next(iter(cands)) - base
+                trace.append("plain '%s' ∩ vt" % method)
+                log("  %-40s -> 0x%x (%s)"
+                    % (t, results[t], " | ".join(trace)))
+                continue
             for k, f in class_method_funcs.items():
                 if not k.endswith("::" + method): continue
                 other_cls = k.split("::", 1)[0]
@@ -561,9 +647,15 @@ def main():
                 for i, (_, tf) in enumerate(vt2[1]):
                     if tf == f: idx2 = i; break
                 if idx2 is None or idx2 >= len(vt[1]): continue
-                results[t] = vt[1][idx2][1] - base; break
-            if t in results: continue
+                results[t] = vt[1][idx2][1] - base
+                trace.append("slot %d from %s::%s" % (idx2, other_cls, method))
+                break
+            if t in results:
+                log("  %-40s -> 0x%x (%s)"
+                    % (t, results[t], " | ".join(trace)))
+                continue
 
+        log("  %-40s FAIL (%s)" % (t, " | ".join(trace) or "no path"))
         unresolved.append((t, "no_match"))
 
     r2.quit()
@@ -592,14 +684,10 @@ def main():
         log("out: %s" % e)
 
     log("")
-    log("=== resolved %d/%d ===" % (len(results), len(TARGETS)))
+    log("=== RESOLVED %d/%d ===" % (len(results), len(TARGETS)))
     for t in TARGETS:
         if t in results:
             log("  %-55s 0x%08x" % (t, results[t]))
-    log("")
-    log("=== unresolved ===")
-    for t, why in unresolved:
-        log("  %-55s (%s)" % (t, why))
     log("")
     log("=== class->vtable ===")
     for cls in sorted(class_to_vtable):
