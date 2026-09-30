@@ -43,8 +43,6 @@ CLASSES = [
 ]
 
 _log_fh = None
-TEXT = None
-TEXT_ADDR = 0
 
 
 def log(m):
@@ -76,17 +74,6 @@ def cmd(r2, c):
         return ""
 
 
-def is_logger(name):
-    if not name:
-        return False
-    n = name.lower()
-    for b in ("log", "print", "trace", "assert", "debug", "fatal",
-              "panic", "abort", "warn", "error"):
-        if b in n:
-            return True
-    return False
-
-
 def addr_of(s, base):
     va = s.get("vaddr", 0)
     pa = s.get("paddr", 0)
@@ -100,11 +87,9 @@ def addr_of(s, base):
 
 
 def build_string_index(r2, base):
-    strings = cmdj(r2, "izj")
-    if not strings:
-        return {}
-    total = 0
+    strings = cmdj(r2, "izj") or []
     idx = {}
+    total = 0
     for s in strings:
         txt = (s.get("string") or s.get("text") or "").strip()
         if not txt:
@@ -122,16 +107,41 @@ def get_sections(r2):
     return cmdj(r2, "iSj") or []
 
 
-def get_text_bounds(sections):
+def pick_sections(sections):
+    text = None
+    data = []
     for s in sections:
         n = s.get("name", "") or ""
         p = s.get("perm", "") or ""
+        va = s.get("vaddr", 0)
+        sz = s.get("size", 0)
+        if sz <= 0 or va <= 0:
+            continue
         if ("__text" in n or ".text" in n) and "x" in p:
-            return (s.get("vaddr", 0), s.get("vaddr", 0) + s.get("size", 0))
-    return None
+            text = (va, va + sz)
+        elif "x" not in p and ("w" in p or "r" in p):
+            if ("const" in n or "data" in n or "got" in n):
+                data.append((va, sz, n))
+    return text, data
 
 
-# --- ARM64 ---
+def load_range(r2, va, size):
+    CHUNK = 0x400000
+    chunks = []
+    addr = va
+    end = va + size
+    while addr < end:
+        n = min(CHUNK, end - addr)
+        hx = cmd(r2, "p8 %d @ 0x%x" % (n, addr)).strip()
+        if not hx:
+            return None
+        try:
+            chunks.append(bytes.fromhex(hx))
+        except Exception:
+            return None
+        addr += n
+    return b"".join(chunks)
+
 
 def is_adrp(w):
     return (w & 0x9F000000) == 0x90000000
@@ -160,54 +170,14 @@ def decode_add_imm(w):
     return (rd, rn, imm12)
 
 
-def is_bl(w):
-    return (w & 0xFC000000) == 0x94000000
+def is_stp_x29_x30_preindex(w):
+    return (w & 0xFFC07FFF) == 0xA9807BFD
 
 
-def decode_bl_target(w, pc):
-    offset = w & 0x3FFFFFF
-    if offset & (1 << 25):
-        offset -= (1 << 26)
-    return pc + (offset << 2)
-
-
-def load_text(r2, ts, te):
-    """Загружаем .text в память одним куском."""
-    CHUNK = 0x400000
-    chunks = []
-    addr = ts
-    while addr < te:
-        n = min(CHUNK, te - addr)
-        hx = cmd(r2, "p8 %d @ 0x%x" % (n, addr)).strip()
-        if not hx:
-            log("[!] p8 empty at 0x%x" % addr)
-            return b""
-        try:
-            chunks.append(bytes.fromhex(hx))
-        except Exception:
-            log("[!] hex parse failed at 0x%x" % addr)
-            return b""
-        addr += n
-    return b"".join(chunks)
-
-
-def build_bl_index(text, ts):
-    """Строит index: target_addr -> [pc_addr, ...]. Один проход по всему .text."""
+def scan_adrp_add_to_set(text, ts, target_set):
+    """Возвращает dict: target -> [instr_addr]."""
     n = len(text) // 4
-    idx = {}
-    for i in range(n):
-        w = struct.unpack_from("<I", text, i * 4)[0]
-        if is_bl(w):
-            pc = ts + i * 4
-            tgt = decode_bl_target(w, pc)
-            if tgt > 0x100000000:
-                idx.setdefault(tgt, []).append(pc)
-    return idx
-
-
-def scan_adrp_add(text, ts, target_set):
-    n = len(text) // 4
-    results = {}
+    out = {}
     for i in range(n):
         w = struct.unpack_from("<I", text, i * 4)[0]
         if is_adrp(w):
@@ -221,69 +191,101 @@ def scan_adrp_add(text, ts, target_set):
                     if rd == rd_adrp and rn == rd_adrp:
                         target = page + imm
                         if target in target_set:
-                            results.setdefault(target, []).append(ia)
+                            out.setdefault(target, []).append(ia)
                         break
-    return results
+    return out
 
 
-def is_stp_x29_x30_preindex(w):
-    return (w & 0xFFC07FFF) == 0xA9807BFD
+def build_ptr_index(data_blobs, text_start, text_end):
+    """data_blobs: list of (va, bytes). Возвращает dict target_addr -> [slot_addr].
+    Индексируем все 8-байтовые указатели в data на .text.
+    """
+    idx = {}
+    for va, b in data_blobs:
+        n = len(b) // 8
+        for i in range(n):
+            v = struct.unpack_from("<Q", b, i * 8)[0]
+            if text_start <= v < text_end:
+                idx.setdefault(v, []).append(va + i * 8)
+    return idx
 
 
-def is_stp_x29_x30_offset(w):
-    return (w & 0xFFC07FFF) == 0xA9007BFD
+def vtable_around(ptr_idx, anchor_addr, data_blobs):
+    """Проверяет, что anchor_addr стоит в vtable. Возвращает (vt_start, slots) или None."""
+    slots = ptr_idx.get(anchor_addr, [])
+    if not slots:
+        return None
+    # берём первую позицию
+    anchor_slot = slots[0]
+    # идём назад: пока предыдущий слот тоже валидный указатель в .text
+    vt_start = anchor_slot
+    cur = anchor_slot - 8
+    for _ in range(64):
+        prev_target = read_q_at(data_blobs, cur)
+        if prev_target is None:
+            break
+        if prev_target in ptr_idx:
+            vt_start = cur
+            cur -= 8
+        else:
+            break
+    # идём вперёд: собираем валидные слоты
+    seq = []
+    cur = vt_start
+    for _ in range(256):
+        tgt = read_q_at(data_blobs, cur)
+        if tgt is None or tgt not in ptr_idx:
+            break
+        seq.append((cur, tgt))
+        cur += 8
+    if len(seq) < 2:
+        return None
+    return vt_start, seq
 
 
-def find_func_start_backwards(text, ia, ts, max_back=0x2000):
-    """Ищем stp x29, x30 [sp, #...]! назад от ia."""
-    off = ia - ts
-    max_off = min(off, max_back)
-    start = off - max_off
-    start = start & ~3
-    i = off // 4
-    j = start // 4
-    while i >= j:
+def read_q_at(data_blobs, addr):
+    for va, b in data_blobs:
+        if va <= addr < va + len(b):
+            off = addr - va
+            if off + 8 > len(b):
+                return None
+            return struct.unpack_from("<Q", b, off)[0]
+    return None
+
+
+def find_func_start_backwards(text, ts, ia, max_back=0x2000):
+    off = (ia - ts) // 4
+    max_words = max_back // 4
+    i = off
+    limit = max(0, off - max_words)
+    while i >= limit:
         w = struct.unpack_from("<I", text, i * 4)[0]
-        if is_stp_x29_x30_preindex(w) or is_stp_x29_x30_offset(w):
+        if is_stp_x29_x30_preindex(w):
             return ts + i * 4
         i -= 1
-    return ia & ~0xF  # fallback
+    return ia & ~0xF
 
 
 def analyze_at(text, ts, func_start, max_instr=200):
-    """Мини-анализ: идём по инструкциям от func_start, собираем bl-таргеты, ret."""
     off = (func_start - ts) // 4
     n = len(text) // 4
-    calls = []
-    n_ret = 0
     n_bl = 0
+    n_ret = 0
     n_str_x0 = 0
-    n_ctor = 0
     for i in range(off, min(off + max_instr, n)):
         w = struct.unpack_from("<I", text, i * 4)[0]
         pc = ts + i * 4
-        if is_bl(w):
-            tgt = decode_bl_target(w, pc)
-            calls.append(tgt)
+        if (w & 0xFC000000) == 0x94000000:
             n_bl += 1
-        elif w == 0xD65F03C0:  # ret
+        elif w == 0xD65F03C0:
             n_ret += 1
-            if n_bl == 0 and i > off + 4:
-                break
-        # str x0, [xN, #imm]
-        elif (w & 0xFFC00000) == 0xF9000000:
-            rt = w & 0x1F
-            if rt == 0:
-                n_str_x0 += 1
-    return {
-        "n_bl": n_bl,
-        "n_ret": n_ret,
-        "n_str_x0": n_str_x0,
-        "calls": calls,
-    }
+        elif (w & 0xFFC00000) == 0xF9000000 and (w & 0x1F) == 0:
+            n_str_x0 += 1
+    return {"n_bl": n_bl, "n_ret": n_ret, "n_str_x0": n_str_x0}
 
 
-def scan_class(r2, cls, str_index, adrp_hits, bl_index, text, ts, te, init_offsets, base):
+def scan_class(cls, str_index, adrp_str_hits, ptr_idx, data_blobs,
+               adrp_vt_hits_full, text, ts, te, init_offsets, base):
     addrs = []
     for s, al in str_index.items():
         if s == cls or s.startswith(cls + "::") or ("::" + cls) in s \
@@ -292,103 +294,102 @@ def scan_class(r2, cls, str_index, adrp_hits, bl_index, text, ts, te, init_offse
     if not addrs:
         return None
 
-    # якоря — функции, что ADRP+ADD ссылаются на строку класса
-    anchor_addrs = set()
+    # 1) якоря — функции, ссылающиеся на строки класса
+    anchor_funcs = set()
     for sa in addrs:
-        for ia in adrp_hits.get(sa, []):
-            fstart = find_func_start_backwards(text, ia, ts)
-            anchor_addrs.add(fstart)
+        for ia in adrp_str_hits.get(sa, []):
+            fstart = find_func_start_backwards(text, ts, ia)
+            anchor_funcs.add(fstart)
 
-    if not anchor_addrs:
+    if not anchor_funcs:
         log("[%s] no anchor funcs" % cls)
         return {"class": cls, "method": None, "vtable": None, "ctor": None}
 
-    log("[%s] anchors: %s" % (cls, ["0x%x" % a for a in list(anchor_addrs)[:4]]))
+    log("[%s] anchors: %s" % (cls, ["0x%x" % a for a in list(anchor_funcs)[:4]]))
 
-    # для каждого якоря: кто вызывает его через bl?
-    caller_funcs = {}
-    for af in anchor_addrs:
-        callers = bl_index.get(af, [])
-        for pc in callers:
-            cf = find_func_start_backwards(text, pc, ts)
-            caller_funcs.setdefault(cf, set()).add(af)
+    # 2) vtable — где лежат указатели на якоря
+    vtable_starts = set()
+    for af in anchor_funcs:
+        vt = vtable_around(ptr_idx, af, data_blobs)
+        if vt:
+            vtable_starts.add(vt[0])
+            log("[%s]   vtable for 0x%x: start=0x%x slots=%d"
+                % (cls, af, vt[0], len(vt[1])))
 
-    if not caller_funcs:
-        log("[%s] no callers via bl" % cls)
-        # fallback — сам якорь
-        af = list(anchor_addrs)[0]
-        info = analyze_at(text, ts, af)
-        return {
-            "class": cls, "method": (af - base, ""),
-            "vtable": None, "ctor": (af - base, ""),
-            "score": -50, "src": "anchor_fallback",
-            "n_call": info["n_bl"], "size": 0,
-        }
+    if not vtable_starts:
+        log("[%s] no vtable found" % cls)
+        return {"class": cls, "method": None, "vtable": None, "ctor": None}
 
-    log("[%s] callers: %d" % (cls, len(caller_funcs)))
+    # 3) ищем ctor через adrp+add на vtable_start
+    ctor_candidates = []
+    for vt_start in vtable_starts:
+        hits = adrp_vt_hits_full.get(vt_start, [])
+        for ia in hits:
+            fstart = find_func_start_backwards(text, ts, ia)
+            info = analyze_at(text, ts, fstart)
+            score = 0
+            if fstart in init_offsets:
+                score += 150
+            score += info["n_bl"] * 2
+            if info["n_str_x0"] > 0:
+                score += 20
+            ctor_candidates.append({
+                "func": fstart, "score": score,
+                "via": "vtable_xref", "vtable": vt_start,
+                "n_bl": info["n_bl"],
+            })
 
-    init_set = set(init_offsets)
-    candidates = []
-    for cf, targets in caller_funcs.items():
-        info = analyze_at(text, ts, cf)
-        # score
-        score = 0
-        if cf in init_set:
-            score += 100
-        if info["n_bl"] >= 2:
-            score += 20
-        if info["n_bl"] >= 5:
-            score += 20
-        if info["n_str_x0"] > 0:
-            score += 10
-        if info["n_ret"] >= 1:
-            score += 5
-        if info["n_bl"] == 0:
-            score -= 30
-        # сколько наших якорей вызывает — чем больше, тем скорее это ctor
-        score += len(targets) * 15
-        candidates.append({
-            "func": cf, "score": score, "info": info,
-            "targets": targets, "in_init": cf in init_set,
-        })
+    if not ctor_candidates:
+        log("[%s] no adrp+add xref on vtable" % cls)
+        # fallback: ближайший init_offset к якорю
+        for af in anchor_funcs:
+            for io in init_offsets:
+                if abs(io - af) < 0x800:
+                    ctor_candidates.append({
+                        "func": io, "score": 50, "via": "init_near",
+                        "vtable": list(vtable_starts)[0], "n_bl": 0,
+                    })
+                    break
+            if ctor_candidates:
+                break
 
-    candidates.sort(key=lambda x: -x["score"])
-    log("[%s] top-3:" % cls)
-    for i, c in enumerate(candidates[:3]):
-        log("[%s]   [%d] score=%d func=0x%x n_bl=%d in_init=%s targets=%d"
-            % (cls, i, c["score"], c["func"], c["info"]["n_bl"],
-               c["in_init"], len(c["targets"])))
+    if not ctor_candidates:
+        # fallback — vtable_start сам
+        vt = list(vtable_starts)[0]
+        return {"class": cls, "method": (vt - base, ""),
+                "vtable": vt - base, "ctor": None, "score": 0,
+                "src": "vtable_only", "n_call": 0}
 
-    best = candidates[0]
+    ctor_candidates.sort(key=lambda x: -x["score"])
+    log("[%s] top-3 ctors:" % cls)
+    for i, c in enumerate(ctor_candidates[:3]):
+        log("[%s]   [%d] score=%d func=0x%x n_bl=%d via=%s"
+            % (cls, i, c["score"], c["func"], c["n_bl"], c["via"]))
+
+    best = ctor_candidates[0]
     return {
         "class": cls,
         "method": (best["func"] - base, ""),
         "ctor": (best["func"] - base, ""),
-        "vtable": None,
+        "vtable": (best["vtable"] - base) if best["vtable"] else None,
         "score": best["score"],
-        "src": "init_offsets" if best["in_init"] else "caller",
-        "n_call": best["info"]["n_bl"],
-        "size": 0,
+        "src": best["via"],
+        "n_call": best["n_bl"],
     }
 
 
 def main():
-    global _log_fh, TEXT, TEXT_ADDR
+    global _log_fh
     try:
         _log_fh = open(DETAIL, "w")
     except Exception:
         _log_fh = None
 
-    log("=== find_offsets_r2 v9 ===")
+    log("=== find_offsets_r2 v10 (vtable path) ===")
     log("bin: %s" % BIN)
 
     r2 = r2pipe.open(BIN, flags=["-2"])
-    for opt in (
-        "e scr.color=0",
-        "e anal.timeout=1800",
-        "e asm.arch=arm",
-        "e asm.bits=64",
-    ):
+    for opt in ("e scr.color=0", "e asm.arch=arm", "e asm.bits=64"):
         r2.cmd(opt)
 
     info = cmdj(r2, "ij")
@@ -397,7 +398,6 @@ def main():
 
     str_index = build_string_index(r2, base)
     if not str_index:
-        log("[!] empty string index")
         return
 
     target_set = set()
@@ -407,33 +407,47 @@ def main():
     log("[*] total string addrs: %d" % len(target_set))
 
     sections = get_sections(r2)
-    text_b = get_text_bounds(sections)
-    if not text_b:
-        log("[!] .text not found")
-        r2.quit()
-        return
-    ts, te = text_b
-    log("[*] .text: 0x%x - 0x%x (size 0x%x)" % (ts, te, te - ts))
-
-    t0 = time.time()
-    text = load_text(r2, ts, te)
-    log("[*] loaded %d bytes in %.1fs" % (len(text), time.time() - t0))
+    text, data_secs = pick_sections(sections)
     if not text:
-        r2.quit()
+        log("[!] no .text")
         return
-    TEXT = text
-    TEXT_ADDR = ts
+    ts, te = text
+    log("[*] .text: 0x%x - 0x%x (size 0x%x)" % (ts, te, te - ts))
+    for va, sz, n in data_secs:
+        log("    data: %s @ 0x%x size 0x%x" % (n, va, sz))
 
     t0 = time.time()
-    bl_index = build_bl_index(text, ts)
-    log("[*] bl index: %d unique targets, %d total calls in %.1fs"
-        % (len(bl_index), sum(len(v) for v in bl_index.values()),
-           time.time() - t0))
+    text_bytes = load_range(r2, ts, te - ts)
+    log("[*] loaded .text %d bytes in %.1fs" % (len(text_bytes or b""), time.time() - t0))
+    if not text_bytes:
+        return
 
     t0 = time.time()
-    adrp_hits = scan_adrp_add(text, ts, target_set)
-    log("[*] adrp+add hits: %d in %.1fs"
-        % (sum(len(v) for v in adrp_hits.values()), time.time() - t0))
+    data_blobs = []
+    for va, sz, n in data_secs:
+        b = load_range(r2, va, sz)
+        if b:
+            data_blobs.append((va, b))
+    total_data = sum(len(b) for _, b in data_blobs)
+    log("[*] loaded data %d bytes in %.1fs" % (total_data, time.time() - t0))
+
+    t0 = time.time()
+    ptr_idx = build_ptr_index(data_blobs, ts, te)
+    log("[*] ptr index: %d unique targets, %d total slots in %.1fs"
+        % (len(ptr_idx), sum(len(v) for v in ptr_idx.values()), time.time() - t0))
+
+    # adrp+add на строки
+    t0 = time.time()
+    adrp_str_hits = scan_adrp_add_to_set(text_bytes, ts, target_set)
+    log("[*] adrp+add on strings: %d hits in %.1fs"
+        % (sum(len(v) for v in adrp_str_hits.values()), time.time() - t0))
+
+    # соберём все vtable_start, которые встречаются как указатели — их тоже просканируем
+    # но сначала соберём множество vtable_starts из якорей, чтобы потом искать на них xref
+    # (нужно сначала пройтись по всем классам, но проще сразу собрать все vtable_start,
+    # которые могут быть найдены)
+    # сделаем обратный индекс: для каждого класса — свои vtable_starts, потом соберём union
+    # чтобы сэкономить, соберём по ходу
 
     init_offsets = []
     for s in sections:
@@ -451,20 +465,47 @@ def main():
                             init_offsets.append(p)
                 except Exception:
                     pass
-    log("[*] __init_offsets entries: %d" % len(init_offsets))
+    init_set = set(init_offsets)
+    log("[*] __init_offsets: %d entries" % len(init_offsets))
+
+    # предварительный сбор всех vtable_start
+    # (пройдём по всем строкам всех классов)
+    all_vtable_starts = set()
+    anchor_funcs_by_class = {}
+    for cls in CLASSES:
+        addrs = []
+        for s, al in str_index.items():
+            if s == cls or s.startswith(cls + "::") or ("::" + cls) in s \
+               or s.startswith(cls + " ") or s.startswith(cls + "\t"):
+                addrs.extend(al)
+        afs = set()
+        for sa in addrs:
+            for ia in adrp_str_hits.get(sa, []):
+                afs.add(find_func_start_backwards(text_bytes, ts, ia))
+        anchor_funcs_by_class[cls] = afs
+        for af in afs:
+            vt = vtable_around(ptr_idx, af, data_blobs)
+            if vt:
+                all_vtable_starts.add(vt[0])
+
+    log("[*] total unique vtable_starts: %d" % len(all_vtable_starts))
+
+    t0 = time.time()
+    adrp_vt_hits = scan_adrp_add_to_set(text_bytes, ts, all_vtable_starts)
+    log("[*] adrp+add on vtables: %d hits in %.1fs"
+        % (sum(len(v) for v in adrp_vt_hits.values()), time.time() - t0))
 
     r2.quit()
 
     results = []
     for cls in CLASSES:
         if time.time() - START > BUDGET - 60:
-            log("[!] budget exhausted before %s" % cls)
             break
         try:
-            r = scan_class(r2, cls, str_index, adrp_hits, bl_index, text,
-                           ts, te, init_offsets, base)
+            r = scan_class(cls, str_index, adrp_str_hits, ptr_idx, data_blobs,
+                           adrp_vt_hits, text_bytes, ts, te, init_set, base)
         except Exception as e:
-            log("[%s] EXCEPTION: %s" % (cls, e))
+            log("[%s] EXC: %s" % (cls, e))
             traceback.print_exc()
             continue
         if r:
@@ -472,18 +513,20 @@ def main():
 
     try:
         with open(REPORT, "w") as fh:
-            fh.write("# r2 ctor resolution (v9, manual bl scan)\n")
+            fh.write("# r2 ctor resolution (v10)\n")
             fh.write("# base=0x%x\n\n" % base)
             for r in results:
                 fh.write("=== %s ===\n" % r["class"])
                 if r.get("ctor"):
-                    fh.write("  ctor:  rva=0x%08x\n" % r["ctor"][0])
+                    fh.write("  ctor:   rva=0x%08x\n" % r["ctor"][0])
+                if r.get("vtable") is not None:
+                    fh.write("  vtable: rva=0x%08x\n" % r["vtable"])
                 if r.get("score") is not None:
-                    fh.write("  score: %d  src=%s n_bl=%d\n"
+                    fh.write("  score=%d src=%s n_bl=%d\n"
                              % (r["score"], r.get("src", ""), r.get("n_call", 0)))
                 fh.write("\n")
     except Exception as e:
-        log("write REPORT failed: %s" % e)
+        log("report: %s" % e)
 
     try:
         with open(OUT, "w") as fh:
@@ -491,14 +534,17 @@ def main():
             for r in results:
                 if r.get("ctor"):
                     fh.write("  %s: 0x%x,\n" % (r["class"], r["ctor"][0]))
+                elif r.get("vtable") is not None:
+                    fh.write("  // %s: vtable=0x%x (ctor not found)\n"
+                             % (r["class"], r["vtable"]))
                 else:
                     fh.write("  // %s: unresolved\n" % r["class"])
             fh.write("});\n")
     except Exception as e:
-        log("write OUT failed: %s" % e)
+        log("out: %s" % e)
 
     log("[+] wrote %s and %s" % (OUT, REPORT))
-    log("[+] total time %.1fs" % (time.time() - START))
+    log("[+] total %.1fs" % (time.time() - START))
 
 
 if __name__ == "__main__":
