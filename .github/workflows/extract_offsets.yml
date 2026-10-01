@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - scripts/find_offsets_r2.py
-      - scripts/rename_json_from.py
+      - scripts/rename_from_json.py
       - offsets.js
       - .github/workflows/extract_offsets.yml
   workflow_dispatch:
@@ -218,7 +218,7 @@ jobs:
           test -s "$GITHUB_WORKSPACE/offsets.json"
           python3 -c "import json;d=json.load(open('offsets.json'));print('entries:',len(d))"
 
-      - name: Run rename_json_from
+      - name: Run rename_from_json
         env:
           R2_BIN: ${{ github.workspace }}/r2_session/brawl_bin
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -226,8 +226,8 @@ jobs:
           LD_LIBRARY_PATH: ${{ github.workspace }}/r2_build/lib:${{ github.workspace }}/r2_build/lib64
         run: |
           set -euo pipefail
-          test -f scripts/rename_json_from.py || { echo "scripts/rename_json_from.py not found"; ls -la scripts/; exit 1; }
-          python scripts/rename_json_from.py 2>&1 | tee r2_rename.log | tail -160 || true
+          test -f scripts/rename_from_json.py || { echo "scripts/rename_json_from.py not found"; ls -la scripts/; exit 1; }
+          python scripts/rename_from_json.py 2>&1 | tee r2_rename.log | tail -160 || true
 
       - name: Run find_offsets_r2 (optional)
         if: hashFiles('scripts/find_offsets_r2.py') != ''
