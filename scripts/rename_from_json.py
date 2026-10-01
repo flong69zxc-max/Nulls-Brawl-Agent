@@ -12,14 +12,11 @@ OUT_REPORT = os.path.join(WS, "r2_rename_report.md")
 LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
-MAX_BACK = 0x8000
-DELTA_HIGH = 0x100
-DELTA_MEDIUM = 0x1000
-DELTA_LOW = 0x8000
+MAX_DELTA = 0x2000
+THUNK_MAX_SIZE = 16
 
 _fh = None
 _wrote_output = False
-
 
 FIELD_HINTS = (
     "_x", "_y", "_Width", "_Height", "_width", "_height",
@@ -43,7 +40,6 @@ NON_FUNC_PREFIXES = (
     "Message_port", "Message_ipPtr", "SockAddr_"
 )
 
-
 def log(m):
     line = "[%7.2f] %s" % (time.time() - START, m)
     try:
@@ -56,16 +52,13 @@ def log(m):
         except Exception:
             pass
 
-
 def cmd(r2, c):
     try: return r2.cmd(c)
     except Exception: return ""
 
-
 def cmdj(r2, c):
     try: return r2.cmdj(c)
     except Exception: return None
-
 
 def parse_int(v):
     if isinstance(v, bool): return None
@@ -79,7 +72,6 @@ def parse_int(v):
             return None
     return None
 
-
 def is_field_like(name):
     for h in FIELD_HINTS:
         if name.endswith(h) or h in name:
@@ -88,7 +80,6 @@ def is_field_like(name):
         if name.startswith(p):
             return True
     return False
-
 
 def classify(name, off):
     if name.startswith("VTABLE_"):
@@ -101,61 +92,6 @@ def classify(name, off):
         return "field"
     return "func"
 
-
-def load_bytes(r2, va, size):
-    chunks = []
-    a = va; end = va + size; CH = 0x400000
-    while a < end:
-        n = min(CH, end - a)
-        hx = cmd(r2, "p8 %d @ 0x%x" % (n, a)).strip()
-        if not hx: return None
-        try: chunks.append(bytes.fromhex(hx))
-        except Exception: return None
-        a += n
-    return b"".join(chunks)
-
-
-def scan_prologs(text, text_va):
-    prologs = []
-    n = len(text) // 4
-    for i in range(n):
-        w = struct.unpack_from("<I", text, i * 4)[0]
-        if w == 0xD503237F or w == 0xD503233F:
-            prologs.append(text_va + i * 4); continue
-        if w == 0xD503245F or w == 0xD503249F:
-            prologs.append(text_va + i * 4); continue
-        if (w & 0xFFC07FFF) == 0xA9807BFD:
-            prologs.append(text_va + i * 4); continue
-        if (w & 0xFFC07FFF) == 0xA8807BFD:
-            prologs.append(text_va + i * 4); continue
-        if (w & 0xFF8003FF) == 0xD10003FF:
-            prologs.append(text_va + i * 4); continue
-        if (w & 0xFFE07FFF) == 0xA9807BFD:
-            prologs.append(text_va + i * 4); continue
-    return prologs
-
-
-def is_boundary(text, text_va, addr):
-    off = addr - text_va
-    if off < 8: return True
-    if off > len(text): return False
-    prev = struct.unpack_from("<I", text, off - 4)[0]
-    if prev == 0xD65F03C0: return True
-    if prev == 0xD503201F: return True
-    if prev == 0xD4200000: return True
-    if (prev & 0xFFE0001F) == 0xD6BF03E0: return True
-    if (prev & 0xFFE0001F) == 0xD65F03C0: return True
-    return False
-
-
-def nearest_prolog(prologs, addr, max_back=MAX_BACK):
-    idx = bisect.bisect_right(prologs, addr) - 1
-    if idx < 0: return None
-    s = prologs[idx]
-    if addr - s > max_back: return None
-    return s
-
-
 def detect_platform(r2):
     info = cmdj(r2, "ij") or {}
     if not isinstance(info, dict): return "unknown"
@@ -167,88 +103,67 @@ def detect_platform(r2):
     if "elf" in klass or osname == "linux": return "android"
     return "unknown"
 
-
-def safe_name(k):
-    return "Possible_" + k.replace(".", "_").replace("-", "_").replace(":", "_")
-
-
 def confidence(delta):
     a = abs(delta)
-    if a <= DELTA_HIGH:   return "HIGH"
-    if a <= DELTA_MEDIUM: return "MEDIUM"
-    if a <= DELTA_LOW:    return "LOW"
+    if a <= 0x40: return "HIGH"
+    if a <= 0x200: return "MEDIUM"
+    if a <= MAX_DELTA: return "LOW"
     return "REJECT"
 
+def get_function_list(r2):
+    funcs = cmdj(r2, "aflj") or []
+    addrs = []
+    for f in funcs:
+        if isinstance(f, dict):
+            off = f.get("offset")
+            size = f.get("size", 0)
+            if isinstance(off, int):
+                addrs.append((off, size))
+    addrs.sort()
+    return addrs
 
-def validate_with_r2(r2, addr, text_va, text_end):
-    """Disassemble a few instructions at addr and sanity-check."""
-    result = {
-        "analyzed": False,
-        "instr_count": 0,
-        "has_frame": False,
-        "has_ret_soon": False,
-        "first_ops": [],
-        "looks_valid": False,
-        "reason": "",
-    }
-    try:
-        ops = cmdj(r2, "pdj 12 @ 0x%x" % addr)
-    except Exception:
-        ops = None
+def find_nearest_func(addrs, target):
+    if not addrs: return None, None
+    idx = bisect.bisect_right([a[0] for a in addrs], target) - 1
+    if idx < 0: return None, None
+    prolog, size = addrs[idx]
+    return prolog, size
 
+def is_thunk(r2, addr, size):
+    if size is not None and size <= THUNK_MAX_SIZE:
+        return True
+    ops = cmdj(r2, "pdj 2 @ 0x%x" % addr)
+    if ops and isinstance(ops, list) and len(ops) > 0:
+        first = (ops[0].get("opcode") or "").lower()
+        if first.startswith("b ") or first.startswith("br "):
+            return True
+    return False
+
+def validate(r2, addr, text_va, text_end, size):
+    if addr < text_va or addr >= text_end:
+        return False, "outside __text"
+    if is_thunk(r2, addr, size):
+        return False, "thunk"
+    ops = cmdj(r2, "pdj 6 @ 0x%x" % addr)
     if not ops or not isinstance(ops, list):
-        result["reason"] = "pd failed"
-        return result
-
-    result["analyzed"] = True
-    result["instr_count"] = len(ops)
-
-    valid_ops = 0
-    for op in ops[:8]:
+        return False, "pd failed"
+    valid = 0
+    for op in ops:
         if not isinstance(op, dict): continue
-        op_type = (op.get("type") or "").lower()
-        mnem = (op.get("opcode") or "").lower()
-        if op_type in ("invalid", "ill", "unk"):
-            break
-        valid_ops += 1
-        result["first_ops"].append(mnem)
+        t = (op.get("type") or "").lower()
+        if t in ("invalid", "ill", "unk"): break
+        valid += 1
+    if valid < 3:
+        return False, "few valid instructions"
+    return True, "ok"
 
-        if "stp" in mnem and "x29" in mnem and "x30" in mnem:
-            result["has_frame"] = True
-        if mnem.startswith("sub") and "sp" in mnem:
-            result["has_frame"] = True
-        if mnem.startswith("ret"):
-            result["has_ret_soon"] = True
-            break
-        if mnem.startswith("b ") or mnem.startswith("br "):
-            result["has_ret_soon"] = True
-
-    if valid_ops == 0:
-        result["reason"] = "no valid instructions"
-        return result
-
-    if result["has_frame"] or result["has_ret_soon"]:
-        result["looks_valid"] = True
-    else:
-        result["looks_valid"] = valid_ops >= 4
-
-    if not result["looks_valid"]:
-        result["reason"] = "no frame, no branch in first 8 ops"
-
-    return result
-
-
-def write_outputs(funcs, data, rejected, platform, total, summary,
-                  valid_map=None):
+def write_outputs(funcs, data, rejected, platform, total, summary, validation):
     global _wrote_output
-    valid_map = valid_map or {}
-
     try:
         with open(OUT_JS, "w", encoding="utf-8") as fh:
             fh.write("// auto-resolved offsets\n")
             fh.write("// platform=%s\n" % platform)
-            fh.write("// funcs=%d data=%d total=%d\n\n"
-                     % (len(funcs), len(data), total))
+            fh.write("// funcs=%d data=%d total=%d\n\n" % (len(funcs), len(data), total))
             fh.write("export const resolved = Object.freeze({\n")
             for name in sorted(funcs.keys()):
                 fh.write("    %s: 0x%x,\n" % (name, funcs[name][0]))
@@ -257,7 +172,6 @@ def write_outputs(funcs, data, rejected, platform, total, summary,
             for name in sorted(data.keys()):
                 fh.write("    %s: 0x%x,\n" % (name, data[name]))
             fh.write("});\n")
-        log("wrote %s" % OUT_JS)
     except Exception as e:
         log("js write failed: %s" % e)
 
@@ -266,15 +180,13 @@ def write_outputs(funcs, data, rejected, platform, total, summary,
             "platform": platform,
             "total": total,
             "summary": summary,
-            "funcs": {k: {"rva": v[0], "delta": v[1], "conf": v[2]}
-                      for k, v in funcs.items()},
+            "funcs": {k: {"rva": v[0], "delta": v[1], "conf": v[2]} for k, v in funcs.items()},
             "data": data,
             "rejected": rejected,
-            "validation": valid_map,
+            "validation": validation,
         }
         with open(OUT_JSON, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
-        log("wrote %s" % OUT_JSON)
     except Exception as e:
         log("json write failed: %s" % e)
 
@@ -285,64 +197,48 @@ def write_outputs(funcs, data, rejected, platform, total, summary,
             fh.write("input entries: **%d**  \n" % total)
             fh.write("funcs: **%d**  \n" % len(funcs))
             fh.write("data: **%d**  \n\n" % len(data))
-
             fh.write("## Summary\n\n")
             for k, v in sorted(summary.items()):
                 fh.write("- %s: %s\n" % (k, v))
             fh.write("\n")
-
             by_conf = defaultdict(list)
             for name, (rva, d, conf) in funcs.items():
                 by_conf[conf].append((name, rva, d))
-
             for conf in ("HIGH", "MEDIUM", "LOW"):
                 items = by_conf.get(conf, [])
-                if not items:
-                    continue
+                if not items: continue
                 fh.write("## %s confidence (%d)\n\n" % (conf, len(items)))
-                fh.write("| name | rva | delta | r2_valid | first_ops |\n")
-                fh.write("|---|---|---|---|---|\n")
+                fh.write("| name | rva | delta | valid |\n|---|---|---|---|\n")
                 for name, rva, d in sorted(items, key=lambda x: abs(x[2])):
-                    v = valid_map.get(name, {})
-                    ok = "yes" if v.get("looks_valid") else "no"
-                    ops = " ".join(v.get("first_ops", [])[:3])
-                    fh.write("| %s | 0x%x | %+d | %s | %s |\n"
-                             % (name, rva, d, ok, ops))
+                    v = validation.get(name, {})
+                    ok = "yes" if v.get("ok") else "no"
+                    fh.write("| %s | 0x%x | %+d | %s |\n" % (name, rva, d, ok))
                 fh.write("\n")
-
             if rejected:
                 fh.write("## Rejected (%d)\n\n" % len(rejected))
                 fh.write("| name | input | reason |\n|---|---|---|\n")
                 for r in rejected:
-                    fh.write("| %s | 0x%x | %s |\n"
-                             % (r["name"], r["off"], r["reason"]))
+                    fh.write("| %s | 0x%x | %s |\n" % (r["name"], r["off"], r["reason"]))
                 fh.write("\n")
-
             if data:
                 fh.write("## Data offsets (%d)\n\n" % len(data))
                 fh.write("| name | value |\n|---|---|\n")
                 for name in sorted(data.keys()):
                     fh.write("| %s | 0x%x |\n" % (name, data[name]))
                 fh.write("\n")
-
-        log("wrote %s" % OUT_REPORT)
     except Exception as e:
         log("report write failed: %s" % e)
 
     _wrote_output = True
 
-
 def main():
     global _fh
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
-
     log("=== rename_from_json ===")
-
     if not os.path.exists(JSON_PATH):
         log("json not found: %s" % JSON_PATH)
         return
-
     with open(JSON_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
     log("json entries=%d" % len(raw))
@@ -350,7 +246,6 @@ def main():
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
     r2.cmd("e anal.timeout=5")
-
     platform = detect_platform(r2)
     log("platform=%s" % platform)
 
@@ -371,26 +266,17 @@ def main():
         log("no __text section")
         r2.quit()
         return
-
-    log("__text vaddr=0x%x size=0x%x end=0x%x"
-        % (text_va, text_sz, text_va + text_sz))
+    log("__text vaddr=0x%x size=0x%x end=0x%x" % (text_va, text_sz, text_va + text_sz))
 
     t0 = time.time()
-    text = load_bytes(r2, text_va, text_sz)
-    log("loaded __text in %.1fs bytes=%d" % (time.time() - t0, len(text or b"")))
-    if not text:
-        r2.quit()
-        return
-
-    t0 = time.time()
-    prologs = scan_prologs(text, text_va)
-    log("prologs=%d in %.1fs" % (len(prologs), time.time() - t0))
+    addrs = get_function_list(r2)
+    log("aflj funcs=%d in %.1fs" % (len(addrs), time.time() - t0))
 
     text_end = text_va + text_sz
-
-    candidates = {}
+    funcs = {}
     data_offsets = {}
     rejected = []
+    validation = {}
     stats = Counter()
 
     for name, val in raw.items():
@@ -399,55 +285,46 @@ def main():
             rejected.append({"name": name, "off": 0, "reason": "invalid value"})
             stats["invalid"] += 1
             continue
-
         cat = classify(name, off)
-
         if cat in ("field", "vtable", "global_ptr"):
             data_offsets[name] = off
             stats["data_" + cat] += 1
             continue
-
         target = base + off
         if target < text_va or target >= text_end:
             data_offsets[name] = off
             stats["abs_outside_text"] += 1
-            rejected.append({"name": name, "off": off,
-                             "reason": "target outside __text"})
+            rejected.append({"name": name, "off": off, "reason": "target outside __text"})
             continue
-
-        prolog = nearest_prolog(prologs, target)
+        prolog, size = find_nearest_func(addrs, target)
         if prolog is None:
-            stats["no_prolog"] += 1
-            rejected.append({"name": name, "off": off,
-                             "reason": "no prolog within 0x%x back" % MAX_BACK})
+            stats["no_func"] += 1
+            rejected.append({"name": name, "off": off, "reason": "no function found"})
             continue
-
         delta = prolog - target
         conf = confidence(delta)
         if conf == "REJECT":
             stats["delta_reject"] += 1
-            rejected.append({"name": name, "off": off,
-                             "reason": "delta=%+d exceeds 0x%x" % (delta, DELTA_LOW)})
+            rejected.append({"name": name, "off": off, "reason": "delta=%+d too big" % delta})
             continue
-
-        boundary = is_boundary(text, text_va, prolog)
-
         rva = prolog - base
-        prev = candidates.get(name)
+        ok, reason = validate(r2, prolog, text_va, text_end, size)
+        validation[name] = {"ok": ok, "reason": reason, "delta": delta, "conf": conf}
+        if not ok:
+            stats["validation_fail"] += 1
+            rejected.append({"name": name, "off": off, "reason": "validation: %s" % reason})
+            continue
+        prev = funcs.get(name)
         if prev is None or abs(delta) < abs(prev[1]):
-            candidates[name] = (rva, delta, conf)
-
-        tag = platform.upper()
-        warn = "" if boundary else " !BOUNDARY"
-        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s%s"
-            % (tag, name, off, rva, delta, conf, warn))
+            funcs[name] = (rva, delta, conf)
+        stats["resolved"] += 1
+        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s" % (platform.upper(), name, off, rva, delta, conf))
 
     log("")
     log("=== DEDUP ===")
     by_addr = defaultdict(list)
-    for name, (rva, delta, conf) in candidates.items():
+    for name, (rva, delta, conf) in funcs.items():
         by_addr[rva].append((name, delta, conf))
-
     funcs = {}
     dup_count = 0
     for rva, items in by_addr.items():
@@ -457,38 +334,10 @@ def main():
         if len(items) > 1:
             dup_count += len(items) - 1
             for name, delta, conf in items[1:]:
-                log("  [DUP] %s -> %s (rva=0x%x, delta=%+d)"
-                    % (name, best[0], rva, delta))
-
-    log("")
-    log("=== VALIDATION (r2 pd) ===")
-    valid_map = {}
-    validated_ok = 0
-    validated_bad = 0
-    for name, (rva, delta, conf) in funcs.items():
-        addr = base + rva
-        v = validate_with_r2(r2, addr, text_va, text_end)
-        valid_map[name] = v
-        if v.get("looks_valid"):
-            validated_ok += 1
-        else:
-            validated_bad += 1
-            log("  [BAD] %-40s rva=0x%-8x reason=%s"
-                % (name, rva, v.get("reason") or "unknown"))
-
-    log("  valid=%d bad=%d" % (validated_ok, validated_bad))
-
-    log("")
-    log("=== R2 rename ===")
-    for name, (rva, delta, conf) in funcs.items():
-        prolog = base + rva
-        cmd(r2, "af @ 0x%x" % prolog)
-        cmd(r2, "afn %s @ 0x%x" % (safe_name(name), prolog))
+                log("  [DUP] %s -> %s (rva=0x%x, delta=%+d)" % (name, best[0], rva, delta))
 
     r2.quit()
-
     conf_counts = Counter(v[2] for v in funcs.values())
-
     summary = {
         "input": len(raw),
         "funcs": len(funcs),
@@ -496,26 +345,16 @@ def main():
         "rejected": len(rejected),
         "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
-        "validated_ok": validated_ok,
-        "validated_bad": validated_bad,
-        "no_prolog": stats.get("no_prolog", 0),
+        "no_func": stats.get("no_func", 0),
         "delta_reject": stats.get("delta_reject", 0),
         "abs_outside_text": stats.get("abs_outside_text", 0),
+        "validation_fail": stats.get("validation_fail", 0),
     }
-
     log("")
     log("=== SUMMARY ===")
     for k, v in summary.items():
         log("  %-22s = %s" % (k, v))
-
-    if candidates:
-        deltas = [d for _, (_, d, _) in candidates.items()]
-        log("delta abs min=%d max=%d"
-            % (min(abs(d) for d in deltas), max(abs(d) for d in deltas)))
-
-    write_outputs(funcs, data_offsets, rejected, platform, len(raw),
-                  summary, valid_map)
-
+    write_outputs(funcs, data_offsets, rejected, platform, len(raw), summary, validation)
 
 if __name__ == "__main__":
     try:
