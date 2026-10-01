@@ -13,7 +13,6 @@ LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
 MAX_DELTA = 0x2000
-THUNK_MAX_SIZE = 16
 
 _fh = None
 _wrote_output = False
@@ -82,14 +81,10 @@ def is_field_like(name):
     return False
 
 def classify(name, off):
-    if name.startswith("VTABLE_"):
-        return "vtable"
-    if name.startswith("StageInstance"):
-        return "global_ptr"
-    if is_field_like(name):
-        return "field"
-    if off < 0x1000 or off > 0x10000000:
-        return "field"
+    if name.startswith("VTABLE_"): return "vtable"
+    if name.startswith("StageInstance"): return "global_ptr"
+    if is_field_like(name): return "field"
+    if off < 0x1000 or off > 0x10000000: return "field"
     return "func"
 
 def detect_platform(r2):
@@ -110,51 +105,90 @@ def confidence(delta):
     if a <= MAX_DELTA: return "LOW"
     return "REJECT"
 
-def get_function_list(r2):
-    funcs = cmdj(r2, "aflj") or []
+def read_uleb(data, off):
+    result = 0
+    shift = 0
+    while True:
+        if off >= len(data): return None, off
+        b = data[off]; off += 1
+        result |= (b & 0x7f) << shift
+        if not (b & 0x80): return result, off
+        shift += 7
+        if shift > 63: return None, off
+
+def parse_function_starts(r2, base):
+    try:
+        hdr = cmdj(r2, "iHj")
+    except Exception:
+        hdr = None
+
+    lcfs = cmdj(r2, "iLj")
+    starts_off = None
+    if isinstance(lcfs, list):
+        for lc in lcfs:
+            if not isinstance(lc, dict): continue
+            typ = (lc.get("type") or "").upper()
+            if "FUNCTION_STARTS" in typ or "LC_FUNCTION_STARTS" in typ:
+                starts_off = int(lc.get("offset") or lc.get("paddr") or 0)
+                starts_sz = int(lc.get("size") or 0)
+                break
+
+    if starts_off is None:
+        info = cmdj(r2, "ij") or {}
+        for k in ("linkedit", "functions"):
+            if k in info:
+                pass
+
+    if starts_off is None:
+        return []
+
+    log("LC_FUNCTION_STARTS paddr=0x%x size=0x%x" % (starts_off, starts_sz))
+    raw = cmd(r2, "p8 %d @ 0x%x" % (starts_sz, starts_off)).strip()
+    if not raw:
+        return []
+    try:
+        data = bytes.fromhex(raw)
+    except Exception:
+        return []
+
+    text_va = None
+    sections = cmdj(r2, "iSj") or []
+    for s in sections:
+        if not isinstance(s, dict): continue
+        if "__text" in (s.get("name") or "") and "x" in (s.get("perm") or ""):
+            text_va = int(s.get("vaddr") or 0)
+            break
+    if not text_va:
+        return []
+
     addrs = []
-    for f in funcs:
-        if isinstance(f, dict):
-            off = f.get("offset")
-            size = f.get("size", 0)
-            if isinstance(off, int):
-                addrs.append((off, size))
-    addrs.sort()
-    return addrs
+    off = 0
+    cur = 0
+    while off < len(data):
+        delta, off = read_uleb(data, off)
+        if delta is None: break
+        if delta == 0: break
+        cur += delta
+        addrs.append(text_va + cur)
 
-def find_nearest_func(addrs, target):
-    if not addrs: return None, None
-    idx = bisect.bisect_right([a[0] for a in addrs], target) - 1
-    if idx < 0: return None, None
-    prolog, size = addrs[idx]
-    return prolog, size
+    log("parsed %d function starts" % len(addrs))
+    return sorted(addrs)
 
-def is_thunk(r2, addr, size):
-    if size is not None and size <= THUNK_MAX_SIZE:
-        return True
-    ops = cmdj(r2, "pdj 2 @ 0x%x" % addr)
-    if ops and isinstance(ops, list) and len(ops) > 0:
-        first = (ops[0].get("opcode") or "").lower()
-        if first.startswith("b ") or first.startswith("br "):
-            return True
-    return False
+def find_nearest(addrs, target):
+    idx = bisect.bisect_right(addrs, target) - 1
+    if idx < 0: return None
+    return addrs[idx]
 
-def validate(r2, addr, text_va, text_end, size):
-    if addr < text_va or addr >= text_end:
-        return False, "outside __text"
-    if is_thunk(r2, addr, size):
-        return False, "thunk"
-    ops = cmdj(r2, "pdj 6 @ 0x%x" % addr)
-    if not ops or not isinstance(ops, list):
-        return False, "pd failed"
+def validate(r2, addr):
+    ops = cmdj(r2, "pdj 8 @ 0x%x" % addr)
+    if not ops or not isinstance(ops, list): return False, "pd failed"
     valid = 0
     for op in ops:
         if not isinstance(op, dict): continue
         t = (op.get("type") or "").lower()
         if t in ("invalid", "ill", "unk"): break
         valid += 1
-    if valid < 3:
-        return False, "few valid instructions"
+    if valid < 4: return False, "few valid (%d)" % valid
     return True, "ok"
 
 def write_outputs(funcs, data, rejected, platform, total, summary, validation):
@@ -177,13 +211,9 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation):
 
     try:
         payload = {
-            "platform": platform,
-            "total": total,
-            "summary": summary,
+            "platform": platform, "total": total, "summary": summary,
             "funcs": {k: {"rva": v[0], "delta": v[1], "conf": v[2]} for k, v in funcs.items()},
-            "data": data,
-            "rejected": rejected,
-            "validation": validation,
+            "data": data, "rejected": rejected, "validation": validation,
         }
         with open(OUT_JSON, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -235,17 +265,19 @@ def main():
     global _fh
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
+
     log("=== rename_from_json ===")
     if not os.path.exists(JSON_PATH):
         log("json not found: %s" % JSON_PATH)
         return
+
     with open(JSON_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
     log("json entries=%d" % len(raw))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
-    r2.cmd("e anal.timeout=5")
+
     platform = detect_platform(r2)
     log("platform=%s" % platform)
 
@@ -264,13 +296,33 @@ def main():
             break
     if not text_va:
         log("no __text section")
-        r2.quit()
-        return
+        r2.quit(); return
     log("__text vaddr=0x%x size=0x%x end=0x%x" % (text_va, text_sz, text_va + text_sz))
 
     t0 = time.time()
-    addrs = get_function_list(r2)
-    log("aflj funcs=%d in %.1fs" % (len(addrs), time.time() - t0))
+    prologs = parse_function_starts(r2, base)
+    log("function starts: %d in %.1fs" % (len(prologs), time.time() - t0))
+
+    if not prologs:
+        log("LC_FUNCTION_STARTS empty, falling back to pattern scan")
+        text_data = cmd(r2, "p8 %d @ 0x%x" % (min(text_sz, 0x100000), text_va))
+        if text_data:
+            try:
+                blob = bytes.fromhex(text_data.strip())
+                for i in range(0, len(blob) - 4, 4):
+                    w = struct.unpack_from("<I", blob, i)[0]
+                    if w in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503249F):
+                        prologs.append(text_va + i)
+                    elif (w & 0xFFC07FFF) == 0xA9807BFD:
+                        prologs.append(text_va + i)
+                prologs.sort()
+                log("fallback pattern scan: %d prologs (first 1MB only)" % len(prologs))
+            except Exception as e:
+                log("fallback failed: %s" % e)
+
+    if not prologs:
+        log("no prologs, aborting")
+        r2.quit(); return
 
     text_end = text_va + text_sz
     funcs = {}
@@ -285,40 +337,46 @@ def main():
             rejected.append({"name": name, "off": 0, "reason": "invalid value"})
             stats["invalid"] += 1
             continue
+
         cat = classify(name, off)
         if cat in ("field", "vtable", "global_ptr"):
             data_offsets[name] = off
             stats["data_" + cat] += 1
             continue
+
         target = base + off
         if target < text_va or target >= text_end:
             data_offsets[name] = off
             stats["abs_outside_text"] += 1
-            rejected.append({"name": name, "off": off, "reason": "target outside __text"})
+            rejected.append({"name": name, "off": off, "reason": "outside __text"})
             continue
-        prolog, size = find_nearest_func(addrs, target)
+
+        prolog = find_nearest(prologs, target)
         if prolog is None:
             stats["no_func"] += 1
             rejected.append({"name": name, "off": off, "reason": "no function found"})
             continue
+
         delta = prolog - target
         conf = confidence(delta)
         if conf == "REJECT":
             stats["delta_reject"] += 1
-            rejected.append({"name": name, "off": off, "reason": "delta=%+d too big" % delta})
+            rejected.append({"name": name, "off": off, "reason": "delta=%+d" % delta})
             continue
+
         rva = prolog - base
-        ok, reason = validate(r2, prolog, text_va, text_end, size)
+        ok, reason = validate(r2, prolog)
         validation[name] = {"ok": ok, "reason": reason, "delta": delta, "conf": conf}
         if not ok:
             stats["validation_fail"] += 1
-            rejected.append({"name": name, "off": off, "reason": "validation: %s" % reason})
+            rejected.append({"name": name, "off": off, "reason": reason})
             continue
+
         prev = funcs.get(name)
         if prev is None or abs(delta) < abs(prev[1]):
             funcs[name] = (rva, delta, conf)
         stats["resolved"] += 1
-        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s" % (platform.upper(), name, off, rva, delta, conf))
+        log("  [OK] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s" % (name, off, rva, delta, conf))
 
     log("")
     log("=== DEDUP ===")
@@ -334,16 +392,13 @@ def main():
         if len(items) > 1:
             dup_count += len(items) - 1
             for name, delta, conf in items[1:]:
-                log("  [DUP] %s -> %s (rva=0x%x, delta=%+d)" % (name, best[0], rva, delta))
+                log("  [DUP] %s -> %s (rva=0x%x)" % (name, best[0], rva))
 
     r2.quit()
     conf_counts = Counter(v[2] for v in funcs.values())
     summary = {
-        "input": len(raw),
-        "funcs": len(funcs),
-        "data": len(data_offsets),
-        "rejected": len(rejected),
-        "dup_collapsed": dup_count,
+        "input": len(raw), "funcs": len(funcs), "data": len(data_offsets),
+        "rejected": len(rejected), "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
         "no_func": stats.get("no_func", 0),
         "delta_reject": stats.get("delta_reject", 0),
