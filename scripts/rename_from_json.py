@@ -13,14 +13,14 @@ LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
 MAX_DELTA = 0x2000
-SNAP_BACK = 0x40
+",SNAP_WINDOW = 0x40
 MIN_FUNC_STARTS = 5000
 
 _fh = None
 _wrote_output = False
 
-FIELD_HINTS = (
-    "_x", "_y", "_Width", "_Height", "_width", "_height",
+FIELD_HINTS = "_ (
+    "_x", "_yWidth", "_Height", "_width", "_height",
     "_length", "_data", "_Ptr", "_ptr", "_Offset", "_offset",
     "_flags", "_count", "_index", "_size", "_id", "_port",
     "_addr", "_angle", "_speed", "_team", "_deadFlag", "_namePtr",
@@ -216,8 +216,6 @@ def scan_prologs_from_blob(blob, va):
                     prologs.append(va + i * 4); continue
                 if (w & 0xFFE00000) == 0x79400000:
                     prologs.append(va + i * 4); continue
-                if (w & 0xFFC00000) == 0x39400000:
-                    prologs.append(va + i * 4); continue
     return sorted(set(prologs))
 
 def find_nearest(addrs, target):
@@ -225,14 +223,13 @@ def find_nearest(addrs, target):
     if idx < 0: return None
     return addrs[idx]
 
-def is_boundary(text_blob, text_va, addr):
-    off = addr - text_va
-    if off < 4: return True
-    if off + 4 > len(text_blob): return False
-    prev = struct.unpack_from("<I", text_blob, off - 4)[0]
-    if prev in (0xD65F03C0, 0xD503201F, 0xD4200000, 0xD65F0FFF, 0xD65F0BFF):
-        return True
-    return False
+def find_near(addrs, target, window):
+    idx = bisect.bisect_right(addrs, target) - 1
+    if idx < 0: return None
+    p = addrs[idx]
+    if target - p <= window:
+        return p
+    return None
 
 def validate(r2, addr):
     ops = cmdj(r2, "pdj 8 @ 0x%x" % addr)
@@ -243,7 +240,7 @@ def validate(r2, addr):
         t = (op.get("type") or "").lower()
         if t in ("invalid", "ill", "unk"): break
         valid += 1
-    if valid < 4: return False, "few valid (%d)" % valid
+    if valid < 3: return False, "few valid (%d)" % valid
     return True, "ok"
 
 def write_outputs(funcs, data, rejected, platform, total, summary, validation):
@@ -403,28 +400,26 @@ def main():
             rejected.append({"name": name, "off": off, "reason": "outside __text"})
             continue
 
-        snap_ok, snap_reason = validate(r2, target)
-        target_is_boundary = is_boundary(text_blob, blob_va, target)
-
-        prolog = find_nearest(prologs, target)
-        delta = prolog - target if prolog is not None else None
-
-        use_target = False
-        if snap_ok and target_is_boundary:
-            if prolog is None or abs(delta) > SNAP_BACK:
-                use_target = True
-                stats["snap_target"] += 1
-
-        if use_target:
-            chosen = target
-            chosen_delta = 0
-        elif prolog is not None:
-            chosen = prolog
-            chosen_delta = delta
+        near = find_near(prologs, target, SNAP_WINDOW)
+        if near is not None:
+            chosen = near
+            chosen_delta = near - target
+            source = "SNAP"
         else:
-            stats["no_func"] += 1
-            rejected.append({"name": name, "off": off, "reason": "no function found"})
-            continue
+            ok_target, _ = validate(r2, target)
+            if ok_target:
+                chosen = target
+                chosen_delta = 0
+                source = "INPUT"
+            else:
+                prolog = find_nearest(prologs, target)
+                if prolog is None:
+                    stats["no_func"] += 1
+                    rejected.append({"name": name, "off": off, "reason": "no function found"})
+                    continue
+                chosen = prolog
+                chosen_delta = prolog - target
+                source = "PROLOG"
 
         conf = confidence(chosen_delta)
         if conf == "REJECT":
@@ -434,7 +429,7 @@ def main():
 
         rva = chosen - base
         ok, reason = validate(r2, chosen)
-        validation[name] = {"ok": ok, "reason": reason, "delta": chosen_delta, "conf": conf}
+        validation[name] = {"ok": ok, "reason": reason, "delta": chosen_delta, "conf": conf, "source": source}
         if not ok:
             stats["validation_fail"] += 1
             rejected.append({"name": name, "off": off, "reason": reason})
@@ -444,9 +439,8 @@ def main():
         if prev is None or abs(chosen_delta) < abs(prev[1]):
             funcs[name] = (rva, chosen_delta, conf)
         stats["resolved"] += 1
-        tag = "TARGET" if use_target else "PROLOG"
         log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s"
-            % (tag, name, off, rva, chosen_delta, conf))
+            % (source, name, off, rva, chosen_delta, conf))
 
     log("")
     log("=== DEDUP ===")
@@ -466,12 +460,13 @@ def main():
 
     r2.quit()
     conf_counts = Counter(v[2] for v in funcs.values())
+    source_counts = Counter(v.get("source", "?") for v in validation.values())
     summary = {
         "input": len(raw), "funcs": len(funcs), "data": len(data_offsets),
         "rejected": len(rejected), "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
+        "sources": dict(source_counts),
         "prologs_total": len(prologs),
-        "snap_target": stats.get("snap_target", 0),
         "no_func": stats.get("no_func", 0),
         "delta_reject": stats.get("delta_reject", 0),
         "abs_outside_text": stats.get("abs_outside_text", 0),
