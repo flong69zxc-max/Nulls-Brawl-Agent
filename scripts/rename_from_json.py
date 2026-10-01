@@ -13,6 +13,7 @@ LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
 MAX_DELTA = 0x2000
+SNAP_BACK = 0x40
 MIN_FUNC_STARTS = 5000
 
 _fh = None
@@ -109,22 +110,18 @@ def confidence(delta):
 def parse_macho_layout(bin_path):
     with open(bin_path, "rb") as f:
         data = f.read()
-
     if len(data) < 32 or struct.unpack_from("<I", data, 0)[0] != 0xFEEDFACF:
         return None
-
     ncmds = struct.unpack_from("<I", data, 16)[0]
     offset = 32
     text_seg = None
     text_section = None
     linkedit_seg = None
     func_starts = None
-
     for _ in range(ncmds):
         if offset + 8 > len(data): break
         cmd_id, cmdsize = struct.unpack_from("<II", data, offset)
         if cmdsize < 8: break
-
         if cmd_id == 0x19:
             segname = data[offset+8:offset+24].rstrip(b"\x00").decode("utf-8", "ignore")
             vmaddr = struct.unpack_from("<Q", data, offset+24)[0]
@@ -132,7 +129,6 @@ def parse_macho_layout(bin_path):
             fileoff = struct.unpack_from("<Q", data, offset+40)[0]
             filesize = struct.unpack_from("<Q", data, offset+48)[0]
             nsects = struct.unpack_from("<I", data, offset+64)[0]
-
             if segname == "__TEXT":
                 text_seg = {"vmaddr": vmaddr, "fileoff": fileoff, "filesize": filesize}
                 sec_off = offset + 72
@@ -149,35 +145,26 @@ def parse_macho_layout(bin_path):
                     sec_off += 80
             elif segname == "__LINKEDIT":
                 linkedit_seg = {"vmaddr": vmaddr, "fileoff": fileoff, "filesize": filesize}
-
         elif cmd_id == 0x26:
             dataoff = struct.unpack_from("<I", data, offset+8)[0]
             datasize = struct.unpack_from("<I", data, offset+12)[0]
             func_starts = {"dataoff": dataoff, "datasize": datasize}
-
         offset += cmdsize
-
     return {
-        "raw": data,
-        "text_seg": text_seg,
-        "text_section": text_section,
-        "linkedit_seg": linkedit_seg,
-        "func_starts": func_starts,
+        "raw": data, "text_seg": text_seg, "text_section": text_section,
+        "linkedit_seg": linkedit_seg, "func_starts": func_starts,
     }
 
 def parse_function_starts(macho):
     fs = macho.get("func_starts")
-    lk = macho.get("linkedit_seg")
     text_seg = macho.get("text_seg")
-    if not fs or not lk or not text_seg: return []
+    if not fs or not text_seg: return []
     if fs["datasize"] < 16: return []
-
     raw = macho["raw"]
     fs_off = fs["dataoff"]
     fs_sz = fs["datasize"]
     if fs_off + fs_sz > len(raw): fs_sz = len(raw) - fs_off
     blob = raw[fs_off:fs_off + fs_sz]
-
     text_vmaddr = text_seg["vmaddr"]
     addrs = []
     i = 0
@@ -194,53 +181,58 @@ def parse_function_starts(macho):
         if result == 0: break
         cur += result
         addrs.append(text_vmaddr + cur)
-
     return sorted(set(addrs))
 
-def scan_prologs_from_section(macho):
+def get_text_blob(macho):
     sect = macho.get("text_section")
-    if not sect: return []
+    if not sect: return None, 0
     raw = macho["raw"]
     off = sect["fileoff"]
     size = sect["size"]
     if off + size > len(raw): size = len(raw) - off
-    blob = raw[off:off + size]
-    va = sect["vmaddr"]
+    return raw[off:off + size], sect["vmaddr"]
 
+def scan_prologs_from_blob(blob, va):
     prologs = []
     n = len(blob) // 4
     for i in range(n):
         w = struct.unpack_from("<I", blob, i * 4)[0]
         if w in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503249F):
-            prologs.append(va + i * 4)
-            continue
+            prologs.append(va + i * 4); continue
         if (w & 0xFFC07FFF) == 0xA9807BFD:
-            prologs.append(va + i * 4)
-            continue
+            prologs.append(va + i * 4); continue
         if (w & 0xFFE07FFF) == 0xA9807BFD:
-            prologs.append(va + i * 4)
-            continue
+            prologs.append(va + i * 4); continue
         if (w & 0xFF8003FF) == 0xD10003FF:
-            prologs.append(va + i * 4)
-            continue
+            prologs.append(va + i * 4); continue
         if i > 0:
             prev = struct.unpack_from("<I", blob, (i - 1) * 4)[0]
-            if prev in (0xD65F03C0, 0xD503201F, 0xD4200000, 0xD65F0FFF):
+            if prev in (0xD65F03C0, 0xD503201F, 0xD4200000, 0xD65F0FFF, 0xD65F0BFF):
                 if (w & 0xFFC00000) == 0xB9400000:
-                    prologs.append(va + i * 4)
-                    continue
+                    prologs.append(va + i * 4); continue
                 if (w & 0xFFC00000) == 0xF9400000:
-                    prologs.append(va + i * 4)
-                    continue
+                    prologs.append(va + i * 4); continue
                 if (w & 0xFFE00000) == 0x39400000:
-                    prologs.append(va + i * 4)
-                    continue
+                    prologs.append(va + i * 4); continue
+                if (w & 0xFFE00000) == 0x79400000:
+                    prologs.append(va + i * 4); continue
+                if (w & 0xFFC00000) == 0x39400000:
+                    prologs.append(va + i * 4); continue
     return sorted(set(prologs))
 
 def find_nearest(addrs, target):
     idx = bisect.bisect_right(addrs, target) - 1
     if idx < 0: return None
     return addrs[idx]
+
+def is_boundary(text_blob, text_va, addr):
+    off = addr - text_va
+    if off < 4: return True
+    if off + 4 > len(text_blob): return False
+    prev = struct.unpack_from("<I", text_blob, off - 4)[0]
+    if prev in (0xD65F03C0, 0xD503201F, 0xD4200000, 0xD65F0FFF, 0xD65F0BFF):
+        return True
+    return False
 
 def validate(r2, addr):
     ops = cmdj(r2, "pdj 8 @ 0x%x" % addr)
@@ -271,7 +263,6 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation):
             fh.write("});\n")
     except Exception as e:
         log("js write failed: %s" % e)
-
     try:
         payload = {
             "platform": platform, "total": total, "summary": summary,
@@ -282,7 +273,6 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation):
             json.dump(payload, fh, indent=2, sort_keys=True)
     except Exception as e:
         log("json write failed: %s" % e)
-
     try:
         with open(OUT_REPORT, "w", encoding="utf-8") as fh:
             fh.write("# Offset resolution report\n\n")
@@ -321,26 +311,22 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation):
                 fh.write("\n")
     except Exception as e:
         log("report write failed: %s" % e)
-
     _wrote_output = True
 
 def main():
     global _fh
     try: _fh = open(LOG, "w")
     except Exception: _fh = None
-
     log("=== rename_from_json ===")
     if not os.path.exists(JSON_PATH):
         log("json not found: %s" % JSON_PATH)
         return
-
     with open(JSON_PATH, "r", encoding="utf-8") as f:
         raw = json.load(f)
     log("json entries=%d" % len(raw))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
-
     platform = detect_platform(r2)
     log("platform=%s" % platform)
 
@@ -369,6 +355,12 @@ def main():
         log("macho parse failed")
         r2.quit(); return
 
+    text_blob, blob_va = get_text_blob(macho)
+    if not text_blob:
+        log("text blob read failed")
+        r2.quit(); return
+    log("text blob: %d bytes @ 0x%x" % (len(text_blob), blob_va))
+
     fs = macho.get("func_starts")
     if fs:
         log("LC_FUNCTION_STARTS paddr=0x%x size=0x%x" % (fs["dataoff"], fs["datasize"]))
@@ -379,7 +371,7 @@ def main():
     if len(prologs) < MIN_FUNC_STARTS:
         log("too few, scanning __text for prolog patterns...")
         t0 = time.time()
-        prologs = scan_prologs_from_section(macho)
+        prologs = scan_prologs_from_blob(text_blob, blob_va)
         log("pattern scan -> %d prologs in %.1fs" % (len(prologs), time.time() - t0))
 
     if not prologs:
@@ -399,13 +391,11 @@ def main():
             rejected.append({"name": name, "off": 0, "reason": "invalid value"})
             stats["invalid"] += 1
             continue
-
         cat = classify(name, off)
         if cat in ("field", "vtable", "global_ptr"):
             data_offsets[name] = off
             stats["data_" + cat] += 1
             continue
-
         target = base + off
         if target < text_va or target >= text_end:
             data_offsets[name] = off
@@ -413,32 +403,50 @@ def main():
             rejected.append({"name": name, "off": off, "reason": "outside __text"})
             continue
 
+        snap_ok, snap_reason = validate(r2, target)
+        target_is_boundary = is_boundary(text_blob, blob_va, target)
+
         prolog = find_nearest(prologs, target)
-        if prolog is None:
+        delta = prolog - target if prolog is not None else None
+
+        use_target = False
+        if snap_ok and target_is_boundary:
+            if prolog is None or abs(delta) > SNAP_BACK:
+                use_target = True
+                stats["snap_target"] += 1
+
+        if use_target:
+            chosen = target
+            chosen_delta = 0
+        elif prolog is not None:
+            chosen = prolog
+            chosen_delta = delta
+        else:
             stats["no_func"] += 1
             rejected.append({"name": name, "off": off, "reason": "no function found"})
             continue
 
-        delta = prolog - target
-        conf = confidence(delta)
+        conf = confidence(chosen_delta)
         if conf == "REJECT":
             stats["delta_reject"] += 1
-            rejected.append({"name": name, "off": off, "reason": "delta=%+d" % delta})
+            rejected.append({"name": name, "off": off, "reason": "delta=%+d" % chosen_delta})
             continue
 
-        rva = prolog - base
-        ok, reason = validate(r2, prolog)
-        validation[name] = {"ok": ok, "reason": reason, "delta": delta, "conf": conf}
+        rva = chosen - base
+        ok, reason = validate(r2, chosen)
+        validation[name] = {"ok": ok, "reason": reason, "delta": chosen_delta, "conf": conf}
         if not ok:
             stats["validation_fail"] += 1
             rejected.append({"name": name, "off": off, "reason": reason})
             continue
 
         prev = funcs.get(name)
-        if prev is None or abs(delta) < abs(prev[1]):
-            funcs[name] = (rva, delta, conf)
+        if prev is None or abs(chosen_delta) < abs(prev[1]):
+            funcs[name] = (rva, chosen_delta, conf)
         stats["resolved"] += 1
-        log("  [OK] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s" % (name, off, rva, delta, conf))
+        tag = "TARGET" if use_target else "PROLOG"
+        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s"
+            % (tag, name, off, rva, chosen_delta, conf))
 
     log("")
     log("=== DEDUP ===")
@@ -463,6 +471,7 @@ def main():
         "rejected": len(rejected), "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
         "prologs_total": len(prologs),
+        "snap_target": stats.get("snap_target", 0),
         "no_func": stats.get("no_func", 0),
         "delta_reject": stats.get("delta_reject", 0),
         "abs_outside_text": stats.get("abs_outside_text", 0),
