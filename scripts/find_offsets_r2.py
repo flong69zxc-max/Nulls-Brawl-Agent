@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-import os, sys, time, struct, re, bisect, traceback, binascii
+import os, sys, time, struct, re, bisect, traceback
 import r2pipe
-
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except Exception:
-    HAS_NUMPY = False
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
 BIN = os.environ.get("R2_BIN", "/tmp/brawl_bin")
@@ -90,71 +84,165 @@ def load_bytes(r2, va, size):
         a += n
     return b"".join(chunks)
 
-def mangled(cls, meth):
-    return "_ZN%d%s%d%s" % (len(cls), cls, len(meth), meth)
+def mangled_candidates(cls, meth):
+    out = []
+    out.append("_ZN%d%s%d%s" % (len(cls), cls, len(meth), meth))
+    return out
 
-def build_str_candidates(cls, meth):
-    cands = set()
-    cands.add(cls + "::" + meth)
-    cands.add(cls + "::" + meth + "()")
-    cands.add(cls + "::" + meth + "(void)")
-    cands.add(mangled(cls, meth))
-    return cands
-
-def scan_adrp_add_numpy(text_bytes, text_va):
-    if not HAS_NUMPY:
-        return None
-    words = np.frombuffer(text_bytes, dtype="<u4")
-    n = len(words)
-    is_adrp = ((words & 0x9F000000) == 0x90000000)
-    is_add  = ((words & 0xFF800000) == 0x91000000)
-
-    adrp_idx = np.where(is_adrp)[0]
-    if len(adrp_idx) == 0:
-        return {}
-
-    immlo = ((words >> np.uint32(29)) & np.uint32(3)).astype(np.int64)
-    immhi = ((words >> np.uint32(5)) & np.uint32(0x7FFFF)).astype(np.int64)
-    imm21 = (immhi << 2) | immlo
-    imm21 = np.where(imm21 & (1 << 20), imm21 - (1 << 21), imm21)
-
-    pcs = text_va + (np.arange(n, dtype=np.int64) * 4)
-    pages = (pcs & ~0xFFF) + (imm21 << 12)
-
-    rd_adrp = (words & 0x1F).astype(np.int64)
-
-    rd_add = ((words >> np.uint32(5)) & np.uint32(0x1F)).astype(np.int64)
-    rn_add = ((words >> np.uint32(5)) & np.uint32(0x1F)).astype(np.int64)
-    imm12 = ((words >> np.uint32(10)) & np.uint32(0xFFF)).astype(np.int64)
-    sh    = ((words >> np.uint32(22)) & np.uint32(1)).astype(np.int64)
-    imm12 = np.where(sh == 1, imm12 << 12, imm12)
-
-    target_map = {}
-    for offset in range(1, 8):
-        if np.any(adrp_idx + offset >= n):
-            continue
-        valid_adrp = adrp_idx[adrp_idx + offset < n]
-        add_idx = valid_adrp + offset
-
-        mask_add = is_add[add_idx] & (rd_adrp[valid_adrp] == rn_add[add_idx])
-        if not np.any(mask_add):
-            continue
-
-        adrp_pcs = pcs[valid_adrp[mask_add]]
-        pages_ok = pages[valid_adrp[mask_add]]
-        add_imms = imm12[add_idx[mask_add]]
-        xref_pcs = adrp_pcs
-
-        targets = pages_ok + add_imms
-        for pc, tgt in zip(xref_pcs, targets):
-            tgt = int(tgt); pc = int(pc)
-            target_map.setdefault(tgt, []).append(pc)
-
-    return target_map
-
-def scan_adrp_add_python(text_bytes, text_va):
+def scan_prologs(text_bytes, text_va):
+    prologs = []
     n = len(text_bytes) // 4
-    target_map = {}
+    for i in range(n):
+        w = struct.unpack_from("<I", text_bytes, i * 4)[0]
+        # pacibsp / paciasp
+        if w == 0xD503237F or w == 0xD503233F:
+            prologs.append(text_va + i * 4); continue
+        # bti c / bti j
+        if w == 0xD503245F or w == 0xD503249F:
+            prologs.append(text_va + i * 4); continue
+        # stp x29, x30, [sp, #-imm]!  (imm7 = любой)
+        if (w & 0xFFC07FFF) == 0xA9807BFD:
+            prologs.append(text_va + i * 4); continue
+        # stp x29, x30, [sp, #imm]   (post-index, без !)
+        if (w & 0xFFC07FFF) == 0xA8807BFD:
+            prologs.append(text_va + i * 4); continue
+        # sub sp, sp, #imm
+        if (w & 0xFF8003FF) == 0xD10003FF:
+            prologs.append(text_va + i * 4); continue
+    return prologs
+
+def main():
+    global _fh
+    try: _fh = open(LOG, "w")
+    except Exception: _fh = None
+
+    log("=== find_offsets_ios v5 ===")
+
+    r2 = r2pipe.open(BIN, flags=["-2"])
+    r2.cmd("e scr.color=0")
+
+    info = cmdj(r2, "ij") or {}
+    base = info.get("baddr", 0x100000000) or 0x100000000
+    core = info.get("core", {}) or {}
+    log("format=%s base=0x%x" % (core.get("format", "?"), base))
+
+    sections = cmdj(r2, "iSj") or []
+    text_sections = []
+    data_sections = []
+    text_va = None
+    text_sz = 0
+
+    for s in sections:
+        n = s.get("name", "") or ""
+        p = s.get("perm", "") or ""
+        va = s.get("vaddr", 0)
+        sz = s.get("size", 0)
+        if sz <= 0 or va <= 0:
+            continue
+        # секции сегмента __TEXT: __text, __const, __cstring, __ustring, __const, __objc_methname
+        if "__text" in n and "x" in p:
+            text_va = va; text_sz = sz
+            text_sections.append((va, sz, n))
+        elif "__const" in n or "__cstring" in n or "__ustring" in n \
+             or "__objc_methname" in n or "__objc_classname" in n \
+             or "__objc_methtype" in n:
+            # обычно лежат в __TEXT сегменте, доступ read-only
+            text_sections.append((va, sz, n))
+        elif "w" in p or "r" in p:
+            data_sections.append((va, sz, n))
+
+    if not text_va:
+        log("no __text, abort")
+        return
+
+    log("__text 0x%x-0x%x size=%d"
+        % (text_va, text_va + text_sz, text_sz))
+    log("text-секций=%d data-секций=%d"
+        % (len(text_sections), len(data_sections)))
+
+    log("loading text-секций...")
+    text_blobs = []
+    for va, sz, n in text_sections:
+        b = load_bytes(r2, va, sz)
+        if b:
+            text_blobs.append((va, b))
+            log("  TEXT %-32s 0x%x size=%d" % (n, va, sz))
+    total_text = sum(len(b) for _, b in text_blobs)
+    log("TEXT total=%d bytes blobs=%d" % (total_text, len(text_blobs)))
+
+    log("loading data-секций...")
+    data_blobs = []
+    for va, sz, n in data_sections:
+        b = load_bytes(r2, va, sz)
+        if b:
+            data_blobs.append((va, b))
+            log("  DATA %-32s 0x%x size=%d" % (n, va, sz))
+    total_data = sum(len(b) for _, b in data_blobs)
+    log("DATA total=%d bytes blobs=%d" % (total_data, len(data_blobs)))
+
+    # ----- собираем строки из всех загруженных блобов + из izj -----
+    log("collecting strings via izj...")
+    iz = cmdj(r2, "izj") or []
+    str_index = {}
+    for s in iz:
+        txt = (s.get("string") or "").strip()
+        if not txt:
+            continue
+        va = s.get("vaddr", 0)
+        if va:
+            str_index.setdefault(txt, []).append(va)
+    log("izj strings=%d" % len(str_index))
+
+    log("manual regex scan across all blobs...")
+    t0 = time.time()
+    pat_method = re.compile(rb"[A-Za-z_][A-Za-z0-9_]{1,63}::[A-Za-z_~][A-Za-z0-9_]{1,63}")
+    pat_mangled = re.compile(rb"_ZN\d+[A-Za-z_][A-Za-z0-9_]+")
+
+    added_method = 0
+    added_mangled = 0
+    all_blobs = text_blobs + data_blobs
+    for va, blob in all_blobs:
+        for m in pat_method.finditer(blob):
+            txt = m.group(0).decode("latin-1")
+            addr = va + m.start()
+            lst = str_index.setdefault(txt, [])
+            if addr not in lst:
+                lst.append(addr)
+                added_method += 1
+        for m in pat_mangled.finditer(blob):
+            txt = m.group(0).decode("latin-1")
+            addr = va + m.start()
+            lst = str_index.setdefault(txt, [])
+            if addr not in lst:
+                lst.append(addr)
+                added_mangled += 1
+    log("regex added method=%d mangled=%d in %.1fs"
+        % (added_method, added_mangled, time.time() - t0))
+
+    total_with_colons = sum(1 for k in str_index if "::" in k)
+    total_mangled = sum(1 for k in str_index if k.startswith("_ZN"))
+    log("total strings=%d (:: = %d, _ZN = %d)"
+        % (len(str_index), total_with_colons, total_mangled))
+
+    # выведем все имена с :: в лог (для анализа)
+    log("ALL Class::method strings:")
+    for k in sorted(str_index.keys()):
+        if "::" in k:
+            log("  NAME %s (addrs=%d)" % (k, len(str_index[k])))
+
+    # ----- ищем adrp+add -----
+    log("scanning __text for adrp+add...")
+    t0 = time.time()
+    adrp_add_map = {}
+    # берём только "чистый" __text (первый блоб)
+    text_b = None
+    for va, blob in text_blobs:
+        if text_b is None:
+            text_b = (va, blob)
+    if text_b is None:
+        log("no text blob"); return
+    text_va2, text_bytes = text_b
+    n = len(text_bytes) // 4
     for i in range(n):
         w = struct.unpack_from("<I", text_bytes, i * 4)[0]
         if (w & 0x9F000000) != 0x90000000:
@@ -165,7 +253,7 @@ def scan_adrp_add_python(text_bytes, text_va):
         imm = (immhi << 2) | immlo
         if imm & (1 << 20):
             imm -= (1 << 21)
-        pc = text_va + i * 4
+        pc = text_va2 + i * 4
         page = (pc & ~0xFFF) + (imm << 12)
         for j in range(i + 1, min(i + 8, n)):
             w2 = struct.unpack_from("<I", text_bytes, j * 4)[0]
@@ -180,145 +268,16 @@ def scan_adrp_add_python(text_bytes, text_va):
             if sh:
                 imm12 <<= 12
             tgt = page + imm12
-            target_map.setdefault(tgt, []).append(pc)
+            adrp_add_map.setdefault(tgt, []).append(pc)
             break
-    return target_map
+    log("adrp+add targets=%d in %.1fs"
+        % (len(adrp_add_map), time.time() - t0))
 
-def scan_prologs_numpy(text_bytes, text_va):
-    words = np.frombuffer(text_bytes, dtype="<u4")
-    pcs = text_va + (np.arange(len(words), dtype=np.int64) * 4)
-
-    m_stp = ((words & 0xFFC07FFF) == 0xA9807BFD)
-    m_pacibsp = (words == 0xD503237F)
-    m_paciasp = (words == 0xD503233F)
-    m_bti_c = (words == 0xD503245F)
-    m_bti_j = (words == 0xD503249F)
-
-    mask = m_stp | m_pacibsp | m_paciasp | m_bti_c | m_bti_j
-    prologs = pcs[mask]
-    return sorted(int(x) for x in prologs)
-
-def scan_prologs_python(text_bytes, text_va):
-    prologs = []
-    n = len(text_bytes) // 4
-    for i in range(n):
-        w = struct.unpack_from("<I", text_bytes, i * 4)[0]
-        if (w & 0xFFC07FFF) == 0xA9807BFD or \
-           w in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503249F):
-            prologs.append(text_va + i * 4)
-    return prologs
-
-def main():
-    global _fh
-    try: _fh = open(LOG, "w")
-    except Exception: _fh = None
-
-    log("=== find_offsets_ios v4 numpy=%s ===" % HAS_NUMPY)
-
-    r2 = r2pipe.open(BIN, flags=["-2"])
-    r2.cmd("e scr.color=0")
-    r2.cmd("e asm.arch=arm")
-    r2.cmd("e asm.bits=64")
-
-    info = cmdj(r2, "ij") or {}
-    base = info.get("baddr", 0x100000000) or 0x100000000
-    core = info.get("core", {}) or {}
-    log("format=%s base=0x%x" % (core.get("format", "?"), base))
-
-    sections = cmdj(r2, "iSj") or []
-    text_va = None
-    text_sz = 0
-    data_secs = []
-    for s in sections:
-        n = s.get("name", "") or ""
-        p = s.get("perm", "") or ""
-        va = s.get("vaddr", 0)
-        sz = s.get("size", 0)
-        if sz <= 0 or va <= 0:
-            continue
-        if "__text" in n and "x" in p:
-            text_va, text_sz = va, sz
-        elif "x" not in p and ("w" in p or "r" in p):
-            data_secs.append((va, sz, n))
-
-    if not text_va:
-        log("no .text, abort")
-        return
-
-    log(".text 0x%x-0x%x size=%d" % (text_va, text_va + text_sz, text_sz))
-    log("data sections=%d" % len(data_secs))
-
-    log("loading .text (%.2f MB)..." % (text_sz / 1e6))
+    # ----- ищем прологи -----
+    log("scanning __text for prologs...")
     t0 = time.time()
-    text = load_bytes(r2, text_va, text_sz)
-    log(".text loaded %.1fs bytes=%d" % (time.time() - t0, len(text or b"")))
-    if not text:
-        log("failed to load .text")
-        return
-
-    log("loading data sections...")
-    data_blobs = []
-    for va, sz, n in data_secs:
-        b = load_bytes(r2, va, sz)
-        if b:
-            data_blobs.append((va, b))
-            log("  %-32s 0x%x size=%d" % (n, va, sz))
-    log("data total=%d bytes blobs=%d"
-        % (sum(len(b) for _, b in data_blobs), len(data_blobs)))
-
-    log("collecting strings via izj...")
-    iz = cmdj(r2, "izj") or []
-    str_index = {}
-    for s in iz:
-        txt = (s.get("string") or "").strip()
-        if not txt:
-            continue
-        va = s.get("vaddr", 0)
-        if va:
-            str_index.setdefault(txt, []).append(va)
-    log("izj strings=%d" % len(str_index))
-
-    log("manual regex scan of data blobs...")
-    t0 = time.time()
-    pat = re.compile(rb"[A-Za-z_][A-Za-z0-9_]{1,63}::[A-Za-z_~][A-Za-z0-9_]{1,63}")
-    manual_new = 0
-    for va, blob in data_blobs:
-        for m in pat.finditer(blob):
-            txt = m.group(0).decode("latin-1")
-            addr = va + m.start()
-            lst = str_index.setdefault(txt, [])
-            if addr not in lst:
-                lst.append(addr)
-                manual_new += 1
-    log("manual scan added %d refs in %.1fs" % (manual_new, time.time() - t0))
-
-    total_with_colons = sum(1 for k in str_index if "::" in k)
-    log("total unique strings=%d (with :: = %d)"
-        % (len(str_index), total_with_colons))
-
-    log("sample found Class::method (first 15):")
-    shown = 0
-    for k in str_index:
-        if "::" in k:
-            log("  %s  (%d addr)" % (k, len(str_index[k])))
-            shown += 1
-            if shown >= 15:
-                break
-
-    log("scanning .text for adrp+add...")
-    t0 = time.time()
-    if HAS_NUMPY:
-        adrp_add = scan_adrp_add_numpy(text, text_va)
-    else:
-        adrp_add = scan_adrp_add_python(text, text_va)
-    log("adrp+add targets=%d in %.1fs" % (len(adrp_add), time.time() - t0))
-
-    log("scanning .text for prologs...")
-    t0 = time.time()
-    if HAS_NUMPY:
-        prologs = scan_prologs_numpy(text, text_va)
-    else:
-        prologs = scan_prologs_python(text, text_va)
+    prologs = scan_prologs(text_bytes, text_va2)
+    prologs.sort()
     log("prologs=%d in %.1fs" % (len(prologs), time.time() - t0))
 
     def find_func_start(inner_pc):
@@ -330,35 +289,39 @@ def main():
             return None
         return s
 
+    # ----- resolve -----
     log("--- resolving %d targets ---" % len(TARGETS))
     results = {}
     for target in TARGETS:
         cls, method = target.split(".", 1)
 
-        all_candidates = build_str_candidates(cls, method)
-        found_addr = None
+        all_candidates = [
+            cls + "::" + method,
+            cls + "::" + method + "()",
+            cls + "::" + method + "(void)",
+        ]
+        all_candidates += mangled_candidates(cls, method)
+
+        found_addr = []
         found_name = None
-        found_addrs = []
         for cand in all_candidates:
             if cand in str_index:
                 found_addr = str_index[cand]
                 found_name = cand
-                found_addrs = found_addr
                 break
 
         if not found_addr:
-            log("  %-48s NO_STRING (tried %d cands)"
-                % (target, len(all_candidates)))
+            log("  %-48s NO_STRING" % target)
             continue
 
         xrefs_all = []
-        for sa in found_addrs:
-            pcs = adrp_add.get(sa, [])
+        for sa in found_addr:
+            pcs = adrp_add_map.get(sa, [])
             xrefs_all.extend(pcs)
 
         if not xrefs_all:
             log("  %-48s str='%s' addrs=%d xrefs=0"
-                % (target, found_name, len(found_addrs)))
+                % (target, found_name, len(found_addr)))
             continue
 
         found = None
