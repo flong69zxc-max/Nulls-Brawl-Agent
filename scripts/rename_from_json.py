@@ -340,22 +340,34 @@ def first_ops(r2, addr, count=4):
     return out
 
 
-def write_outputs(funcs, data, rejected, platform, total, summary, validation, debug_records):
+def write_outputs(funcs, aliased, data, rejected, platform, total,
+                  summary, validation, debug_records):
     global _wrote_output
 
     try:
         with open(OUT_JS, "w", encoding="utf-8") as fh:
             fh.write("// auto-resolved offsets\n")
             fh.write("// platform=%s\n" % platform)
-            fh.write("// funcs=%d data=%d total=%d\n\n" % (len(funcs), len(data), total))
+            fh.write("// funcs=%d aliased=%d data=%d total=%d\n\n"
+                     % (len(funcs), len(aliased), len(data), total))
+
             fh.write("export const resolved = Object.freeze({\n")
             for name in sorted(funcs.keys()):
                 fh.write("    %s: 0x%x,\n" % (name, funcs[name][0]))
+            for name in sorted(aliased.keys()):
+                fh.write("    %s: 0x%x,\n" % (name, aliased[name]))
             fh.write("});\n\n")
+
+            fh.write("export const aliases = Object.freeze({\n")
+            for name in sorted(aliased.keys()):
+                fh.write("    %s: 0x%x,\n" % (name, aliased[name]))
+            fh.write("});\n\n")
+
             fh.write("export const data = Object.freeze({\n")
             for name in sorted(data.keys()):
                 fh.write("    %s: 0x%x,\n" % (name, data[name]))
             fh.write("});\n")
+
         log("wrote %s" % OUT_JS)
     except Exception as e:
         log("js write failed: %s" % e)
@@ -374,6 +386,7 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation, d
                 }
                 for k, v in funcs.items()
             },
+            "aliases": aliased,
             "data": data,
             "rejected": rejected,
             "validation": validation,
@@ -397,7 +410,9 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation, d
             fh.write("platform: **%s**  \n" % platform)
             fh.write("input entries: **%d**  \n" % total)
             fh.write("funcs: **%d**  \n" % len(funcs))
-            fh.write("data: **%d**  \n\n" % len(data))
+            fh.write("aliased: **%d**  \n" % len(aliased))
+            fh.write("data: **%d**  \n" % len(data))
+            fh.write("rejected: **%d**  \n\n" % len(rejected))
 
             fh.write("## Summary\n\n")
             for k, v in sorted(summary.items()):
@@ -422,6 +437,16 @@ def write_outputs(funcs, data, rejected, platform, total, summary, validation, d
                     ops = " ; ".join(dbg.get("ops", [])[:3])
                     fh.write("| %s | 0x%x | %+d | %s | %s |\n"
                              % (name, rva, d, src, ops))
+                fh.write("\n")
+
+            if aliased:
+                fh.write("## Aliases (%d)\n\n" % len(aliased))
+                fh.write("| name | rva | alias of |\n|---|---|---|\n")
+                by_rva = {v[0]: k for k, v in funcs.items()}
+                for name in sorted(aliased.keys()):
+                    rva = aliased[name]
+                    owner = by_rva.get(rva, "?")
+                    fh.write("| %s | 0x%x | %s |\n" % (name, rva, owner))
                 fh.write("\n")
 
             if rejected:
@@ -526,7 +551,7 @@ def main():
         return
 
     text_end = text_va + text_sz
-    funcs = {}
+    raw_candidates = {}
     data_offsets = {}
     rejected = []
     validation = {}
@@ -550,7 +575,6 @@ def main():
         if target < text_va or target >= text_end:
             data_offsets[name] = off
             stats["abs_outside_text"] += 1
-            rejected.append({"name": name, "off": off, "reason": "outside __text"})
             continue
 
         near = find_near(prologs, target, SNAP_WINDOW)
@@ -582,15 +606,21 @@ def main():
 
         rva = chosen - base
         ok, reason = validate(r2, chosen)
-        validation[name] = {"ok": ok, "reason": reason, "delta": chosen_delta, "conf": conf, "source": source}
+        validation[name] = {
+            "ok": ok,
+            "reason": reason,
+            "delta": chosen_delta,
+            "conf": conf,
+            "source": source,
+        }
         if not ok:
             stats["validation_fail"] += 1
             rejected.append({"name": name, "off": off, "reason": reason})
             continue
 
-        prev = funcs.get(name)
+        prev = raw_candidates.get(name)
         if prev is None or abs(chosen_delta) < abs(prev[1]):
-            funcs[name] = (rva, chosen_delta, conf)
+            raw_candidates[name] = (rva, chosen_delta, conf)
 
         if len(debug_records) < 500:
             debug_records[name] = {
@@ -607,21 +637,20 @@ def main():
             % (source, name, off, rva, chosen_delta, conf))
 
     log("")
-    log("=== DEDUP ===")
+    log("=== GROUP BY ADDRESS ===")
     by_addr = defaultdict(list)
-    for name, (rva, delta, conf) in funcs.items():
+    for name, (rva, delta, conf) in raw_candidates.items():
         by_addr[rva].append((name, delta, conf))
 
     funcs = {}
-    dup_count = 0
+    aliased = {}
     for rva, items in by_addr.items():
         items.sort(key=lambda x: abs(x[1]))
         best = items[0]
         funcs[best[0]] = (rva, best[1], best[2])
-        if len(items) > 1:
-            dup_count += len(items) - 1
-            for name, delta, conf in items[1:]:
-                log("  [DUP] %s -> %s (rva=0x%x)" % (name, best[0], rva))
+        for name, delta, conf in items[1:]:
+            aliased[name] = rva
+            log("  [ALIAS] %s -> %s (rva=0x%x)" % (name, best[0], rva))
 
     r2.quit()
 
@@ -630,9 +659,9 @@ def main():
     summary = {
         "input": len(raw),
         "funcs": len(funcs),
+        "aliases": len(aliased),
         "data": len(data_offsets),
         "rejected": len(rejected),
-        "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
         "sources": dict(source_counts),
         "prologs_total": len(prologs),
@@ -647,7 +676,14 @@ def main():
     for k, v in summary.items():
         log("  %-22s = %s" % (k, v))
 
-    write_outputs(funcs, data_offsets, rejected, platform, len(raw),
+    if rejected:
+        log("")
+        log("=== REJECTED ===")
+        for r in rejected:
+            log("  %-40s input=0x%-8x reason=%s"
+                % (r["name"], r["off"], r["reason"]))
+
+    write_outputs(funcs, aliased, data_offsets, rejected, platform, len(raw),
                   summary, validation, debug_records)
 
 
@@ -663,6 +699,7 @@ if __name__ == "__main__":
                     fh.write("// auto-resolved offsets\n")
                     fh.write("// failed\n")
                     fh.write("export const resolved = Object.freeze({});\n")
+                    fh.write("export const aliases = Object.freeze({});\n")
                     fh.write("export const data = Object.freeze({});\n")
             except Exception:
                 pass
