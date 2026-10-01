@@ -12,12 +12,13 @@ OUT_REPORT = os.path.join(WS, "r2_rename_report.md")
 LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
-MAX_BACK       = 0x8000
-DELTA_HIGH     = 0x100
-DELTA_MEDIUM   = 0x1000
-DELTA_LOW      = 0x8000
+MAX_BACK = 0x8000
+DELTA_HIGH = 0x100
+DELTA_MEDIUM = 0x1000
+DELTA_LOW = 0x8000
 
 _fh = None
+_wrote_output = False
 
 
 FIELD_HINTS = (
@@ -79,6 +80,16 @@ def parse_int(v):
     return None
 
 
+def is_field_like(name):
+    for h in FIELD_HINTS:
+        if name.endswith(h) or h in name:
+            return True
+    for p in NON_FUNC_PREFIXES:
+        if name.startswith(p):
+            return True
+    return False
+
+
 def classify(name, off):
     if name.startswith("VTABLE_"):
         return "vtable"
@@ -89,16 +100,6 @@ def classify(name, off):
     if off < 0x1000 or off > 0x10000000:
         return "field"
     return "func"
-
-
-def is_field_like(name):
-    for h in FIELD_HINTS:
-        if name.endswith(h) or h in name:
-            return True
-    for p in NON_FUNC_PREFIXES:
-        if name.startswith(p):
-            return True
-    return False
 
 
 def load_bytes(r2, va, size):
@@ -129,22 +130,25 @@ def scan_prologs(text, text_va):
             prologs.append(text_va + i * 4); continue
         if (w & 0xFF8003FF) == 0xD10003FF:
             prologs.append(text_va + i * 4); continue
+        if (w & 0xFFE07FFF) == 0xA9807BFD:
+            prologs.append(text_va + i * 4); continue
     return prologs
 
 
 def is_boundary(text, text_va, addr):
     off = addr - text_va
     if off < 8: return True
-    if off + 4 > len(text): return False
+    if off > len(text): return False
     prev = struct.unpack_from("<I", text, off - 4)[0]
     if prev == 0xD65F03C0: return True
     if prev == 0xD503201F: return True
     if prev == 0xD4200000: return True
     if (prev & 0xFFE0001F) == 0xD6BF03E0: return True
+    if (prev & 0xFFE0001F) == 0xD65F03C0: return True
     return False
 
 
-def nearest_prolog(prologs, text, text_va, addr, max_back=MAX_BACK):
+def nearest_prolog(prologs, addr, max_back=MAX_BACK):
     idx = bisect.bisect_right(prologs, addr) - 1
     if idx < 0: return None
     s = prologs[idx]
@@ -176,7 +180,69 @@ def confidence(delta):
     return "REJECT"
 
 
-def write_outputs(funcs, data, rejected, platform, total, summary):
+def validate_with_r2(r2, addr, text_va, text_end):
+    """Disassemble a few instructions at addr and sanity-check."""
+    result = {
+        "analyzed": False,
+        "instr_count": 0,
+        "has_frame": False,
+        "has_ret_soon": False,
+        "first_ops": [],
+        "looks_valid": False,
+        "reason": "",
+    }
+    try:
+        ops = cmdj(r2, "pdj 12 @ 0x%x" % addr)
+    except Exception:
+        ops = None
+
+    if not ops or not isinstance(ops, list):
+        result["reason"] = "pd failed"
+        return result
+
+    result["analyzed"] = True
+    result["instr_count"] = len(ops)
+
+    valid_ops = 0
+    for op in ops[:8]:
+        if not isinstance(op, dict): continue
+        op_type = (op.get("type") or "").lower()
+        mnem = (op.get("opcode") or "").lower()
+        if op_type in ("invalid", "ill", "unk"):
+            break
+        valid_ops += 1
+        result["first_ops"].append(mnem)
+
+        if "stp" in mnem and "x29" in mnem and "x30" in mnem:
+            result["has_frame"] = True
+        if mnem.startswith("sub") and "sp" in mnem:
+            result["has_frame"] = True
+        if mnem.startswith("ret"):
+            result["has_ret_soon"] = True
+            break
+        if mnem.startswith("b ") or mnem.startswith("br "):
+            result["has_ret_soon"] = True
+
+    if valid_ops == 0:
+        result["reason"] = "no valid instructions"
+        return result
+
+    if result["has_frame"] or result["has_ret_soon"]:
+        result["looks_valid"] = True
+    else:
+        result["looks_valid"] = valid_ops >= 4
+
+    if not result["looks_valid"]:
+        result["reason"] = "no frame, no branch in first 8 ops"
+
+    return result
+
+
+def write_outputs(funcs, data, rejected, platform, total, summary,
+                  valid_map=None):
+    global _wrote_output
+    valid_map = valid_map or {}
+
     try:
         with open(OUT_JS, "w", encoding="utf-8") as fh:
             fh.write("// auto-resolved offsets\n")
@@ -204,6 +270,7 @@ def write_outputs(funcs, data, rejected, platform, total, summary):
                       for k, v in funcs.items()},
             "data": data,
             "rejected": rejected,
+            "validation": valid_map,
         }
         with open(OUT_JSON, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, sort_keys=True)
@@ -233,16 +300,22 @@ def write_outputs(funcs, data, rejected, platform, total, summary):
                 if not items:
                     continue
                 fh.write("## %s confidence (%d)\n\n" % (conf, len(items)))
-                fh.write("| name | rva | delta |\n|---|---|---|\n")
+                fh.write("| name | rva | delta | r2_valid | first_ops |\n")
+                fh.write("|---|---|---|---|---|\n")
                 for name, rva, d in sorted(items, key=lambda x: abs(x[2])):
-                    fh.write("| %s | 0x%x | %+d |\n" % (name, rva, d))
+                    v = valid_map.get(name, {})
+                    ok = "yes" if v.get("looks_valid") else "no"
+                    ops = " ".join(v.get("first_ops", [])[:3])
+                    fh.write("| %s | 0x%x | %+d | %s | %s |\n"
+                             % (name, rva, d, ok, ops))
                 fh.write("\n")
 
             if rejected:
                 fh.write("## Rejected (%d)\n\n" % len(rejected))
                 fh.write("| name | input | reason |\n|---|---|---|\n")
                 for r in rejected:
-                    fh.write("| %s | 0x%x | %s |\n" % (r["name"], r["off"], r["reason"]))
+                    fh.write("| %s | 0x%x | %s |\n"
+                             % (r["name"], r["off"], r["reason"]))
                 fh.write("\n")
 
             if data:
@@ -256,6 +329,8 @@ def write_outputs(funcs, data, rejected, platform, total, summary):
     except Exception as e:
         log("report write failed: %s" % e)
 
+    _wrote_output = True
+
 
 def main():
     global _fh
@@ -266,7 +341,6 @@ def main():
 
     if not os.path.exists(JSON_PATH):
         log("json not found: %s" % JSON_PATH)
-        write_outputs({}, {}, [], "unknown", 0, {"error": "json missing"})
         return
 
     with open(JSON_PATH, "r", encoding="utf-8") as f:
@@ -275,6 +349,7 @@ def main():
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
+    r2.cmd("e anal.timeout=5")
 
     platform = detect_platform(r2)
     log("platform=%s" % platform)
@@ -294,8 +369,8 @@ def main():
             break
     if not text_va:
         log("no __text section")
-        write_outputs({}, {}, [], platform, len(raw), {"error": "no __text"})
-        r2.quit(); return
+        r2.quit()
+        return
 
     log("__text vaddr=0x%x size=0x%x end=0x%x"
         % (text_va, text_sz, text_va + text_sz))
@@ -304,8 +379,8 @@ def main():
     text = load_bytes(r2, text_va, text_sz)
     log("loaded __text in %.1fs bytes=%d" % (time.time() - t0, len(text or b"")))
     if not text:
-        write_outputs({}, {}, [], platform, len(raw), {"error": "text load failed"})
-        r2.quit(); return
+        r2.quit()
+        return
 
     t0 = time.time()
     prologs = scan_prologs(text, text_va)
@@ -340,7 +415,7 @@ def main():
                              "reason": "target outside __text"})
             continue
 
-        prolog = nearest_prolog(prologs, text, text_va, target)
+        prolog = nearest_prolog(prologs, target)
         if prolog is None:
             stats["no_prolog"] += 1
             rejected.append({"name": name, "off": off,
@@ -360,8 +435,7 @@ def main():
         rva = prolog - base
         prev = candidates.get(name)
         if prev is None or abs(delta) < abs(prev[1]):
-            candidates[name] = (rva, delta, conf, boundary)
-        stats["resolved"] += 1
+            candidates[name] = (rva, delta, conf)
 
         tag = platform.upper()
         warn = "" if boundary else " !BOUNDARY"
@@ -371,8 +445,8 @@ def main():
     log("")
     log("=== DEDUP ===")
     by_addr = defaultdict(list)
-    for name, (rva, delta, conf, boundary) in candidates.items():
-        by_addr[rva].append((name, delta, conf, boundary))
+    for name, (rva, delta, conf) in candidates.items():
+        by_addr[rva].append((name, delta, conf))
 
     funcs = {}
     dup_count = 0
@@ -382,9 +456,27 @@ def main():
         funcs[best[0]] = (rva, best[1], best[2])
         if len(items) > 1:
             dup_count += len(items) - 1
-            for name, delta, conf, boundary in items[1:]:
+            for name, delta, conf in items[1:]:
                 log("  [DUP] %s -> %s (rva=0x%x, delta=%+d)"
                     % (name, best[0], rva, delta))
+
+    log("")
+    log("=== VALIDATION (r2 pd) ===")
+    valid_map = {}
+    validated_ok = 0
+    validated_bad = 0
+    for name, (rva, delta, conf) in funcs.items():
+        addr = base + rva
+        v = validate_with_r2(r2, addr, text_va, text_end)
+        valid_map[name] = v
+        if v.get("looks_valid"):
+            validated_ok += 1
+        else:
+            validated_bad += 1
+            log("  [BAD] %-40s rva=0x%-8x reason=%s"
+                % (name, rva, v.get("reason") or "unknown"))
+
+    log("  valid=%d bad=%d" % (validated_ok, validated_bad))
 
     log("")
     log("=== R2 rename ===")
@@ -396,7 +488,6 @@ def main():
     r2.quit()
 
     conf_counts = Counter(v[2] for v in funcs.values())
-    boundary_warn = sum(1 for v in funcs.values() if not v[3] and len(candidates)>0)
 
     summary = {
         "input": len(raw),
@@ -405,10 +496,11 @@ def main():
         "rejected": len(rejected),
         "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
+        "validated_ok": validated_ok,
+        "validated_bad": validated_bad,
         "no_prolog": stats.get("no_prolog", 0),
         "delta_reject": stats.get("delta_reject", 0),
         "abs_outside_text": stats.get("abs_outside_text", 0),
-        "non_boundary_prologs": boundary_warn,
     }
 
     log("")
@@ -417,15 +509,12 @@ def main():
         log("  %-22s = %s" % (k, v))
 
     if candidates:
-        deltas = [d for _, (_, d, _, _) in candidates.items()]
+        deltas = [d for _, (_, d, _) in candidates.items()]
         log("delta abs min=%d max=%d"
             % (min(abs(d) for d in deltas), max(abs(d) for d in deltas)))
-        top = Counter(deltas)
-        log("delta top 10:")
-        for d, n in top.most_common(10):
-            log("  %+d : %d" % (d, n))
 
-    write_outputs(funcs, data_offsets, rejected, platform, len(raw), summary)
+    write_outputs(funcs, data_offsets, rejected, platform, len(raw),
+                  summary, valid_map)
 
 
 if __name__ == "__main__":
@@ -434,8 +523,13 @@ if __name__ == "__main__":
     except Exception as e:
         log("FATAL %s" % e)
         traceback.print_exc()
-        try:
-            write_outputs({}, {}, [], "unknown", 0, {"fatal": str(e)})
-        except Exception:
-            pass
+        if not _wrote_output:
+            try:
+                with open(OUT_JS, "w", encoding="utf-8") as fh:
+                    fh.write("// auto-resolved offsets\n")
+                    fh.write("// failed\n")
+                    fh.write("export const resolved = Object.freeze({});\n")
+                    fh.write("export const data = Object.freeze({});\n")
+            except Exception:
+                pass
         sys.exit(0)
