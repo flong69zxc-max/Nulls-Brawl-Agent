@@ -13,6 +13,7 @@ LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
 
 MAX_DELTA = 0x2000
+MIN_FUNC_STARTS = 5000
 
 _fh = None
 _wrote_output = False
@@ -105,35 +106,19 @@ def confidence(delta):
     if a <= MAX_DELTA: return "LOW"
     return "REJECT"
 
-def parse_macho_function_starts(bin_path):
-    try:
-        with open(bin_path, "rb") as f:
-            data = f.read()
-    except Exception as e:
-        log("open binary failed: %s" % e)
-        return None, None
+def parse_macho_layout(bin_path):
+    with open(bin_path, "rb") as f:
+        data = f.read()
 
-    if len(data) < 32:
-        return None, None
+    if len(data) < 32 or struct.unpack_from("<I", data, 0)[0] != 0xFEEDFACF:
+        return None
 
-    magic = struct.unpack_from("<I", data, 0)[0]
-    if magic != 0xFEEDFACF:
-        magic_be = struct.unpack_from(">I", data, 0)[0]
-        if magic_be == 0xFEEDFACF:
-            return None, None
-        log("not MH_MAGIC_64 (magic=0x%x)" % magic)
-        return None, None
-
-    is_64 = True
-    header_size = 32
     ncmds = struct.unpack_from("<I", data, 16)[0]
-    sizeofcmds = struct.unpack_from("<I", data, 20)[0]
-
-    offset = header_size
-    text_vmaddr = None
+    offset = 32
+    text_seg = None
+    text_section = None
     linkedit_seg = None
     func_starts = None
-    segments = []
 
     for _ in range(ncmds):
         if offset + 8 > len(data): break
@@ -141,74 +126,116 @@ def parse_macho_function_starts(bin_path):
         if cmdsize < 8: break
 
         if cmd_id == 0x19:
-            if offset + 72 > len(data): break
-            segname = data[offset + 8:offset + 24].rstrip(b"\x00").decode("utf-8", "ignore")
-            vmaddr = struct.unpack_from("<Q", data, offset + 24)[0]
-            vmsize = struct.unpack_from("<Q", data, offset + 32)[0]
-            fileoff = struct.unpack_from("<Q", data, offset + 40)[0]
-            filesize = struct.unpack_from("<Q", data, offset + 48)[0]
-            initprot = struct.unpack_from("<I", data, offset + 60)[0]
-            seg = {
-                "name": segname, "vmaddr": vmaddr, "vmsize": vmsize,
-                "fileoff": fileoff, "filesize": filesize, "initprot": initprot,
-            }
-            segments.append(seg)
+            segname = data[offset+8:offset+24].rstrip(b"\x00").decode("utf-8", "ignore")
+            vmaddr = struct.unpack_from("<Q", data, offset+24)[0]
+            vmsize = struct.unpack_from("<Q", data, offset+32)[0]
+            fileoff = struct.unpack_from("<Q", data, offset+40)[0]
+            filesize = struct.unpack_from("<Q", data, offset+48)[0]
+            nsects = struct.unpack_from("<I", data, offset+64)[0]
+
             if segname == "__TEXT":
-                text_vmaddr = vmaddr
+                text_seg = {"vmaddr": vmaddr, "fileoff": fileoff, "filesize": filesize}
+                sec_off = offset + 72
+                for _s in range(nsects):
+                    if sec_off + 80 > len(data): break
+                    sectname = data[sec_off:sec_off+16].rstrip(b"\x00").decode("utf-8", "ignore")
+                    segn = data[sec_off+16:sec_off+32].rstrip(b"\x00").decode("utf-8", "ignore")
+                    addr = struct.unpack_from("<Q", data, sec_off+32)[0]
+                    size = struct.unpack_from("<Q", data, sec_off+40)[0]
+                    foff = struct.unpack_from("<I", data, sec_off+48)[0]
+                    if sectname == "__text" and segn == "__TEXT":
+                        text_section = {"vmaddr": addr, "size": size, "fileoff": foff}
+                        break
+                    sec_off += 80
             elif segname == "__LINKEDIT":
-                linkedit_seg = seg
+                linkedit_seg = {"vmaddr": vmaddr, "fileoff": fileoff, "filesize": filesize}
 
         elif cmd_id == 0x26:
-            if offset + 16 > len(data): break
-            dataoff = struct.unpack_from("<I", data, offset + 8)[0]
-            datasize = struct.unpack_from("<I", data, offset + 12)[0]
+            dataoff = struct.unpack_from("<I", data, offset+8)[0]
+            datasize = struct.unpack_from("<I", data, offset+12)[0]
             func_starts = {"dataoff": dataoff, "datasize": datasize}
 
         offset += cmdsize
 
-    if not func_starts or not linkedit_seg or text_vmaddr is None:
-        log("missing LC_FUNCTION_STARTS or __TEXT or __LINKEDIT")
-        return None, None
+    return {
+        "raw": data,
+        "text_seg": text_seg,
+        "text_section": text_section,
+        "linkedit_seg": linkedit_seg,
+        "func_starts": func_starts,
+    }
 
-    lk = linkedit_seg
-    fs_off = func_starts["dataoff"]
-    fs_sz = func_starts["datasize"]
+def parse_function_starts(macho):
+    fs = macho.get("func_starts")
+    lk = macho.get("linkedit_seg")
+    text_seg = macho.get("text_seg")
+    if not fs or not lk or not text_seg: return []
+    if fs["datasize"] < 16: return []
 
-    if fs_off < lk["fileoff"] or fs_off >= lk["fileoff"] + lk["filesize"]:
-        log("LC_FUNCTION_STARTS offset outside __LINKEDIT")
-        return None, None
+    raw = macho["raw"]
+    fs_off = fs["dataoff"]
+    fs_sz = fs["datasize"]
+    if fs_off + fs_sz > len(raw): fs_sz = len(raw) - fs_off
+    blob = raw[fs_off:fs_off + fs_sz]
 
-    delta_in_lk = fs_off - lk["fileoff"]
-    fs_vmaddr = lk["vmaddr"] + delta_in_lk
-
-    if fs_off + fs_sz > len(data):
-        fs_sz = len(data) - fs_off
-
-    raw = data[fs_off:fs_off + fs_sz]
-    log("LC_FUNCTION_STARTS paddr=0x%x vmaddr=0x%x size=0x%x" % (fs_off, fs_vmaddr, fs_sz))
-
+    text_vmaddr = text_seg["vmaddr"]
     addrs = []
     i = 0
     cur = 0
-    while i < len(raw):
+    while i < len(blob):
         result = 0
         shift = 0
-        while i < len(raw):
-            b = raw[i]; i += 1
+        while i < len(blob):
+            b = blob[i]; i += 1
             result |= (b & 0x7f) << shift
-            if not (b & 0x80):
-                break
+            if not (b & 0x80): break
             shift += 7
-            if shift > 63:
-                break
-        if result == 0:
-            break
+            if shift > 63: break
+        if result == 0: break
         cur += result
         addrs.append(text_vmaddr + cur)
 
-    addrs = sorted(set(addrs))
-    log("parsed %d function starts" % len(addrs))
-    return addrs, text_vmaddr
+    return sorted(set(addrs))
+
+def scan_prologs_from_section(macho):
+    sect = macho.get("text_section")
+    if not sect: return []
+    raw = macho["raw"]
+    off = sect["fileoff"]
+    size = sect["size"]
+    if off + size > len(raw): size = len(raw) - off
+    blob = raw[off:off + size]
+    va = sect["vmaddr"]
+
+    prologs = []
+    n = len(blob) // 4
+    for i in range(n):
+        w = struct.unpack_from("<I", blob, i * 4)[0]
+        if w in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503249F):
+            prologs.append(va + i * 4)
+            continue
+        if (w & 0xFFC07FFF) == 0xA9807BFD:
+            prologs.append(va + i * 4)
+            continue
+        if (w & 0xFFE07FFF) == 0xA9807BFD:
+            prologs.append(va + i * 4)
+            continue
+        if (w & 0xFF8003FF) == 0xD10003FF:
+            prologs.append(va + i * 4)
+            continue
+        if i > 0:
+            prev = struct.unpack_from("<I", blob, (i - 1) * 4)[0]
+            if prev in (0xD65F03C0, 0xD503201F, 0xD4200000, 0xD65F0FFF):
+                if (w & 0xFFC00000) == 0xB9400000:
+                    prologs.append(va + i * 4)
+                    continue
+                if (w & 0xFFC00000) == 0xF9400000:
+                    prologs.append(va + i * 4)
+                    continue
+                if (w & 0xFFE00000) == 0x39400000:
+                    prologs.append(va + i * 4)
+                    continue
+    return sorted(set(prologs))
 
 def find_nearest(addrs, target):
     idx = bisect.bisect_right(addrs, target) - 1
@@ -336,10 +363,27 @@ def main():
     log("__text vaddr=0x%x size=0x%x end=0x%x" % (text_va, text_sz, text_va + text_sz))
 
     t0 = time.time()
-    prologs, text_vmaddr = parse_macho_function_starts(BIN)
-    log("function starts parse in %.1fs" % (time.time() - t0))
+    macho = parse_macho_layout(BIN)
+    log("macho parsed in %.2fs" % (time.time() - t0))
+    if not macho or not macho.get("text_section"):
+        log("macho parse failed")
+        r2.quit(); return
+
+    fs = macho.get("func_starts")
+    if fs:
+        log("LC_FUNCTION_STARTS paddr=0x%x size=0x%x" % (fs["dataoff"], fs["datasize"]))
+
+    prologs = parse_function_starts(macho)
+    log("LC_FUNCTION_STARTS -> %d entries" % len(prologs))
+
+    if len(prologs) < MIN_FUNC_STARTS:
+        log("too few, scanning __text for prolog patterns...")
+        t0 = time.time()
+        prologs = scan_prologs_from_section(macho)
+        log("pattern scan -> %d prologs in %.1fs" % (len(prologs), time.time() - t0))
+
     if not prologs:
-        log("no prologs from LC_FUNCTION_STARTS, aborting")
+        log("no prologs, aborting")
         r2.quit(); return
 
     text_end = text_va + text_sz
