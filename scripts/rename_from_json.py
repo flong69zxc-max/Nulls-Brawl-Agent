@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, time
+import os, sys, json, time, struct, bisect, traceback
 import r2pipe
 
 WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
@@ -8,8 +8,8 @@ JSON_PATH = os.environ.get("OFFSETS_JSON", os.path.join(WS, "offsets.json"))
 OUT_JS = os.path.join(WS, "renamed_offsets.js")
 LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
+MAX_BACK = 0x8000
 
-IOS = {}
 _fh = None
 
 
@@ -26,51 +26,73 @@ def log(m):
             pass
 
 
+def cmd(r2, c):
+    try: return r2.cmd(c)
+    except Exception: return ""
+
+
 def cmdj(r2, c):
-    try:
-        v = r2.cmdj(c)
-        return v if v is not None else None
-    except Exception:
-        return None
+    try: return r2.cmdj(c)
+    except Exception: return None
 
 
-def load_android(path):
-    if not os.path.isfile(path):
-        log("android json not found: %s" % path)
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        log("json load failed: %s" % e)
-        return {}
+def parse_int(v):
+    if isinstance(v, bool): return None
+    if isinstance(v, int): return v
+    if isinstance(v, str):
+        s = v.strip()
+        if not s: return None
+        try:
+            return int(s, 16) if s.lower().startswith("0x") else int(s)
+        except Exception:
+            return None
+    return None
 
 
-def nest(flat):
-    tree = {}
-    if not isinstance(flat, dict):
-        return tree
-    for key, value in flat.items():
-        if not isinstance(value, int):
-            continue
-        parts = key.split("_")
-        if len(parts) < 2:
-            tree[key] = value
-            continue
-        head = parts[0]
-        tail = "_".join(parts[1:])
-        tree.setdefault(head, {})[tail] = value
-    return tree
+def load_bytes(r2, va, size):
+    chunks = []
+    a = va; end = va + size; CH = 0x400000
+    while a < end:
+        n = min(CH, end - a)
+        hx = cmd(r2, "p8 %d @ 0x%x" % (n, a)).strip()
+        if not hx: return None
+        try: chunks.append(bytes.fromhex(hx))
+        except Exception: return None
+        a += n
+    return b"".join(chunks)
+
+
+def scan_prologs(text, text_va):
+    prologs = []
+    n = len(text) // 4
+    for i in range(n):
+        w = struct.unpack_from("<I", text, i * 4)[0]
+        if w == 0xD503237F or w == 0xD503233F:
+            prologs.append(text_va + i * 4); continue
+        if w == 0xD503245F or w == 0xD503249F:
+            prologs.append(text_va + i * 4); continue
+        if (w & 0xFFC07FFF) == 0xA9807BFD:
+            prologs.append(text_va + i * 4); continue
+        if (w & 0xFFC07FFF) == 0xA8807BFD:
+            prologs.append(text_va + i * 4); continue
+        if (w & 0xFF8003FF) == 0xD10003FF:
+            prologs.append(text_va + i * 4); continue
+    return prologs
+
+
+def nearest_prolog(prologs, addr, max_back=MAX_BACK):
+    idx = bisect.bisect_right(prologs, addr) - 1
+    if idx < 0: return None
+    s = prologs[idx]
+    if addr - s > max_back: return None
+    return s
 
 
 def detect_platform(r2):
     info = cmdj(r2, "ij") or {}
-    if not isinstance(info, dict):
-        return "unknown"
+    if not isinstance(info, dict): return "unknown"
     binfo = info.get("bin") or {}
     core = info.get("core") or {}
-    if not isinstance(binfo, dict): binfo = {}
-    if not isinstance(core, dict): core = {}
     klass = (binfo.get("class") or binfo.get("bclass") or "").lower()
     osname = (core.get("os") or "").lower()
     if "mach" in klass or osname == "darwin":
@@ -80,81 +102,19 @@ def detect_platform(r2):
     return "unknown"
 
 
-def as_dict(m):
-    return m if isinstance(m, dict) else None
+def safe_name(k):
+    return "Possible_" + k.replace(".", "_").replace("-", "_").replace(":", "_")
 
 
-def find_base(r2, platform, name):
-    info = cmdj(r2, "ij") or {}
-    if not isinstance(info, dict):
-        info = {}
-
-    if platform == "ios":
-        for key in ("iMj", "iM", "iij"):
-            mods = cmdj(r2, key)
-            if not isinstance(mods, list):
-                continue
-            for m in mods:
-                d = as_dict(m)
-                if not d:
-                    continue
-                mod_name = d.get("name") or d.get("file") or ""
-                if name in mod_name:
-                    base = d.get("baddr") or d.get("base") or 0
-                    size = d.get("size") or 0
-                    return int(base), int(size)
-    else:
-        mods = cmdj(r2, "iMMj")
-        if isinstance(mods, list):
-            for m in mods:
-                d = as_dict(m)
-                if not d:
-                    continue
-                if name in (d.get("name") or ""):
-                    base = d.get("base") or d.get("baddr") or 0
-                    size = d.get("size") or 0
-                    return int(base), int(size)
-
-    baddr = int(((info.get("bin") or {}) or {}).get("baddr", 0) or 0)
-    return baddr, 0
-
-
-def walk(node):
-    for v in node.values():
-        if isinstance(v, dict):
-            for x in walk(v):
-                yield x
-        elif isinstance(v, int):
-            yield v
-
-
-def dump(node, base, prefix=""):
-    for k in sorted(node.keys()):
-        v = node[k]
-        if isinstance(v, dict):
-            dump(v, base, prefix + k + ".")
-        elif isinstance(v, int):
-            addr = ("0x%x" % (base + v)) if base else "?"
-            log("  %-48s rva=0x%-8x addr=%s" % (prefix + k, v, addr))
-
-
-def write_out(tree, base, platform):
-    count = sum(1 for _ in walk(tree))
+def write_out(results, platform, total):
     try:
         with open(OUT_JS, "w", encoding="utf-8") as fh:
             fh.write("// auto-resolved offsets\n")
             fh.write("// platform=%s\n" % platform)
-            fh.write("// base=0x%x\n" % base)
-            fh.write("// resolved=%d\n\n" % count)
+            fh.write("// resolved=%d/%d\n\n" % (len(results), total))
             fh.write("export const resolved = Object.freeze({\n")
-            def emit(node, prefix=""):
-                for k in sorted(node.keys()):
-                    v = node[k]
-                    if isinstance(v, dict):
-                        emit(v, prefix + k + "_")
-                    elif isinstance(v, int):
-                        fh.write("    %s: 0x%x,\n" % (prefix + k, v))
-            emit(tree)
+            for name, rva in sorted(results.items()):
+                fh.write("    %s: 0x%x,\n" % (name, rva))
             fh.write("});\n")
         log("wrote %s" % OUT_JS)
     except Exception as e:
@@ -163,53 +123,107 @@ def write_out(tree, base, platform):
 
 def main():
     global _fh
-    try:
-        _fh = open(LOG, "w")
-    except Exception:
-        _fh = None
+    try: _fh = open(LOG, "w")
+    except Exception: _fh = None
 
-    log("=== offsets ===")
+    log("=== rename_from_json ===")
+
+    if not os.path.exists(JSON_PATH):
+        log("json not found: %s" % JSON_PATH)
+        write_out({}, "unknown", 0)
+        return
+
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        raw_offsets = json.load(f)
+    log("json entries=%d" % len(raw_offsets))
 
     r2 = r2pipe.open(BIN, flags=["-2"])
     r2.cmd("e scr.color=0")
 
     platform = detect_platform(r2)
-    android_flat = load_android(JSON_PATH)
-    android = nest(android_flat)
+    log("platform=%s" % platform)
 
-    if platform == "ios":
-        tree = IOS
-        modname = "libg.dylib"
-        label = "iOS (libg.dylib)"
-    elif platform == "android":
-        tree = android
-        modname = "libg.so"
-        label = "Android (libg.so)"
-    else:
-        tree = {}
-        modname = ""
-        label = "Unknown"
+    sections = cmdj(r2, "iSj") or []
+    text_va = None; text_sz = 0
+    for s in sections:
+        if not isinstance(s, dict): continue
+        n = (s.get("name") or ""); p = (s.get("perm") or "")
+        if "__text" in n and "x" in p:
+            text_va = int(s.get("vaddr") or 0)
+            text_sz = int(s.get("size") or 0)
+            break
+    if not text_va:
+        log("no __text section")
+        write_out({}, platform, len(raw_offsets))
+        r2.quit(); return
+    log("__text vaddr=0x%x size=%d" % (text_va, text_sz))
 
-    log("platform = %s" % platform)
-    log("module   = %s" % label)
+    t0 = time.time()
+    text = load_bytes(r2, text_va, text_sz)
+    log("loaded __text in %.1fs bytes=%d" % (time.time() - t0, len(text or b"")))
+    if not text:
+        write_out({}, platform, len(raw_offsets))
+        r2.quit(); return
 
-    base, size = find_base(r2, platform, modname) if modname else (0, 0)
-    log("base     = 0x%x size=0x%x" % (base, size))
-    log("entries  = %d" % sum(1 for _ in walk(tree)))
+    t0 = time.time()
+    prologs = scan_prologs(text, text_va)
+    log("prologs=%d in %.1fs" % (len(prologs), time.time() - t0))
 
-    if tree:
-        dump(tree, base)
+    results = {}
+    deltas = []
+    miss = 0
+    invalid = 0
 
-    write_out(tree, base, platform)
+    for name, raw in raw_offsets.items():
+        off = parse_int(raw)
+        if off is None:
+            log("  [INVALID] %-48s raw=%r" % (name, raw))
+            invalid += 1
+            continue
+
+        target = off if off >= text_va else (text_va & ~0xFFFFFFFF) + off
+        if target < text_va or target >= text_va + text_sz:
+            target = text_va + off
+        prolog = nearest_prolog(prologs, target)
+        if prolog is None:
+            log("  [MISS]    %-48s off=0x%x target=0x%x" % (name, off, target))
+            miss += 1
+            continue
+
+        rva = prolog - text_va
+        delta = prolog - target
+        results[name] = rva
+        deltas.append(delta)
+
+        new_name = safe_name(name)
+        cmd(r2, "af @ 0x%x" % prolog)
+        cmd(r2, "afn %s @ 0x%x" % (new_name, prolog))
+
+        tag = "IOS" if platform == "ios" else ("ANDROID" if platform == "android" else "?")
+        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d"
+            % (tag, name, off, rva, delta))
 
     r2.quit()
+
+    log("")
+    log("=== SUMMARY ===")
+    log("total=%d ok=%d miss=%d invalid=%d"
+        % (len(raw_offsets), len(results), miss, invalid))
+    if deltas:
+        log("delta min=%+d max=%+d" % (min(deltas), max(deltas)))
+        from collections import Counter
+        c = Counter(deltas)
+        log("delta top 10:")
+        for d, n in c.most_common(10):
+            log("  %+d : %d" % (d, n))
+
+    write_out(results, platform, len(raw_offsets))
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        import traceback
         log("FATAL %s" % e)
         traceback.print_exc()
         try:
