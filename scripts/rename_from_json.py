@@ -7,12 +7,18 @@ WS = os.environ.get("GITHUB_WORKSPACE", "/tmp")
 BIN = os.environ.get("R2_BIN", "/tmp/brawl_bin")
 JSON_PATH = os.environ.get("OFFSETS_JSON", os.path.join(WS, "offsets.json"))
 OUT_JS = os.path.join(WS, "renamed_offsets.js")
+OUT_JSON = os.path.join(WS, "renamed_offsets.json")
+OUT_REPORT = os.path.join(WS, "r2_rename_report.md")
 LOG = os.path.join(WS, "r2_rename.log")
 START = time.time()
-MAX_BACK = 0x400
-MAX_DELTA = 0x400
+
+MAX_BACK       = 0x8000
+DELTA_HIGH     = 0x100
+DELTA_MEDIUM   = 0x1000
+DELTA_LOW      = 0x8000
 
 _fh = None
+
 
 FIELD_HINTS = (
     "_x", "_y", "_Width", "_Height", "_width", "_height",
@@ -25,7 +31,7 @@ FIELD_HINTS = (
     "_centerX", "_centerY", "_isDragging", "_ipPtr", "_portHi",
     "_portLo", "_screenWidth", "_screenHeight", "_viewMatrix",
     "_manualFireX", "_manualFireY", "_autoFireX", "_autoFireY",
-    "_autoshootPredOff", "_PredOff", "_namePtr"
+    "_autoshootPredOff", "_PredOff"
 )
 
 NON_FUNC_PREFIXES = (
@@ -33,8 +39,9 @@ NON_FUNC_PREFIXES = (
     "TileTypeData_", "BattleMode_object", "BattleMode_client",
     "ObjectManager_", "GameObj_", "CharData_", "Projectile_spawn",
     "Joy_", "ScString_", "ClientInput_x", "ClientInput_y",
-    "Message_port", "Message_ipPtr", "SockAddr_", "ClientInput_Message"
+    "Message_port", "Message_ipPtr", "SockAddr_"
 )
+
 
 def log(m):
     line = "[%7.2f] %s" % (time.time() - START, m)
@@ -48,13 +55,16 @@ def log(m):
         except Exception:
             pass
 
+
 def cmd(r2, c):
     try: return r2.cmd(c)
     except Exception: return ""
 
+
 def cmdj(r2, c):
     try: return r2.cmdj(c)
     except Exception: return None
+
 
 def parse_int(v):
     if isinstance(v, bool): return None
@@ -68,6 +78,19 @@ def parse_int(v):
             return None
     return None
 
+
+def classify(name, off):
+    if name.startswith("VTABLE_"):
+        return "vtable"
+    if name.startswith("StageInstance"):
+        return "global_ptr"
+    if is_field_like(name):
+        return "field"
+    if off < 0x1000 or off > 0x10000000:
+        return "field"
+    return "func"
+
+
 def is_field_like(name):
     for h in FIELD_HINTS:
         if name.endswith(h) or h in name:
@@ -76,6 +99,7 @@ def is_field_like(name):
         if name.startswith(p):
             return True
     return False
+
 
 def load_bytes(r2, va, size):
     chunks = []
@@ -88,6 +112,7 @@ def load_bytes(r2, va, size):
         except Exception: return None
         a += n
     return b"".join(chunks)
+
 
 def scan_prologs(text, text_va):
     prologs = []
@@ -106,12 +131,26 @@ def scan_prologs(text, text_va):
             prologs.append(text_va + i * 4); continue
     return prologs
 
-def nearest_prolog(prologs, addr, max_back=MAX_BACK):
+
+def is_boundary(text, text_va, addr):
+    off = addr - text_va
+    if off < 8: return True
+    if off + 4 > len(text): return False
+    prev = struct.unpack_from("<I", text, off - 4)[0]
+    if prev == 0xD65F03C0: return True
+    if prev == 0xD503201F: return True
+    if prev == 0xD4200000: return True
+    if (prev & 0xFFE0001F) == 0xD6BF03E0: return True
+    return False
+
+
+def nearest_prolog(prologs, text, text_va, addr, max_back=MAX_BACK):
     idx = bisect.bisect_right(prologs, addr) - 1
     if idx < 0: return None
     s = prologs[idx]
     if addr - s > max_back: return None
     return s
+
 
 def detect_platform(r2):
     info = cmdj(r2, "ij") or {}
@@ -120,33 +159,103 @@ def detect_platform(r2):
     core = info.get("core") or {}
     klass = (binfo.get("class") or binfo.get("bclass") or "").lower()
     osname = (core.get("os") or "").lower()
-    if "mach" in klass or osname == "darwin":
-        return "ios"
-    if "elf" in klass or osname == "linux":
-        return "android"
+    if "mach" in klass or osname == "darwin": return "ios"
+    if "elf" in klass or osname == "linux": return "android"
     return "unknown"
+
 
 def safe_name(k):
     return "Possible_" + k.replace(".", "_").replace("-", "_").replace(":", "_")
 
-def write_out(functions, data_offsets, platform, total):
+
+def confidence(delta):
+    a = abs(delta)
+    if a <= DELTA_HIGH:   return "HIGH"
+    if a <= DELTA_MEDIUM: return "MEDIUM"
+    if a <= DELTA_LOW:    return "LOW"
+    return "REJECT"
+
+
+def write_outputs(funcs, data, rejected, platform, total, summary):
     try:
         with open(OUT_JS, "w", encoding="utf-8") as fh:
             fh.write("// auto-resolved offsets\n")
             fh.write("// platform=%s\n" % platform)
             fh.write("// funcs=%d data=%d total=%d\n\n"
-                     % (len(functions), len(data_offsets), total))
+                     % (len(funcs), len(data), total))
             fh.write("export const resolved = Object.freeze({\n")
-            for name in sorted(functions.keys()):
-                fh.write("    %s: 0x%x,\n" % (name, functions[name]))
+            for name in sorted(funcs.keys()):
+                fh.write("    %s: 0x%x,\n" % (name, funcs[name][0]))
             fh.write("});\n\n")
             fh.write("export const data = Object.freeze({\n")
-            for name in sorted(data_offsets.keys()):
-                fh.write("    %s: 0x%x,\n" % (name, data_offsets[name]))
+            for name in sorted(data.keys()):
+                fh.write("    %s: 0x%x,\n" % (name, data[name]))
             fh.write("});\n")
         log("wrote %s" % OUT_JS)
     except Exception as e:
-        log("out write failed: %s" % e)
+        log("js write failed: %s" % e)
+
+    try:
+        payload = {
+            "platform": platform,
+            "total": total,
+            "summary": summary,
+            "funcs": {k: {"rva": v[0], "delta": v[1], "conf": v[2]}
+                      for k, v in funcs.items()},
+            "data": data,
+            "rejected": rejected,
+        }
+        with open(OUT_JSON, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+        log("wrote %s" % OUT_JSON)
+    except Exception as e:
+        log("json write failed: %s" % e)
+
+    try:
+        with open(OUT_REPORT, "w", encoding="utf-8") as fh:
+            fh.write("# Offset resolution report\n\n")
+            fh.write("platform: **%s**  \n" % platform)
+            fh.write("input entries: **%d**  \n" % total)
+            fh.write("funcs: **%d**  \n" % len(funcs))
+            fh.write("data: **%d**  \n\n" % len(data))
+
+            fh.write("## Summary\n\n")
+            for k, v in sorted(summary.items()):
+                fh.write("- %s: %s\n" % (k, v))
+            fh.write("\n")
+
+            by_conf = defaultdict(list)
+            for name, (rva, d, conf) in funcs.items():
+                by_conf[conf].append((name, rva, d))
+
+            for conf in ("HIGH", "MEDIUM", "LOW"):
+                items = by_conf.get(conf, [])
+                if not items:
+                    continue
+                fh.write("## %s confidence (%d)\n\n" % (conf, len(items)))
+                fh.write("| name | rva | delta |\n|---|---|---|\n")
+                for name, rva, d in sorted(items, key=lambda x: abs(x[2])):
+                    fh.write("| %s | 0x%x | %+d |\n" % (name, rva, d))
+                fh.write("\n")
+
+            if rejected:
+                fh.write("## Rejected (%d)\n\n" % len(rejected))
+                fh.write("| name | input | reason |\n|---|---|---|\n")
+                for r in rejected:
+                    fh.write("| %s | 0x%x | %s |\n" % (r["name"], r["off"], r["reason"]))
+                fh.write("\n")
+
+            if data:
+                fh.write("## Data offsets (%d)\n\n" % len(data))
+                fh.write("| name | value |\n|---|---|\n")
+                for name in sorted(data.keys()):
+                    fh.write("| %s | 0x%x |\n" % (name, data[name]))
+                fh.write("\n")
+
+        log("wrote %s" % OUT_REPORT)
+    except Exception as e:
+        log("report write failed: %s" % e)
+
 
 def main():
     global _fh
@@ -157,7 +266,7 @@ def main():
 
     if not os.path.exists(JSON_PATH):
         log("json not found: %s" % JSON_PATH)
-        write_out({}, {}, "unknown", 0)
+        write_outputs({}, {}, [], "unknown", 0, {"error": "json missing"})
         return
 
     with open(JSON_PATH, "r", encoding="utf-8") as f:
@@ -170,6 +279,10 @@ def main():
     platform = detect_platform(r2)
     log("platform=%s" % platform)
 
+    info = cmdj(r2, "ij") or {}
+    base = int((info.get("bin") or {}).get("baddr", 0) or 0x100000000)
+    log("base=0x%x" % base)
+
     sections = cmdj(r2, "iSj") or []
     text_va = None; text_sz = 0
     for s in sections:
@@ -181,8 +294,9 @@ def main():
             break
     if not text_va:
         log("no __text section")
-        write_out({}, {}, platform, len(raw))
+        write_outputs({}, {}, [], platform, len(raw), {"error": "no __text"})
         r2.quit(); return
+
     log("__text vaddr=0x%x size=0x%x end=0x%x"
         % (text_va, text_sz, text_va + text_sz))
 
@@ -190,7 +304,7 @@ def main():
     text = load_bytes(r2, text_va, text_sz)
     log("loaded __text in %.1fs bytes=%d" % (time.time() - t0, len(text or b"")))
     if not text:
-        write_out({}, {}, platform, len(raw))
+        write_outputs({}, {}, [], platform, len(raw), {"error": "text load failed"})
         r2.quit(); return
 
     t0 = time.time()
@@ -201,112 +315,118 @@ def main():
 
     candidates = {}
     data_offsets = {}
-    skipped_field = 0
-    skipped_nontext = 0
-    skipped_delta = 0
-    skipped_prolog = 0
-    invalid = 0
+    rejected = []
+    stats = Counter()
 
     for name, val in raw.items():
         off = parse_int(val)
         if off is None:
-            log("  [INVALID] %-48s raw=%r" % (name, val))
-            invalid += 1
+            rejected.append({"name": name, "off": 0, "reason": "invalid value"})
+            stats["invalid"] += 1
             continue
 
-        if is_field_like(name):
+        cat = classify(name, off)
+
+        if cat in ("field", "vtable", "global_ptr"):
             data_offsets[name] = off
-            skipped_field += 1
-            log("  [DATA]    %-48s = 0x%x" % (name, off))
+            stats["data_" + cat] += 1
             continue
 
-        if off < 0x1000 or off > 0x10000000:
-            data_offsets[name] = off
-            skipped_field += 1
-            log("  [DATA]    %-48s = 0x%x (small/invalid RVA)" % (name, off))
-            continue
-
-        if off >= text_sz and off < text_va:
-            data_offsets[name] = off
-            skipped_nontext += 1
-            log("  [ABS]     %-48s = 0x%x (outside __text)" % (name, off))
-            continue
-
-        target = text_va + off
+        target = base + off
         if target < text_va or target >= text_end:
             data_offsets[name] = off
-            skipped_nontext += 1
-            log("  [ABS]     %-48s = 0x%x (target 0x%x outside __text)"
-                % (name, off, target))
+            stats["abs_outside_text"] += 1
+            rejected.append({"name": name, "off": off,
+                             "reason": "target outside __text"})
             continue
 
-        prolog = nearest_prolog(prologs, target)
+        prolog = nearest_prolog(prologs, text, text_va, target)
         if prolog is None:
-            log("  [NOPROLOG] %-47s off=0x%x target=0x%x"
-                % (name, off, target))
-            skipped_prolog += 1
+            stats["no_prolog"] += 1
+            rejected.append({"name": name, "off": off,
+                             "reason": "no prolog within 0x%x back" % MAX_BACK})
             continue
 
         delta = prolog - target
-        if abs(delta) > MAX_DELTA:
-            log("  [FARDELTA] %-47s off=0x%x prolog=0x%x delta=%+d"
-                % (name, off, prolog - text_va, delta))
-            skipped_delta += 1
+        conf = confidence(delta)
+        if conf == "REJECT":
+            stats["delta_reject"] += 1
+            rejected.append({"name": name, "off": off,
+                             "reason": "delta=%+d exceeds 0x%x" % (delta, DELTA_LOW)})
             continue
 
-        rva = prolog - text_va
+        boundary = is_boundary(text, text_va, prolog)
+
+        rva = prolog - base
         prev = candidates.get(name)
         if prev is None or abs(delta) < abs(prev[1]):
-            candidates[name] = (rva, delta)
+            candidates[name] = (rva, delta, conf, boundary)
+        stats["resolved"] += 1
+
+        tag = platform.upper()
+        warn = "" if boundary else " !BOUNDARY"
+        log("  [OK] [%s] %-40s src=0x%-8x dst=0x%-8x delta=%+d %s%s"
+            % (tag, name, off, rva, delta, conf, warn))
 
     log("")
     log("=== DEDUP ===")
     by_addr = defaultdict(list)
-    for name, (rva, delta) in candidates.items():
-        by_addr[rva].append((name, delta))
+    for name, (rva, delta, conf, boundary) in candidates.items():
+        by_addr[rva].append((name, delta, conf, boundary))
 
     funcs = {}
     dup_count = 0
     for rva, items in by_addr.items():
-        if len(items) == 1:
-            funcs[items[0][0]] = rva
-            continue
         items.sort(key=lambda x: abs(x[1]))
         best = items[0]
-        funcs[best[0]] = rva
-        dup_count += len(items) - 1
-        for name, delta in items[1:]:
-            log("  [DUP] %s -> %s (addr=0x%x)" % (name, best[0], rva))
+        funcs[best[0]] = (rva, best[1], best[2])
+        if len(items) > 1:
+            dup_count += len(items) - 1
+            for name, delta, conf, boundary in items[1:]:
+                log("  [DUP] %s -> %s (rva=0x%x, delta=%+d)"
+                    % (name, best[0], rva, delta))
 
-    for name, rva in funcs.items():
-        prolog = text_va + rva
-        new_name = safe_name(name)
+    log("")
+    log("=== R2 rename ===")
+    for name, (rva, delta, conf) in funcs.items():
+        prolog = base + rva
         cmd(r2, "af @ 0x%x" % prolog)
-        cmd(r2, "afn %s @ 0x%x" % (new_name, prolog))
+        cmd(r2, "afn %s @ 0x%x" % (safe_name(name), prolog))
 
     r2.quit()
 
+    conf_counts = Counter(v[2] for v in funcs.values())
+    boundary_warn = sum(1 for v in funcs.values() if not v[3] and len(candidates)>0)
+
+    summary = {
+        "input": len(raw),
+        "funcs": len(funcs),
+        "data": len(data_offsets),
+        "rejected": len(rejected),
+        "dup_collapsed": dup_count,
+        "confidence": dict(conf_counts),
+        "no_prolog": stats.get("no_prolog", 0),
+        "delta_reject": stats.get("delta_reject", 0),
+        "abs_outside_text": stats.get("abs_outside_text", 0),
+        "non_boundary_prologs": boundary_warn,
+    }
+
     log("")
     log("=== SUMMARY ===")
-    log("input=%d" % len(raw))
-    log("  funcs resolved   = %d" % len(funcs))
-    log("  data offsets     = %d" % len(data_offsets))
-    log("  skipped (field)  = %d" % skipped_field)
-    log("  skipped (nontext)= %d" % skipped_nontext)
-    log("  skipped (prolog) = %d" % skipped_prolog)
-    log("  skipped (delta)  = %d" % skipped_delta)
-    log("  invalid          = %d" % invalid)
-    log("  dup collapsed    = %d" % dup_count)
+    for k, v in summary.items():
+        log("  %-22s = %s" % (k, v))
 
-    if funcs:
-        deltas = [abs(d) for _, d in candidates.values()]
-        log("delta abs min=%d max=%d" % (min(deltas), max(deltas)))
-        top = Counter([d for _, d in candidates.values()])
+    if candidates:
+        deltas = [d for _, (_, d, _, _) in candidates.items()]
+        log("delta abs min=%d max=%d"
+            % (min(abs(d) for d in deltas), max(abs(d) for d in deltas)))
+        top = Counter(deltas)
         log("delta top 10:")
         for d, n in top.most_common(10):
             log("  %+d : %d" % (d, n))
 
-    write_out(funcs, data_offsets, platform, len(raw))
+    write_outputs(funcs, data_offsets, rejected, platform, len(raw), summary)
+
 
 if __name__ == "__main__":
     try:
@@ -315,11 +435,7 @@ if __name__ == "__main__":
         log("FATAL %s" % e)
         traceback.print_exc()
         try:
-            with open(OUT_JS, "w", encoding="utf-8") as fh:
-                fh.write("// auto-resolved offsets\n")
-                fh.write("// failed\n")
-                fh.write("export const resolved = Object.freeze({});\n")
-                fh.write("export const data = Object.freeze({});\n")
+            write_outputs({}, {}, [], "unknown", 0, {"fatal": str(e)})
         except Exception:
             pass
         sys.exit(0)
