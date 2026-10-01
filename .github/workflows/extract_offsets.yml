@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - scripts/find_offsets_r2.py
+      - scripts/rename_json_from.py
       - offsets.js
       - .github/workflows/extract_offsets.yml
   workflow_dispatch:
@@ -126,9 +127,8 @@ jobs:
       - name: Install helper tools
         run: |
           set -e
-          command -v unzip >/dev/null 2>&1 || sudo apt-get install -y unzip
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential git curl pkg-config
+          sudo apt-get install -y -qq build-essential git curl pkg-config unzip
 
       - uses: actions/cache@v4
         id: cache-r2
@@ -155,13 +155,8 @@ jobs:
           make install
           mkdir -p "$GITHUB_WORKSPACE/r2_build"
           cp -aL /tmp/r2-install/. "$GITHUB_WORKSPACE/r2_build/"
-          ls -la "$GITHUB_WORKSPACE/r2_build/bin/" > /tmp/r2_bins.txt || true
-          head -20 /tmp/r2_bins.txt || true
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           "$GITHUB_WORKSPACE/r2_build/bin/r2" -v
-          find "$GITHUB_WORKSPACE/r2_build/lib" -maxdepth 2 -name "libr_*.so*" > /tmp/r2_libs.txt || true
-          head -20 /tmp/r2_libs.txt || true
-          true
 
       - name: Setup radare2 PATH
         run: |
@@ -212,12 +207,30 @@ jobs:
           export LD_LIBRARY_PATH="$GITHUB_WORKSPACE/r2_build/lib:$GITHUB_WORKSPACE/r2_build/lib64:${LD_LIBRARY_PATH:-}"
           which r2
           r2 -v
-          ls -la "$GITHUB_WORKSPACE/r2_build/lib" > /tmp/r2_libs_verify.txt || true
-          head -20 /tmp/r2_libs_verify.txt || true
           r2 -N -q -c 'q' "$GITHUB_WORKSPACE/r2_session/brawl_bin"
           echo "r2 on binary: ok"
 
-      - name: Run find_offsets_r2
+      - name: Download offsets.json
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://cdn.jsdelivr.net/gh/kujounOfficial/bsre-ghirda-tools@main/offsets.json" \
+            -o "$GITHUB_WORKSPACE/offsets.json"
+          test -s "$GITHUB_WORKSPACE/offsets.json"
+          python3 -c "import json;d=json.load(open('offsets.json'));print('entries:',len(d))"
+
+      - name: Run rename_json_from
+        env:
+          R2_BIN: ${{ github.workspace }}/r2_session/brawl_bin
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          OFFSETS_JSON: ${{ github.workspace }}/offsets.json
+          LD_LIBRARY_PATH: ${{ github.workspace }}/r2_build/lib:${{ github.workspace }}/r2_build/lib64
+        run: |
+          set -euo pipefail
+          test -f scripts/rename_json_from.py || { echo "scripts/rename_json_from.py not found"; ls -la scripts/; exit 1; }
+          python scripts/rename_json_from.py 2>&1 | tee r2_rename.log | tail -160 || true
+
+      - name: Run find_offsets_r2 (optional)
+        if: hashFiles('scripts/find_offsets_r2.py') != ''
         env:
           R2_BIN: ${{ github.workspace }}/r2_session/brawl_bin
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -230,27 +243,40 @@ jobs:
         run: |
           set +e
           set -uo pipefail
-          if [ ! -s offsets_resolved.js ]; then
-            echo "offsets_resolved.js missing or empty"
-            tail -300 r2.log 2>/dev/null || true
-            exit 1
+          ok=1
+          if [ ! -s renamed_offsets.js ]; then
+            echo "renamed_offsets.js missing or empty"
+            tail -300 r2_rename.log 2>/dev/null || true
+            ok=0
+          else
+            echo "renamed_offsets.js lines: $(wc -l < renamed_offsets.js)"
           fi
-          echo "offsets_resolved.js lines: $(wc -l < offsets_resolved.js)"
+          if [ -s offsets_resolved.js ]; then
+            echo "offsets_resolved.js lines: $(wc -l < offsets_resolved.js)"
+          else
+            echo "offsets_resolved.js not present (optional)"
+          fi
+          exit $((1 - ok))
 
       - name: Report
         if: always()
         run: |
+          echo "=== r2_rename.log tail ==="
+          tail -300 r2_rename.log 2>/dev/null || true
+          echo "=== renamed_offsets.js head ==="
+          head -40 renamed_offsets.js 2>/dev/null || true
           echo "=== r2.log tail ==="
-          tail -300 r2.log 2>/dev/null || true
-          echo "=== offsets_report.txt ==="
-          cat offsets_report.txt 2>/dev/null || true
+          tail -100 r2.log 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: brawl-offsets
           path: |
+            renamed_offsets.js
+            r2_rename.log
             offsets_resolved.js
-            offsets_report.txt
             r2.log
+            offsets.json
           retention-days: 30
+          if-no-files-found: warn
