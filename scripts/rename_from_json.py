@@ -105,74 +105,110 @@ def confidence(delta):
     if a <= MAX_DELTA: return "LOW"
     return "REJECT"
 
-def read_uleb(data, off):
-    result = 0
-    shift = 0
-    while True:
-        if off >= len(data): return None, off
-        b = data[off]; off += 1
-        result |= (b & 0x7f) << shift
-        if not (b & 0x80): return result, off
-        shift += 7
-        if shift > 63: return None, off
-
-def parse_function_starts(r2, base):
+def parse_macho_function_starts(bin_path):
     try:
-        hdr = cmdj(r2, "iHj")
-    except Exception:
-        hdr = None
+        with open(bin_path, "rb") as f:
+            data = f.read()
+    except Exception as e:
+        log("open binary failed: %s" % e)
+        return None, None
 
-    lcfs = cmdj(r2, "iLj")
-    starts_off = None
-    if isinstance(lcfs, list):
-        for lc in lcfs:
-            if not isinstance(lc, dict): continue
-            typ = (lc.get("type") or "").upper()
-            if "FUNCTION_STARTS" in typ or "LC_FUNCTION_STARTS" in typ:
-                starts_off = int(lc.get("offset") or lc.get("paddr") or 0)
-                starts_sz = int(lc.get("size") or 0)
-                break
+    if len(data) < 32:
+        return None, None
 
-    if starts_off is None:
-        info = cmdj(r2, "ij") or {}
-        for k in ("linkedit", "functions"):
-            if k in info:
-                pass
+    magic = struct.unpack_from("<I", data, 0)[0]
+    if magic != 0xFEEDFACF:
+        magic_be = struct.unpack_from(">I", data, 0)[0]
+        if magic_be == 0xFEEDFACF:
+            return None, None
+        log("not MH_MAGIC_64 (magic=0x%x)" % magic)
+        return None, None
 
-    if starts_off is None:
-        return []
+    is_64 = True
+    header_size = 32
+    ncmds = struct.unpack_from("<I", data, 16)[0]
+    sizeofcmds = struct.unpack_from("<I", data, 20)[0]
 
-    log("LC_FUNCTION_STARTS paddr=0x%x size=0x%x" % (starts_off, starts_sz))
-    raw = cmd(r2, "p8 %d @ 0x%x" % (starts_sz, starts_off)).strip()
-    if not raw:
-        return []
-    try:
-        data = bytes.fromhex(raw)
-    except Exception:
-        return []
+    offset = header_size
+    text_vmaddr = None
+    linkedit_seg = None
+    func_starts = None
+    segments = []
 
-    text_va = None
-    sections = cmdj(r2, "iSj") or []
-    for s in sections:
-        if not isinstance(s, dict): continue
-        if "__text" in (s.get("name") or "") and "x" in (s.get("perm") or ""):
-            text_va = int(s.get("vaddr") or 0)
-            break
-    if not text_va:
-        return []
+    for _ in range(ncmds):
+        if offset + 8 > len(data): break
+        cmd_id, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmdsize < 8: break
+
+        if cmd_id == 0x19:
+            if offset + 72 > len(data): break
+            segname = data[offset + 8:offset + 24].rstrip(b"\x00").decode("utf-8", "ignore")
+            vmaddr = struct.unpack_from("<Q", data, offset + 24)[0]
+            vmsize = struct.unpack_from("<Q", data, offset + 32)[0]
+            fileoff = struct.unpack_from("<Q", data, offset + 40)[0]
+            filesize = struct.unpack_from("<Q", data, offset + 48)[0]
+            initprot = struct.unpack_from("<I", data, offset + 60)[0]
+            seg = {
+                "name": segname, "vmaddr": vmaddr, "vmsize": vmsize,
+                "fileoff": fileoff, "filesize": filesize, "initprot": initprot,
+            }
+            segments.append(seg)
+            if segname == "__TEXT":
+                text_vmaddr = vmaddr
+            elif segname == "__LINKEDIT":
+                linkedit_seg = seg
+
+        elif cmd_id == 0x26:
+            if offset + 16 > len(data): break
+            dataoff = struct.unpack_from("<I", data, offset + 8)[0]
+            datasize = struct.unpack_from("<I", data, offset + 12)[0]
+            func_starts = {"dataoff": dataoff, "datasize": datasize}
+
+        offset += cmdsize
+
+    if not func_starts or not linkedit_seg or text_vmaddr is None:
+        log("missing LC_FUNCTION_STARTS or __TEXT or __LINKEDIT")
+        return None, None
+
+    lk = linkedit_seg
+    fs_off = func_starts["dataoff"]
+    fs_sz = func_starts["datasize"]
+
+    if fs_off < lk["fileoff"] or fs_off >= lk["fileoff"] + lk["filesize"]:
+        log("LC_FUNCTION_STARTS offset outside __LINKEDIT")
+        return None, None
+
+    delta_in_lk = fs_off - lk["fileoff"]
+    fs_vmaddr = lk["vmaddr"] + delta_in_lk
+
+    if fs_off + fs_sz > len(data):
+        fs_sz = len(data) - fs_off
+
+    raw = data[fs_off:fs_off + fs_sz]
+    log("LC_FUNCTION_STARTS paddr=0x%x vmaddr=0x%x size=0x%x" % (fs_off, fs_vmaddr, fs_sz))
 
     addrs = []
-    off = 0
+    i = 0
     cur = 0
-    while off < len(data):
-        delta, off = read_uleb(data, off)
-        if delta is None: break
-        if delta == 0: break
-        cur += delta
-        addrs.append(text_va + cur)
+    while i < len(raw):
+        result = 0
+        shift = 0
+        while i < len(raw):
+            b = raw[i]; i += 1
+            result |= (b & 0x7f) << shift
+            if not (b & 0x80):
+                break
+            shift += 7
+            if shift > 63:
+                break
+        if result == 0:
+            break
+        cur += result
+        addrs.append(text_vmaddr + cur)
 
+    addrs = sorted(set(addrs))
     log("parsed %d function starts" % len(addrs))
-    return sorted(addrs)
+    return addrs, text_vmaddr
 
 def find_nearest(addrs, target):
     idx = bisect.bisect_right(addrs, target) - 1
@@ -300,28 +336,10 @@ def main():
     log("__text vaddr=0x%x size=0x%x end=0x%x" % (text_va, text_sz, text_va + text_sz))
 
     t0 = time.time()
-    prologs = parse_function_starts(r2, base)
-    log("function starts: %d in %.1fs" % (len(prologs), time.time() - t0))
-
+    prologs, text_vmaddr = parse_macho_function_starts(BIN)
+    log("function starts parse in %.1fs" % (time.time() - t0))
     if not prologs:
-        log("LC_FUNCTION_STARTS empty, falling back to pattern scan")
-        text_data = cmd(r2, "p8 %d @ 0x%x" % (min(text_sz, 0x100000), text_va))
-        if text_data:
-            try:
-                blob = bytes.fromhex(text_data.strip())
-                for i in range(0, len(blob) - 4, 4):
-                    w = struct.unpack_from("<I", blob, i)[0]
-                    if w in (0xD503237F, 0xD503233F, 0xD503245F, 0xD503249F):
-                        prologs.append(text_va + i)
-                    elif (w & 0xFFC07FFF) == 0xA9807BFD:
-                        prologs.append(text_va + i)
-                prologs.sort()
-                log("fallback pattern scan: %d prologs (first 1MB only)" % len(prologs))
-            except Exception as e:
-                log("fallback failed: %s" % e)
-
-    if not prologs:
-        log("no prologs, aborting")
+        log("no prologs from LC_FUNCTION_STARTS, aborting")
         r2.quit(); return
 
     text_end = text_va + text_sz
@@ -400,6 +418,7 @@ def main():
         "input": len(raw), "funcs": len(funcs), "data": len(data_offsets),
         "rejected": len(rejected), "dup_collapsed": dup_count,
         "confidence": dict(conf_counts),
+        "prologs_total": len(prologs),
         "no_func": stats.get("no_func", 0),
         "delta_reject": stats.get("delta_reject", 0),
         "abs_outside_text": stats.get("abs_outside_text", 0),
